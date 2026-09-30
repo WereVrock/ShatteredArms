@@ -1,0 +1,115 @@
+!id campaign-routing-extraction
+Routers that flee past the map edge during battle are REMOVED from the field
+and RECORDED as extracted. This is the mechanism by which routed soldiers
+survive a lost battle instead of being annihilated in place.
+
+On extraction:
+  - The soldier's state becomes 'extracted' (treated as dead for the
+    purpose of isAlive checks — skips targeting, movement, and combat
+    resolution entirely, same as 'dead' but distinguishable).
+  - The soldier's id and unitId are appended to the battle's extraction
+    record.
+  - Extracted soldiers do not count toward isBattleOver winner
+    determination (already true, since isDefeated() reads alive count).
+
+Post-battle (campaign layer, NOT sim):
+  - Every extracted enemy unit has a 60% chance to appear in the next battle as
+    a depleted replacement of itself.
+  - On that 40% roll succeeding, the unit additionally has a 50% chance
+    to lose 20-30% of its current soldier count. The exact loss percentage
+    is rolled uniformly in [20, 30] per surviving unit, not globally.
+  - Failing the 60% roll: the unit is gone permanently.
+
+Rationale: matches the classic Total War campaign loop where a defeated
+army that routs off the field can be re-engaged later, but at reduced
+strength. Wiping a routed army in place removes the strategic tension
+between "finish the kill now" and "preserve your own units".
+
+Open questions to be resolved when the campaign layer is built:
+  - Map bounds source. The sim currently has no map extent config. Needs
+    either a MapConfig.js, a field in CampaignConfig, or a per-scenario
+    bounds declaration — see the CAMPAIGN_BOUNDS comment on the sim side.
+  - Extraction record storage. Either a field on BattleSimulation or a
+    caller-provided object that persists across battles. Not yet decided.
+
+!id campaign-unit-experience
+Surviving units accumulate experience during battle and can be promoted
+to higher rank tiers between battles.
+
+Experience accrual (per battle):
+  - A unit gains experience per tick it has at least one soldier in
+    melee (state 'engaged' or 'staggered').
+  - A unit gains experience per tick it has at least one soldier under
+    ranged attack (i.e., being shot at, regardless of whether the arrow
+    lands).
+  - No experience is awarded for routing, standing idle, or remaining
+    fully behind the lines.
+
+Rank tiers: rank is a discrete tier on the unit (not per-soldier).
+Crossing a threshold moves the unit one tier up. Exact thresholds and
+tier names live in CampaignConfig, not in this protocol.
+
+Rank effects (design intent — exact numbers in CampaignConfig):
+  - Higher-rank units get a to-hit bonus, a block-chance bonus, or both.
+  - Higher-rank units may carry over a small HP bonus or morale bonus
+    into the next battle.
+  - Rank is preserved across battles and is not lost on rout, only on
+    unit dissolution.
+
+Rationale: gives the player a reason to preserve veteran units across
+battles, and makes a routed-but-survived unit worthwhile to rebuild
+rather than discard. The "attacked" trigger also rewards units that
+soaked fire for the line even if they dealt no damage.
+
+Open questions to be resolved when the campaign layer is built:
+  - Where the rank field lives: on the Unit (ephemeral per battle) or on
+    the campaign roster entry (persistent). Almost certainly the roster
+    entry, with the sim reading a rank multiplier passed in at scenario
+    build time.
+  - Whether the to-hit/block bonuses apply via CombatConfig multiplier
+    keys (e.g. 'rank1'), or via a per-soldier stat adjustment at build
+    time. Former is cleaner.
+
+!id player-units-routing
+IF players unit leave the map due to rout in campaign. It returns the next battle (provided, player wins the current battle). this has no randomness or chance component. the unit is considered as survived and treated as the rest of the surviving units.
+
+!id campaign-shatter-and-pursuit
+Two rout-related rules that shape how a battle ends and how routed or
+shattered units carry into the next battle.
+
+AUTO-SHATTER ON TOTAL ROUT:
+If every living unit on a team is routing at the same moment, all of that
+team's routing soldiers shatter instantly. This makes total army collapse
+irreversible and ends the battle rather than letting it drag while
+runners flee.
+
+BATTLE-END VIA SHATTER:
+A team is defeated when every living soldier on it is either dead or in
+the 'shattered' state. Shattered soldiers still on the field at battle end
+are auto-extracted and included in the extraction record, indistinguishable
+from routing escapees.
+
+PLAYER PURSUIT PROMPT:
+When the player's team is about to win, and enemy soldiers remain in
+'routing' or 'shattered' state, the player is prompted before the battle
+resolves:
+  - PURSUE: battle continues. All routing and shattered enemies must be
+    either killed or extracted before the battle ends. No extraction
+    record is written for soldiers killed during pursuit.
+  - LET THEM FLEE: battle ends immediately. All remaining routing or
+    shattered enemies auto-extract into the extraction record.
+
+
+POST-BATTLE RETURN:
+Units whose soldiers extracted — whether they were routing or shattered
+when they left the field — are eligible to return in the next battle.
+Per-unit roll: 40% chance to return; on a return, 50% chance to lose
+20-30% of the soldiers who escaped. The minimum-strength floor
+(enemy 20% / player 10% of deployed count) is evaluated at extraction
+time and, if the unit falls below it, the unit is removed regardless of
+the return roll.
+
+Note: 'shattered' is a sim-side state only. The extraction record does
+not distinguish shattered from routed escapees, and the campaign layer
+treats both identically.
+

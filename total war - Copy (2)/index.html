@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Battle Prototype</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+<div id="topBar">
+  <button id="hudToggle" title="Toggle info panel">☰ Info</button>
+  <button id="restartButton" title="Restart battle">↻ Restart</button>
+  <button id="menuButton" title="Back to main menu">⌂ Menu</button>
+</div>
+<div id="mainMenu" class="hidden"></div>
+<div id="hud" class="hidden"></div>
+<div id="pauseIndicator" class="hidden">PAUSED</div>
+<div id="commandBar"></div>
+<div id="armyBar"></div>
+<canvas id="renderCanvas"></canvas>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Headless Test Scenarios</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="src/headless/headless.css">
+</head>
+<body>
+<h1>Headless Test Scenarios</h1>
+
+<div id="controls">
+  <label>
+    <input type="checkbox" id="verboseLog"> Verbose AIDebugLog
+  </label>
+  <label>
+    Max ticks: <input type="number" id="maxTicksOverride" placeholder="scenario default" min="1" step="10">
+  </label>
+  <label>
+    Snapshot every: <input type="number" id="snapshotOverride" value="60" min="1" step="5"> ticks
+  </label>
+  <label>
+    <input type="checkbox" id="stopOnError"> Stop consecutive run on error
+  </label>
+  <label>
+    Log panel refresh: <input type="number" id="uiLogInterval" value="2" min="1" step="1"> s
+  </label>
+</div>
+
+<div id="selectionBar">
+  <button type="button" id="runSelected" disabled>Run Selected (0)</button>
+  <button type="button" id="selectAll">Select All</button>
+  <button type="button" id="clearSelection">Clear Selection</button>
+  <button type="button" id="terminateRun" disabled>Terminate</button>
+  <span id="savedHint"></span>
+</div>
+
+<div id="scenarios"></div>
+
+<div id="logPanel">
+  <div id="logPanelBar">
+    <span class="logTitle">Run Log</span>
+    <span class="logSpacer"></span>
+    <button type="button" id="logReset">Reset</button>
+    <button type="button" id="logCopy">Copy</button>
+  </div>
+  <pre id="logOutput"></pre>
+</div>
+
+<div id="status">Ready. Click a scenario name to toggle its selection, or the ▶ to run it solo. Selection is saved across reloads.</div>
+
+<script type="module" src="src/headless/headlessMain.js"></script>
+</body>
+</html>
