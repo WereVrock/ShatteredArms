@@ -1,0 +1,684 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #1a1a1a;
+  height: 100%;
+}
+
+#renderCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#topBar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+}
+
+#topBar button {
+  background: rgba(0, 0, 0, 0.6);
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-family: monospace;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#topBar button:hover {
+  background: rgba(0, 0, 0, 0.85);
+  border-color: #888;
+}
+
+#hud {
+  position: absolute;
+  top: 42px;
+  left: 8px;
+  color: #eee;
+  font-family: monospace;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 6px 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+  white-space: pre;
+}
+
+#hud.hidden {
+  display: none;
+}
+
+#pauseIndicator {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #fff;
+  font-family: monospace;
+  font-size: 22px;
+  font-weight: bold;
+  letter-spacing: 6px;
+  text-shadow: 0 0 8px #000;
+  pointer-events: none;
+  z-index: 15;
+}
+
+#pauseIndicator.hidden {
+  display: none;
+}
+
+#mainMenu {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(8, 10, 14, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: monospace;
+  color: #eee;
+}
+
+#mainMenu.hidden {
+  display: none;
+}
+
+.menu-panel {
+  max-width: 720px;
+  width: 90%;
+  text-align: center;
+}
+
+.menu-title {
+  font-size: 28px;
+  letter-spacing: 2px;
+  margin: 0 0 4px;
+  color: #f0e8d0;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.8);
+}
+
+.menu-subtitle {
+  font-size: 13px;
+  color: #99a;
+  margin: 0 0 28px;
+  letter-spacing: 1px;
+}
+
+/* ===== Main menu brand header =====
+   The top-level menu gets a brand mark (broken sword over a shattered
+   shield) above an oversized title, then a decorative rule separating the
+   header from the mode cards. Scoped to .main-menu-panel so none of this
+   bleeds into ScenarioMenu or CardPickerView, which share .menu-panel and
+   .menu-title. */
+
+.main-menu-panel {
+  max-width: 560px;
+  /* Header + divider + three cards + Settings can exceed a short viewport;
+     scroll rather than clip. The card list itself has no scroll — this is
+     the whole panel's safety net. */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+
+.menu-brand {
+  width: 240px;
+  height: 140px;
+  margin: 0 auto 6px;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.55));
+}
+
+.menu-brand svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.menu-brand-title {
+  font-size: 44px;
+  letter-spacing: 12px;
+  color: #ecd9b4;
+  text-shadow:
+    0 0 24px rgba(212, 165, 116, 0.35),
+    0 0 8px rgba(212, 165, 116, 0.18),
+    0 2px 0 rgba(0, 0, 0, 0.85);
+  margin: 0 0 6px;
+  /* letter-spacing pads the right of the final letter; the padding-left
+     compensation re-centers the title under the brand mark. */
+  padding-left: 12px;
+}
+
+.menu-brand-subtitle {
+  font-size: 12px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: #8a9aad;
+  margin: 0;
+}
+
+.menu-divider {
+  position: relative;
+  width: 200px;
+  height: 1px;
+  margin: 22px auto 28px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    #4a5568 30%,
+    #4a5568 70%,
+    transparent 100%);
+}
+
+/* Small diamond ornament at the center of the divider line. */
+.menu-divider::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  background: #4a5568;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.menu-card {
+  text-align: left;
+  padding: 14px 18px;
+  background: #1e2430;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #eee;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.06s;
+}
+
+.menu-card:hover {
+  background: #26354a;
+  border-color: #6a8ac0;
+}
+
+.menu-card:active {
+  transform: translateY(1px);
+}
+
+.menu-card-name {
+  font-size: 15px;
+  font-weight: bold;
+  color: #d8e6ff;
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+
+.menu-card-desc {
+  font-size: 12px;
+  color: #99a;
+  line-height: 1.4;
+}
+
+/* ===== Army bar =====
+   Bottom-of-screen strip of player-team unit cards. The container itself
+   stays pointer-events: none so it never blocks canvas clicks — only the
+   cards themselves (which are clickable to select) opt into pointer events. */
+
+#armyBar {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: calc(100vw - 24px);
+  pointer-events: none;
+  font-family: monospace;
+  user-select: none;
+}
+
+.army-card {
+  position: relative;
+  width: 60px;
+  padding: 6px 4px 5px;
+  background: rgba(0, 0, 0, 0.68);
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #ddd;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s, box-shadow 0.1s, transform 0.06s;
+}
+
+.army-card:hover {
+  border-color: #8aa;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.army-card:active {
+  transform: translateY(1px);
+}
+
+/* Team colour coding — team id from Unit.teamId. Enemy cards are filtered
+   out in ArmyBarView.update() by default, so .team-red normally won't
+   appear; the rule is kept so the bar is symmetric if that changes. */
+.army-card.team-blue {
+  border-color: #3d6b99;
+  background: rgba(14, 24, 40, 0.75);
+}
+.army-card.team-red {
+  border-color: #993d3d;
+  background: rgba(40, 14, 14, 0.75);
+}
+
+.army-card.selected {
+  border-color: #f0e8d0;
+  box-shadow: 0 0 6px rgba(240, 232, 208, 0.85);
+}
+
+.army-card.dead {
+  opacity: 0.35;
+}
+
+/* Top-left corner: white flag + routing soldier count. Hidden by default,
+   shown only when the unit has at least one routing soldier. */
+.army-card-flag {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 11px;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 0 0 2px #000, 1px 1px 0 #000;
+  display: none;
+}
+
+.army-card.routing .army-card-flag {
+  display: block;
+}
+
+/* Top-right corner: current activity glyph. */
+.army-card-icon {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 11px;
+  color: #ffd86b;
+  text-shadow: 0 0 2px #000;
+}
+
+/* Centre: rendered unit-model thumbnail, transparent PNG on the card's own
+   background. The container reserves the box even when the capture produced
+   no image (unknown unit type, capture failure) so the card layout does not
+   jump. */
+.army-card-image {
+  width: 48px;
+  height: 48px;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.army-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  pointer-events: none;
+}
+
+/* Inline SVG icon: sized to fill the container. viewBox scaling does the
+   rest. pointer-events disabled so clicks fall through to the card. */
+.army-card-image svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.army-card-count {
+  font-size: 11px;
+  font-weight: bold;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+
+/* ===== Campaign picker ===== */
+
+/* Selected state for menu cards used as toggleable picker tiles. */
+.menu-card.selected {
+  border-color: #f0e8d0;
+  background: #26354a;
+  box-shadow: 0 0 6px rgba(240, 232, 208, 0.6);
+}
+
+/* Inline unit SVG thumbnail shown inside a picker card. */
+.campaign-pick-icon {
+  width: 48px;
+  height: 48px;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.campaign-pick-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+/* Multi-select confirm button (initial army pick). */
+.menu-confirm {
+  margin-top: 12px;
+  background: #2c4a2c;
+  border-color: #5a8a4b;
+  text-align: center;
+  font-weight: bold;
+}
+
+.menu-confirm:hover:not(:disabled) {
+  background: #3a6a3a;
+  border-color: #7aba6b;
+}
+
+.menu-confirm:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Back button shared by scenario and campaign pickers. */
+.menu-back {
+  margin-top: 8px;
+  background: #2a2a2a;
+  border-color: #555;
+  text-align: center;
+}
+
+.menu-back:hover {
+  background: #3a3a3a;
+  border-color: #888;
+}
+
+/* Horizontal card list: two big cards side by side, equal width. Used by
+   the sequential initial picker (pick-one-of-two). */
+.menu-list.horizontal {
+  flex-direction: row;
+  justify-content: center;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.menu-card.horizontal-choice {
+  flex: 1 1 0;
+  max-width: 280px;
+  text-align: center;
+  padding: 18px 16px 16px;
+}
+
+.menu-card.horizontal-choice .menu-card-name {
+  font-size: 17px;
+  margin-bottom: 4px;
+}
+
+.menu-card.horizontal-choice .menu-card-desc {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.menu-card.horizontal-choice .campaign-pick-icon {
+  width: 96px;
+  height: 96px;
+  margin: 10px auto 0;
+}
+
+/* ===== Custom battle setup ===== */
+
+.custom-battle-panel {
+  max-width: 900px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 4px 6px;
+}
+
+.custom-rosters-row {
+  display: flex;
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.custom-roster {
+  flex: 1 1 0;
+  min-width: 0;
+  background: #1a1e26;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  padding: 10px;
+  text-align: left;
+}
+
+.custom-roster-blue { border-color: #3d6b99; }
+.custom-roster-red  { border-color: #993d3d; }
+
+.custom-roster-header {
+  font-size: 13px;
+  font-weight: bold;
+  color: #d8e6ff;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+
+.custom-roster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.custom-roster-empty {
+  font-size: 12px;
+  color: #667;
+  font-style: italic;
+  padding: 6px 0;
+}
+
+.custom-roster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.custom-roster-icon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.custom-roster-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.custom-roster-name {
+  flex: 1 1 auto;
+  color: #cdd;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-roster-remove {
+  background: transparent;
+  border: 1px solid #555;
+  color: #ddd;
+  border-radius: 3px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 7px;
+  line-height: 18px;
+  font-family: inherit;
+}
+
+.custom-roster-remove:hover {
+  background: #4a2a2a;
+  border-color: #a55;
+}
+
+.custom-palette-title {
+  text-align: left;
+  font-size: 12px;
+  color: #99a;
+  margin: 8px 0 6px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.custom-palette {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.custom-palette-card {
+  width: 110px;
+  padding: 8px;
+  background: #1e2430;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.custom-palette-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.custom-palette-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.custom-palette-name {
+  font-size: 11px;
+  color: #d8e6ff;
+  text-align: center;
+  letter-spacing: 0.3px;
+  min-height: 14px;
+}
+
+.custom-palette-buttons {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.custom-add-btn {
+  flex: 1 1 0;
+  font-size: 11px;
+  padding: 3px 0;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  border: 1px solid;
+}
+
+.custom-add-blue {
+  background: #1a2a44;
+  color: #cde;
+  border-color: #3d6b99;
+}
+.custom-add-blue:hover { background: #2a3a54; }
+
+.custom-add-red {
+  background: #441a1a;
+  color: #edc;
+  border-color: #993d3d;
+}
+.custom-add-red:hover { background: #542a2a; }
+
+.custom-skeleton-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: #aac;
+  cursor: pointer;
+  user-select: none;
+}
+
+.custom-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.custom-start {
+  flex: 1 1 0;
+  margin-top: 0;
+}
+
+.custom-back {
+  flex: 0 0 140px;
+  margin-top: 0;
+}
+
+.custom-reset {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 0 16px;
+  background: #3a2a2a;
+  border-color: #664444;
+  color: #dcb;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  text-align: center;
+}
+
+.custom-reset:hover:not(:disabled) {
+  background: #4a3535;
+  border-color: #8a5a5a;
+}
+
+.custom-reset:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
