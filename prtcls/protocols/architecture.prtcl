@@ -1,0 +1,82 @@
+!id core-loop
+Fixed-timestep simulation tick (e.g. 10-20 ticks/sec) decoupled from render framerate (requestAnimationFrame). All combat, movement, and AI logic run on the sim tick; rendering interpolates between ticks for smoothness. This is what lets a potato laptop keep game logic stable even if render FPS dips.
+
+!id entity-model
+Every soldier is a flat data object (not a class-heavy OOP tree) for cache-friendliness and easy iteration:
+
+Soldier {
+  id, unitId, teamId
+  pos {x,z}, facing (radians)
+  state: idle | marching | engaged | staggered | dead
+  targetId (nearest enemy, or null)
+  hp, shieldHp, fatigue
+  hasShield, shieldSide (left|right|front — where it's modeled on body)
+  weaponType, unitType
+}
+
+!id spatial-grid
+Uniform grid (cell size ~= engagement range) mapping cell → soldier ids. Rebuilt or updated incrementally each tick. All "nearest enemy" and "who can I hit" queries go through this — never brute-force O(n²) distance checks. This is the non-negotiable performance backbone for 1000+ agents.
+
+!id formation-system
+A Unit groups ~80-150 Soldiers in a grid offset formation, holds formationFacing, orders (move/hold/charge), and cohesion data (average position, spread). Individual soldiers path toward their formation slot when not engaged.
+
+!id facing-rule
+Each tick, per soldier:
+- if state == engaged → facing = angle to targetId
+- else → facing = unit.formationFacing
+
+This is what creates earned flank exposure only during active combat.
+
+!id targeting
+Each tick (or every N ticks for perf), soldiers without a target query the spatial grid for nearest enemy within engagement range. On acquire, transition to engaged.
+
+!id combat-resolution
+Per soldier, per attack-ready tick:
+1. Attacker rolls to-hit (base chance, modified by weapon vs unit-type matchup)
+2. If hit: compute angleOffShield between attack vector and defender's shield normal
+3. Roll block chance from shield-block-curve using that angle, modified by defender fatigue
+4. If blocked: reduce shieldHp by weapon's shield-damage value; check shield-break
+5. If not blocked: apply damage to hp; check stagger-threshold
+
+!id shield-block-curve
+angleOffShield <= 30°   → blockChance = baseBlock (e.g. 0.70) * fatigueMod
+30° < angle <= 90°       → linear falloff from baseBlock to ~0.20
+angle > 90°              → blockChance = 0 (unreachable)
+
+!id shield-break
+shieldHp starts at fixed value (e.g. 100), depletes on every blocked hit by weapon-specific amount (axes/maces > swords > spears). At 0, hasShield = false for remainder of battle.
+
+!id stagger-threshold
+Unblocked hits with damage >= staggerThreshold (weapon-dependent; cavalry charge and two-handed weapons stagger more easily) set state = staggered for N ticks, skipping that soldier's next action.
+
+!id fatigue-model
+0-100 stat. Drains on attack, block-attempt, and sprint/charge actions. Regenerates when state == idle or marching (not engaged). Scales blockChance and attack-roll down as it approaches 0.
+
+!id weapon-matchup-table
+Data table, not code — {weaponType, targetUnitType} → {toHitMod, damage, shieldDamage, staggerChance}. Keeps spear-vs-shield, cavalry-charge-vs-shield, archer-vs-shield etc. tunable without touching logic. This is also the extension point for new units later.
+
+!id unit-type-registry
+Data-driven unit definitions, not hardcoded classes:
+
+UnitType {
+  id, displayName, spriteId
+  baseHp, baseFatigue, moveSpeed
+  weaponType, hasShieldVariant
+  formationShape (e.g. rows/cols spacing)
+}
+
+New units (variations like "veteran spearman" or entirely new types) are new entries here, not new code — this is your requested extensibility for adding unit variety later.
+
+!id rendering-billboard
+Instanced sprite rendering (e.g. THREE.InstancedMesh with a billboard shader) for soldier bodies — one draw call per unit type regardless of soldier count. Shield/weapon as separate low-poly instanced meshes, positioned/rotated per-soldier from facing + shieldSide each render frame (interpolated from sim tick).
+
+!id ai-hook
+unit-type-registry and Soldier state are intentionally AI-agnostic. Two extension points reserved for later:
+- Formation-level AI: decides Unit orders (advance, hold, flank, retreat) — operates on aggregate data (unit HP%, enemy positions), not individual soldiers.
+- Individual AI overrides: optional per-soldier behavior hook (e.g. break-and-flee at low HP, hero units with custom logic) that can override the default facing/targeting rules above without changing the core loop.
+
+Neither exists yet in the prototype — this section is a placeholder marking where they plug in.
+
+!id perf-budget
+Target: 2,000-3,000 active soldiers at 10-20 sim ticks/sec on integrated graphics. Spatial grid queries and instanced rendering are the two load-bearing decisions that make this possible; if profiling shows the sim tick itself is the bottleneck, next lever is reducing targeting-query frequency (not every soldier needs to re-query every tick).
+

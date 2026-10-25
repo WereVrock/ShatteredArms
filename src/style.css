@@ -1,0 +1,854 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #1a1a1a;
+  height: 100%;
+}
+
+#renderCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#topBar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+}
+
+#topBar button {
+  background: rgba(0, 0, 0, 0.6);
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-family: monospace;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#topBar button:hover {
+  background: rgba(0, 0, 0, 0.85);
+  border-color: #888;
+}
+
+#hud {
+  position: absolute;
+  top: 42px;
+  left: 8px;
+  /* Width is capped so a long unbroken line — the debug text block, a
+     history description — cannot stretch the panel across the viewport.
+     It is an inspector, not a modal. min() lets it shrink on narrow
+     windows. Height is NOT capped here: each scrollable child caps its
+     own max-height (see HudView's text block and UnitHistoryView's
+     list), so the panel naturally fits its content while that content
+     stays bounded. Putting overflow on #hud itself would not work —
+     it has pointer-events: none, so a scrollbar on it would be
+     unreachable. */
+  max-width: min(560px, calc(100vw - 24px));
+  box-sizing: border-box;
+  color: #eee;
+  font-family: monospace;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 6px 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+  white-space: pre;
+}
+
+#hud.hidden {
+  display: none;
+}
+
+#pauseIndicator {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #fff;
+  font-family: monospace;
+  font-size: 22px;
+  font-weight: bold;
+  letter-spacing: 6px;
+  text-shadow: 0 0 8px #000;
+  pointer-events: none;
+  z-index: 15;
+}
+
+#pauseIndicator.hidden {
+  display: none;
+}
+
+#mainMenu {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(8, 10, 14, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: monospace;
+  color: #eee;
+}
+
+#mainMenu.hidden {
+  display: none;
+}
+
+.menu-panel {
+  max-width: 720px;
+  width: 90%;
+  text-align: center;
+}
+
+.menu-title {
+  font-size: 28px;
+  letter-spacing: 2px;
+  margin: 0 0 4px;
+  color: #f0e8d0;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.8);
+}
+
+.menu-subtitle {
+  font-size: 13px;
+  color: #99a;
+  margin: 0 0 28px;
+  letter-spacing: 1px;
+}
+
+/* ===== Main menu brand header =====
+   The top-level menu gets a brand mark (broken sword over a shattered
+   shield) above an oversized title, then a decorative rule separating the
+   header from the mode cards. Scoped to .main-menu-panel so none of this
+   bleeds into ScenarioMenu or CardPickerView, which share .menu-panel and
+   .menu-title. */
+
+.main-menu-panel {
+  max-width: 560px;
+  /* Header + divider + three cards + Settings can exceed a short viewport;
+     scroll rather than clip. The card list itself has no scroll — this is
+     the whole panel's safety net. */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+
+.menu-brand {
+  width: 240px;
+  height: 140px;
+  margin: 0 auto 6px;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.55));
+}
+
+.menu-brand svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.menu-brand-title {
+  font-size: 44px;
+  letter-spacing: 12px;
+  color: #ecd9b4;
+  text-shadow:
+    0 0 24px rgba(212, 165, 116, 0.35),
+    0 0 8px rgba(212, 165, 116, 0.18),
+    0 2px 0 rgba(0, 0, 0, 0.85);
+  margin: 0 0 6px;
+  /* letter-spacing pads the right of the final letter; the padding-left
+     compensation re-centers the title under the brand mark. */
+  padding-left: 12px;
+}
+
+.menu-brand-subtitle {
+  font-size: 12px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: #8a9aad;
+  margin: 0;
+}
+
+.menu-divider {
+  position: relative;
+  width: 200px;
+  height: 1px;
+  margin: 22px auto 28px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    #4a5568 30%,
+    #4a5568 70%,
+    transparent 100%);
+}
+
+/* Small diamond ornament at the center of the divider line. */
+.menu-divider::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  background: #4a5568;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ===== Scenario menu scroll =====
+   The scenario list can exceed a short viewport. Bound the panel to the
+   viewport height, make it a column, and let ONLY the card list scroll —
+   the title/subtitle and the Back button are pinned (flex-shrink: 0) so
+   they stay visible while the list scrolls under them. Scoped to
+   .scenario-menu-panel so MainMenu's own .main-menu-panel and
+   CustomBattleSetup's .custom-battle-panel keep their existing scroll
+   behaviour untouched. min-height: 0 on the list is required: without it,
+   a flex item defaults to min-height: auto and refuses to shrink below
+   its content, so overflow-y: auto would never engage. */
+.scenario-menu-panel {
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+  padding: 4px 8px;
+  box-sizing: border-box;
+}
+
+.scenario-menu-panel .menu-title,
+.scenario-menu-panel .menu-subtitle,
+.scenario-menu-panel .menu-back {
+  flex-shrink: 0;
+}
+
+.scenario-menu-panel .menu-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Reserve a strip on the right so cards don't shift horizontally when
+     the scrollbar appears or disappears as the list is resized. */
+  padding-right: 4px;
+}
+
+.menu-card {
+  text-align: left;
+  padding: 14px 18px;
+  background: #1e2430;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #eee;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.06s;
+}
+
+.menu-card:hover {
+  background: #26354a;
+  border-color: #6a8ac0;
+}
+
+.menu-card:active {
+  transform: translateY(1px);
+}
+
+.menu-card-name {
+  font-size: 15px;
+  font-weight: bold;
+  color: #d8e6ff;
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+
+.menu-card-desc {
+  font-size: 12px;
+  color: #99a;
+  line-height: 1.4;
+}
+
+/* ===== Army bar =====
+   Bottom-of-screen strip of player-team unit cards. The container itself
+   stays pointer-events: none so it never blocks canvas clicks — only the
+   cards themselves (which are clickable to select) opt into pointer events. */
+
+#armyBar {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: calc(100vw - 24px);
+  pointer-events: none;
+  font-family: monospace;
+  user-select: none;
+}
+
+.army-card {
+  position: relative;
+  width: 60px;
+  padding: 6px 4px 5px;
+  background: rgba(0, 0, 0, 0.68);
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #ddd;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s, box-shadow 0.1s, transform 0.06s;
+}
+
+.army-card:hover {
+  border-color: #8aa;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.army-card:active {
+  transform: translateY(1px);
+}
+
+/* Team colour coding — team id from Unit.teamId. Enemy cards are filtered
+   out in ArmyBarView.update() by default, so .team-red normally won't
+   appear; the rule is kept so the bar is symmetric if that changes. */
+.army-card.team-blue {
+  border-color: #3d6b99;
+  background: rgba(14, 24, 40, 0.75);
+}
+.army-card.team-red {
+  border-color: #993d3d;
+  background: rgba(40, 14, 14, 0.75);
+}
+
+.army-card.selected {
+  border-color: #f0e8d0;
+  box-shadow: 0 0 6px rgba(240, 232, 208, 0.85);
+}
+
+.army-card.dead {
+  opacity: 0.35;
+}
+
+/* Top-left corner: white flag + routing soldier count. Hidden by default,
+   shown only when the unit has at least one routing soldier. */
+.army-card-flag {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 11px;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 0 0 2px #000, 1px 1px 0 #000;
+  display: none;
+}
+
+.army-card.routing .army-card-flag {
+  display: block;
+}
+
+/* Top-right corner: current activity glyph. */
+.army-card-icon {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 11px;
+  color: #ffd86b;
+  text-shadow: 0 0 2px #000;
+}
+
+/* Centre: rendered unit-model thumbnail, transparent PNG on the card's own
+   background. The container reserves the box even when the capture produced
+   no image (unknown unit type, capture failure) so the card layout does not
+   jump. */
+.army-card-image {
+  width: 48px;
+  height: 48px;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.army-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  pointer-events: none;
+}
+
+/* Inline SVG icon: sized to fill the container. viewBox scaling does the
+   rest. pointer-events disabled so clicks fall through to the card. */
+.army-card-image svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.army-card-count {
+  font-size: 11px;
+  font-weight: bold;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+
+/* ===== Campaign picker ===== */
+
+/* Selected state for menu cards used as toggleable picker tiles. */
+.menu-card.selected {
+  border-color: #f0e8d0;
+  background: #26354a;
+  box-shadow: 0 0 6px rgba(240, 232, 208, 0.6);
+}
+
+/* Inline unit SVG thumbnail shown inside a picker card. */
+.campaign-pick-icon {
+  width: 48px;
+  height: 48px;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.campaign-pick-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+/* Multi-select confirm button (initial army pick). */
+.menu-confirm {
+  margin-top: 12px;
+  background: #2c4a2c;
+  border-color: #5a8a4b;
+  text-align: center;
+  font-weight: bold;
+}
+
+.menu-confirm:hover:not(:disabled) {
+  background: #3a6a3a;
+  border-color: #7aba6b;
+}
+
+.menu-confirm:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Back button shared by scenario and campaign pickers. */
+.menu-back {
+  margin-top: 8px;
+  background: #2a2a2a;
+  border-color: #555;
+  text-align: center;
+}
+
+.menu-back:hover {
+  background: #3a3a3a;
+  border-color: #888;
+}
+
+/* Horizontal card list: two big cards side by side, equal width. Used by
+   the sequential initial picker (pick-one-of-two). */
+.menu-list.horizontal {
+  flex-direction: row;
+  justify-content: center;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.menu-card.horizontal-choice {
+  flex: 1 1 0;
+  max-width: 280px;
+  text-align: center;
+  padding: 18px 16px 16px;
+}
+
+.menu-card.horizontal-choice .menu-card-name {
+  font-size: 17px;
+  margin-bottom: 4px;
+}
+
+.menu-card.horizontal-choice .menu-card-desc {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.menu-card.horizontal-choice .campaign-pick-icon {
+  width: 96px;
+  height: 96px;
+  margin: 10px auto 0;
+}
+
+/* ===== Custom battle setup ===== */
+
+/* Custom battle wants more room than the standard .menu-panel (720px):
+   two team strips plus a full palette need horizontal space. The panel
+   still respects a small viewport — min() means "as wide as the viewport
+   allows, up to 1400px" — so it degrades gracefully on a narrow window
+   rather than overflowing. */
+.custom-battle-panel {
+  max-width: min(1400px, calc(100vw - 40px));
+  width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 4px 12px;
+  box-sizing: border-box;
+}
+
+/* Team strips. Two teams stacked vertically (blue above, red below); each
+   strip spans the panel width and lays its units out horizontally. A strip
+   whose team is the current player gets a brighter border and a soft outer
+   glow so the role is legible at a glance, not just from the button label. */
+
+/* Team strips. Two teams stacked vertically (red above, blue below); each
+   strip spans the panel width and lays its units out horizontally.
+
+   Backgrounds are tinted with the team colour so "which team is which"
+   reads before you get to the label. Base tint is subtle — enough to
+   colour the strip without fighting the unit tiles or palette cards
+   drawn on top of it. The player's team gets a stronger tint, a brighter
+   border, and an outer glow, so at a glance you can tell both WHICH team
+   a strip is (hue) and WHETHER it is you (intensity). */
+
+.custom-team-strip {
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 12px 0;
+  text-align: left;
+  transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+}
+
+/* Base tints — subtle. Gradient runs top-to-bottom so the strip reads as
+   a soft wash rather than a flat block, matching the panel behind it. */
+
+.custom-team-blue {
+  border-color: #3d6b99;
+  background: linear-gradient(180deg,
+    rgba(61, 107, 153, 0.18) 0%,
+    rgba(20, 24, 32, 0.92) 100%);
+}
+
+.custom-team-red {
+  border-color: #993d3d;
+  background: linear-gradient(180deg,
+    rgba(153, 61, 61, 0.18) 0%,
+    rgba(32, 20, 20, 0.92) 100%);
+}
+
+/* Player-team variants — stronger tint, brighter border, outer glow.
+   Same hue as the base; the intensity is what says "you". */
+
+.custom-team-blue.player {
+  border-color: #6a9ac9;
+  background: linear-gradient(180deg,
+    rgba(61, 107, 153, 0.34) 0%,
+    rgba(24, 34, 48, 0.92) 100%);
+  box-shadow: 0 0 0 2px rgba(106, 154, 201, 0.22);
+}
+
+.custom-team-red.player {
+  border-color: #c96a6a;
+  background: linear-gradient(180deg,
+    rgba(153, 61, 61, 0.34) 0%,
+    rgba(48, 24, 24, 0.92) 100%);
+  box-shadow: 0 0 0 2px rgba(201, 106, 106, 0.22);
+}
+
+.custom-team-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.custom-team-label {
+  font-size: 13px;
+  font-weight: bold;
+  color: #d8e6ff;
+  letter-spacing: 0.5px;
+}
+
+/* Role toggle. Two states only — 'player' (green, this team is you) and
+   'ai' (muted slate, this team is not). Both are buttons; the label reads
+   as a status, the tooltip explains the click. */
+
+.custom-role-btn {
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  border: 1px solid;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.custom-role-btn.player {
+  background: #2c4a2c;
+  border-color: #5a8a4b;
+  color: #e8f0d8;
+}
+.custom-role-btn.player:hover {
+  background: #3a6a3a;
+  border-color: #7aba6b;
+}
+
+.custom-role-btn.ai {
+  background: #2a2f3a;
+  border-color: #4a5568;
+  color: #aab;
+}
+.custom-role-btn.ai:hover {
+  background: #3a4050;
+  border-color: #6a7588;
+  color: #cdd;
+}
+
+/* Unit strip: rows of tiles. Tiles wrap to a SECOND row before any
+   scrolling appears, so a growing roster stays fully visible rather than
+   being cut off by a horizontal scrollbar. Past two rows the strip caps
+   its height and scrolls vertically — beyond that the strip would start
+   to eat the panel and push the other team off-screen.
+
+   Row height math: tile ≈ 72px (icon 32 + name 12 + count 12 + padding
+   10 + border 2 + child gaps 4); two rows + one 6px gap + container
+   padding = 160px, rounded up to 170 for safety. */
+.custom-team-units {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 4px 2px 6px;
+  min-height: 76px;
+  max-height: 170px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.custom-team-empty {
+  font-size: 12px;
+  color: #667;
+  font-style: italic;
+  padding: 22px 4px;
+}
+
+.custom-team-unit {
+  position: relative;
+  flex: 0 0 72px;
+  padding: 6px 4px 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid #3a4a5e;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.custom-team-unit-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.custom-team-unit-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.custom-team-unit-name {
+  font-size: 10px;
+  color: #cdd;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.custom-team-unit-count {
+  font-size: 10px;
+  color: #99a;
+}
+
+.custom-team-unit-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  background: transparent;
+  border: none;
+  color: #778;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 3px;
+  font-family: inherit;
+}
+
+.custom-team-unit-remove:hover {
+  color: #f88;
+}
+
+/* Italic note under the strips when the player selected both-AI. */
+.custom-spectator-hint {
+  text-align: center;
+  font-size: 12px;
+  font-style: italic;
+  color: #b8a070;
+  padding: 4px 0 2px;
+  letter-spacing: 0.4px;
+}
+
+.custom-palette-title {
+  text-align: left;
+  font-size: 12px;
+  color: #99a;
+  margin: 8px 0 6px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.custom-palette {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.custom-palette-card {
+  width: 110px;
+  padding: 8px;
+  background: #1e2430;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.custom-palette-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.custom-palette-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.custom-palette-name {
+  font-size: 11px;
+  color: #d8e6ff;
+  text-align: center;
+  letter-spacing: 0.3px;
+  min-height: 14px;
+}
+
+.custom-palette-buttons {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.custom-add-btn {
+  flex: 1 1 0;
+  font-size: 11px;
+  padding: 3px 0;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  border: 1px solid;
+}
+
+.custom-add-blue {
+  background: #1a2a44;
+  color: #cde;
+  border-color: #3d6b99;
+}
+.custom-add-blue:hover { background: #2a3a54; }
+
+.custom-add-red {
+  background: #441a1a;
+  color: #edc;
+  border-color: #993d3d;
+}
+.custom-add-red:hover { background: #542a2a; }
+
+.custom-skeleton-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: #aac;
+  cursor: pointer;
+  user-select: none;
+}
+
+.custom-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.custom-start {
+  flex: 1 1 0;
+  margin-top: 0;
+}
+
+.custom-back {
+  flex: 0 0 140px;
+  margin-top: 0;
+}
+
+.custom-reset {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 0 16px;
+  background: #3a2a2a;
+  border-color: #664444;
+  color: #dcb;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  text-align: center;
+}
+
+.custom-reset:hover:not(:disabled) {
+  background: #4a3535;
+  border-color: #8a5a5a;
+}
+
+.custom-reset:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}

@@ -1,0 +1,46 @@
+@@PATCH
+@@TITLE: Rename Living Muster — doc comment header
+@@FILE: src/scenarios/PlayableScenarios.js
+@@FIND:
+// --- Full Roster -----------------------------------------------------------
+@@REPLACE:
+// --- Living Muster ---------------------------------------------------------
+@@END
+
+@@PATCH
+@@TITLE: Rename Living Muster — function declaration
+@@FILE: src/scenarios/PlayableScenarios.js
+@@FIND:
+function buildFullRoster() {
+@@REPLACE:
+function buildLivingMuster() {
+@@END
+
+@@PATCH
+@@TITLE: Rename Living Muster — scenario catalog entry
+@@FILE: src/scenarios/PlayableScenarios.js
+@@FIND:
+  {
+    id: 'full-roster',
+    name: 'Full Roster',
+    description: 'One of every non-skeleton unit per side — all eight melee types (shielded and unshielded, human and goblin), both archer variants, and both cavalry variants. Twelve units per side.',
+    playerTeamId: 'blue',
+    aiTeamIds: ['red'],
+    cameraTarget: { x: 0, z: 0 },
+    cameraDistance: 60,
+    cameraPitch: 0.95,
+    build: buildFullRoster
+  },
+@@REPLACE:
+  {
+    id: 'living-muster',
+    name: 'Living Muster',
+    description: 'One of every non-skeleton unit per side — all eight melee types (shielded and unshielded, human and goblin), both archer variants, and both cavalry variants. Twelve units per side.',
+    playerTeamId: 'blue',
+    aiTeamIds: ['red'],
+    cameraTarget: { x: 0, z: 0 },
+    cameraDistance: 60,
+    cameraPitch: 0.95,
+    build: buildLivingMuster
+  },
+@@END

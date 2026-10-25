@@ -1,0 +1,24 @@
+Files that must NOT be uploaded as static assets.
+_worker.js is our Worker entry point (referenced by main in
+wrangler.toml). Wrangler's static-asset bundler sees the filename and
+refuses to proceed without an explicit opt-out, since uploading the
+file would expose server-side code at https://<site>/_worker.js.
+_worker.js
+
+Wrangler's own config — not for public serving.
+wrangler.toml
+
+The bat file is a dev convenience; nothing on the site references it.
+deploy.bat
+
+Local Durable Object state and Wrangler cache. Contains binary data
+from local dev runs and should never leave the developer machine.
+.wrangler/
+
+If you ever add one.
+node_modules/
+
+Git internals, in case someone deploys from a checkout that hasn't
+been cleaned.
+.git/
+.gitignore

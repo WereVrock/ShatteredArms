@@ -1,0 +1,874 @@
+!id combat-ai-roadmap-overview
+Feature request for evolving the battle AI from a per-unit reactor into a
+coordinated commander capable of executing timed tactics — against a single
+human player, replaying the same battle repeatedly, at one of two difficulty
+tiers.
+
+The current AI is a reactor. Every decision cycle it re-reads the world,
+picks targets, and issues orders — with only small amounts of persistence
+(unit intent phases, repeat-attempt counters) surviving across cycles. This
+produces competent local behavior but no tactics.
+
+This roadmap adds, in order:
+
+1. Four independent improvements that fix visible problems and build the
+   vocabulary later work needs.
+2. A plan layer — persistent, phased, role-assigning — that lets the AI
+   commit to a sequence of actions across many decision cycles.
+3. Tactics expressed as plans: retreat operations, combined-arms sequencing,
+   hammer-and-anvil, then variations.
+
+The ordering is deliberate and non-negotiable. Each stage supplies vocabulary
+the next stage needs. Skipping ahead produces code that gets rewritten.
+
+!id combat-ai-context
+Confirmed from the codebase (CONTROLLABLE_TEAM_IDS = ['blue'], and the main
+game constructs BattleAI for ['red'] only): single human (blue) vs. single
+AI (red), no mixed-control teams. The human is expected to replay the same
+battle — same map, same starting positions, same objective — repeatedly.
+This shapes several design decisions:
+
+- A deterministic plan layer on a fixed, repeated battle gets solved once
+  and then loses the same way forever. Unpredictability is a hard
+  requirement, not polish.
+
+- There is no mixed-team scenario, so plan/player-order interaction is out
+  of scope by construction, not deferred by assumption.
+
+- Two difficulty tiers are required: Best-possible and Weakened. Both run
+  identical machinery; only configuration differs.
+
+!id combat-ai-design-taxonomy
+Every behavioral feature falls into one of four buckets. Which bucket a
+feature belongs to is decided by asking, in order: is this a one-shot
+reaction to a threshold being crossed? If not: does the correct action
+coincide with each unit's locally-optimal action?
+
+AGREES — emergent, use local rules.
+The unit maximizing its own outcome produces the coordinated behavior as a
+side effect. Cheap, robust, already how most of the current AI works.
+Examples already in the codebase:
+- Flanking emerges from cavalry starting wide plus soft-target preference.
+- Concentration emerges from weak-point bias with a detour limit.
+- Kiting emerges from "archers back away from nearby charging enemies."
+- Rout cascades emerge from allyRoutPenaltyPerTick.
+- Screening emerges from a screen role plus a "don't pursue" rule.
+
+DISAGREES — needs coordination.
+The correct action requires one unit to know something about another unit's
+state. No local rule can express this. General shapes:
+- Timing relationships — "A then B." A local rule cannot say "wait."
+- Deconfliction — "you go left, I go right." Locally both pick the closer.
+- Sacrifice plays — "hold and die so I can flank."
+- Deception — feigned retreat requires observing that the enemy pursues.
+
+MIDDLE GROUND — light coordination.
+Shared state without dictating action. A unit posts what it's doing; others
+read and react. FocusFireCoordinator is this — a shared target everyone
+reads. _archerInterceptOverride is this — archers broadcast a threat, line
+units respond.
+
+REFLEXES — fourth bucket.
+Not local-emergent, not coordination, not a plan. A reflex is a one-shot,
+event-triggered action outside the normal decision cycle: "I just crossed a
+threshold, react now." A soldier at critical morale deciding to disengage is
+a reflex, not a planning read. A4 (own-morale awareness) is a reflex wearing
+a planning-read costume — the read itself is a reflex-trigger, even though
+its consequences (exclusion from plan roles) reach into the plan layer.
+
+The taxonomy drives the ordering below: reflexes and local rules first,
+light coordination alongside, plans last. Doing it the other way produces a
+plan layer built on vocabulary that hasn't been invented yet.
+
+!id combat-ai-stage-a
+STAGE A — INDEPENDENT IMPROVEMENTS
+
+Do these first. Each fixes a visible problem, and each contributes vocabulary
+the plan layer later consumes. None requires infrastructure the others need.
+
+BASELINE SHIFT NOTE
+Every acceptance criterion in Stages C and D that says "better than reactive
+behavior" means reactive behavior AFTER Stage A (with line cohesion,
+coordinated reinforcement, stable cavalry groups, and fragile-unit awareness
+already in place). Re-derive those comparisons against the post-Stage-A
+baseline, not the pre-Stage-A one.
+
+A1. LINE COHESION
+Problem: every line unit decides independently where to go. A fast unit
+outruns its neighbors, arrives alone, gets flanked, and dies while its
+neighbors watch from behind. The line dissolves into a cloud of individual
+fights — the most common visual failure mode in playtest.
+
+Desired behavior: a line unit's forward offset is capped relative to its
+neighbors. If a neighbor is lagging, the advanced unit slows rather than
+pressing ahead. When a neighbor is defeated and a gap opens, adjacent units
+drift inward to close it. Mechanism: each line unit's forward limit is
+derived from the median forward position of its neighbors on the line.
+Neighbor sets are units sharing the same role and adjacent lateralOffset —
+this makes line and cavalry neighbor sets disjoint by construction, so A1
+and A3 never contend over the same positional logic.
+
+Where it lives: LineBehavior.js for the forward-cap logic.
+BattleLineFormation.js for exposing each unit's neighbors.
+
+Acceptance criteria:
+- In a battle with 6 line units per side, no line unit is more than ~2 ×
+  lineUnitSpacing ahead of the median of its neighbors during the advance.
+- When a front-line unit is defeated, the two units adjacent along the
+  lateral axis visibly close the gap within a few seconds.
+- The line arrives at contact as a line, not as a wedge or a scattered
+  front.
+
+Depends on: nothing.
+
+A2. REINFORCEMENT REQUEST POOL
+Problem: _reinforcementOverride asks "is any nearby ally being outnumbered?"
+every cycle, for every unit. Three units can all pile onto the same needy
+fight while a second one goes unattended. The algorithm also has no notion
+of whether the fight is still winnable, whether this unit is the right type
+to help, or whether anyone else is already going.
+
+Desired behavior: a small coordinator that units post requests into, and
+that resolves once per decision cycle with awareness of:
+- Winnability. A fight already at 1:5 local odds is not worth sending help
+  to — the helper dies too. Filter by a minimum ratio.
+- Suitability. A spear unit is more valuable reinforcing against cavalry
+  than against archers. Weight by attacker type vs. threatened ally type.
+- Deconfliction. If three units would all be sent to the same fight, send
+  one and route the others elsewhere. Track "already dispatched."
+
+Where it lives: new file ReinforcementCoordinator.js. Consumed by
+TeamAI._decide() in place of _reinforcementOverride.
+
+Acceptance criteria:
+- No two units are ever dispatched to the same threatened ally in the same
+  decision cycle.
+- A threatened unit at 1:5 local odds receives no reinforcement.
+- A threatened unit at 1:1.5 local odds with a spear nearby and an archer
+  threatened by cavalry receives the spear.
+
+Depends on: nothing.
+
+A3. CAVALRY FLANK LEADER
+Problem: FlankerBehavior._preferSiblingTarget checks each sibling cavalry
+unit individually. With two cavalry units this works. With three or more it
+ping-pongs — A agrees with B, B with C, C with A — and the eventual shared
+target depends on iteration order. Coordination is not stable.
+
+Desired behavior: cavalry units on the same flank form a group with a
+designated leader. The leader picks the target. Others follow unless they
+have a strictly better local option (a routing enemy within chase range, for
+instance). Group membership is determined by lateral position relative to
+the battle line (left flank group, right flank group). The leader is chosen
+deterministically (lowest unit id, or the unit furthest forward) so it is
+stable tick to tick — no leader election thrashing.
+
+Where it lives: new file CavalryGroup.js. TeamAI instantiates groups once
+per decision cycle and passes them to FlankerBehavior in place of the
+current siblingCavalry array.
+
+Acceptance criteria:
+- With 2, 3, or 4 cavalry units on the same side, target assignment is
+  stable across decision cycles — no ping-pong between targets.
+- All cavalry on a flank converge on the same target when the leader
+  selects one, unless a unit has a routing-chase opportunity.
+- Removing the leader (killed) causes a new leader to be selected within
+  one decision cycle.
+
+Depends on: nothing. Must land before the plan layer — the plan layer treats
+a cavalry group as its hammer, and needs the group to exist as a stable
+unit.
+
+A4. OWN-MORALE AWARENESS (reflex-triggered)
+Problem: BattleAssessment tracks team-average morale for posture, but the
+planner has no per-unit morale awareness. A unit at morale 15 and one at
+morale 95 look identical. A unit about to rout can still be assigned a
+critical role — as the anvil in hammer-and-anvil, or as a flanking force —
+and it will break the moment combat starts.
+
+Desired behavior: the planner reads each unit's average morale when scoring.
+A unit below a "fragile" threshold is:
+- Excluded from critical plan roles (anvil, flanking reserve).
+- Deprioritized for reinforcement dispatch.
+- Given a defined fallback behavior. It does not simply sit idle.
+
+Fragile-unit fallback behavior: a unit excluded from plan roles and
+reinforcement dispatch must still do something coherent. Default: fall back
+to a designated rally position behind the line (a "second line" / reserve
+posture) and hold there, re-eligible for plan roles once morale recovers
+above the fragile threshold. This must be implemented alongside A4 itself —
+a fragile unit standing idle mid-battle reads as a bug, not a feature.
+
+Where it lives: read function on Unit (or a helper in behaviorUtils.js).
+Consumed by WinPlanner._scoreCandidate and by the Stage B plan layer's role
+assignment. Fallback behavior lives alongside LineBehavior or as a small new
+ReserveBehavior.
+
+Acceptance criteria:
+- A unit with average morale below 30 is never assigned as the anvil in a
+  plan.
+- A unit with average morale below 30 is never dispatched by the
+  reinforcement coordinator.
+- A fragile unit visibly moves to and holds a reserve position rather than
+  continuing its previous order or standing idle in place.
+- The HUD debug output (or an AI log line) shows the fragile-status read
+  when the unit is evaluated.
+
+Depends on: nothing.
+
+!id combat-ai-stage-b
+STAGE B — PLAN LAYER
+
+This is the infrastructure. It does not itself produce visible behavior; it
+enables Stage C and beyond. Done carefully, it composes Stage A's mechanisms;
+done carelessly, it fights them.
+
+B1. TEAM PLAN INFRASTRUCTURE
+Problem: TeamAI._decide() is stateless. There is no concept of "we are
+executing Plan X, currently at phase 2 of 4." Every cycle re-derives
+everything from the current snapshot. Any behavior requiring timing — "wait
+for the pin before charging," "bombard for three volleys, then charge" — is
+inexpressible.
+
+Desired behavior: a TeamPlan object persisted on TeamAI with:
+- tactic — the tactic being executed ('hammer_and_anvil', 'retreat',
+  'combined_arms', or 'none' for the default reactive mode).
+- phase — a tactic-specific phase string.
+- phaseStartedTick — for timeouts and duration checks.
+- roles — a Map<unitId, role>. The anvil, the hammer, the screen, the
+  reserve. Roles are how a plan says "you specifically do this."
+- objectiveUnitId — the target of the tactic, or null.
+- stagingPoint — a world position for hammer units to hold at, if the
+  tactic uses one.
+
+The plan is created, advanced, and dissolved by the plan layer. Behaviors
+consult it (plan.phase === 'strike') but do not write to it.
+
+Phase transitions are driven by conditions, not ticks:
+- A phase defines an exitCondition — a predicate over world state.
+- Every decision cycle, the plan layer checks the exit condition. When it
+  holds, the plan advances to the next phase and resets phaseStartedTick.
+- Every phase has a timeoutTicks. If the exit condition never holds within
+  the timeout, the plan aborts back to 'none' and normal behavior resumes.
+
+This is what makes plans robust rather than scripted. A hammer that never
+gets its pin never charges; if the enemy never commits to the anvil, the
+plan aborts and the units fall back to reactive behavior.
+
+Role-map clearing on abort: units are not individually told "you are no
+longer the anvil." The role map is simply dropped and units resume reactive
+behavior next cycle. One tick of stale order is below perceptual threshold
+and is accepted as-is. However, plan creation, phase transitions, and aborts
+must all be visible in AIDebugLog starting in Stage B — not deferred to
+Stage D — so that plan behavior is debuggable as soon as the plan layer
+exists, before any tactic is built on top of it.
+
+Plan priority and interruption: only one plan runs per team at a time.
+Priority rules, in order:
+1. Retreat is sticky and cannot be preempted. A team in a retreat plan does
+   not switch to combined-arms or hammer-and-anvil mid-retreat, even if a
+   good target of opportunity appears. A team assessed as needing to retreat
+   has already been judged unable to win the current fight; letting a fresh
+   target flip the plan reintroduces the "AI changes its mind every few
+   seconds" failure the intent system exists to prevent.
+2. Non-retreat plans (combined-arms, hammer-and-anvil) may only start when
+   no plan is currently active. They do not preempt each other.
+3. A plan's own abort conditions (objective destroyed, key unit destroyed,
+   timeout) are the only way a non-retreat plan ends early.
+
+Where it lives:
+- TeamPlan.js — the plan object and its state machine.
+- src/ai/plans/ — a directory of plan definitions. Each plan is a small
+  module exporting { phases, assignRoles, entryCondition }.
+- TeamAI gets a _currentPlan field, checked and advanced at the top of
+  _decide() before any per-unit logic.
+- PlanScheduler.js — a separate scheduler, invoked from _decide(), rather
+  than trigger logic living inline. Simpler to test in isolation, and this
+  is where B4's weighted plan selection lives.
+
+Acceptance criteria:
+- The plan layer can be observed via AIDebugLog — a new 'plan' category
+  logging plan creation, phase transitions, and aborts.
+- A plan with a never-satisfied exit condition aborts cleanly after its
+  timeout and returns the team to reactive behavior.
+- No behavior change in the default 'none' plan — the existing AI runs
+  identically when no tactic is active.
+- Retreat cannot be interrupted by another plan triggering; verified by a
+  test that creates a strong combined-arms opportunity during an active
+  retreat and confirms the retreat continues uninterrupted.
+
+Depends on: nothing structurally, but Stage A's items should be complete
+first so the plan layer consumes their interfaces rather than reinventing
+them.
+
+B2. PIN DETECTOR
+Problem: "Is the enemy unit pinned?" is the central question for several
+tactics. It needs a concrete, reliable answer.
+
+Desired behavior: a pure function — not a system, not stateful — that takes
+an enemy unit and returns { pinned: boolean, confidence: number }.
+
+Pinned is defined as:
+- A threshold fraction of the unit's living soldiers are in engaged or
+  staggered state.
+- The unit's center of mass has moved less than a threshold distance over
+  the last N ticks.
+
+Both conditions must hold. A unit that's fighting but maneuvering freely is
+not pinned; a unit that's stationary but not engaged is not pinned either.
+
+Threshold specification: the engaged-fraction threshold cannot be a single
+global constant — a 5-wide line unit's engaged fraction looks nothing like a
+3-wide archer unit's under identical tactical conditions. Required:
+- Threshold is per unit-type (line, archer, cavalry, etc.), not global.
+  Store as a lookup in AIConfig, not a single scalar.
+- Movement threshold (center-of-mass drift) is similarly per-type — a
+  cavalry unit's "stationary" baseline jitter is not a line unit's.
+- Exploit resistance, on the Best-possible tier specifically: a human player
+  will deliberately probe the pin condition — holding a unit in apparent
+  engagement without committing, to bait a hammer charge into a trap. The
+  fix is not to hide or obscure the thresholds (a hidden constant is still a
+  constant once found). The fix is to require the pinned condition to hold
+  continuously for a minimum duration before it's trusted, so that faking a
+  pin costs the player real time they could have spent elsewhere. This
+  duration is itself a tier-config parameter.
+
+Where it lives: PinDetector.js. Consumed by plan exit conditions and by the
+hammer-and-anvil tactic. Thresholds in AIConfig, keyed by unit type.
+
+Acceptance criteria:
+- Correctly identifies an enemy line unit locked in melee as pinned.
+- Correctly identifies a maneuvering enemy as not pinned, even if some of
+  its soldiers are engaged.
+- Correctly identifies a stationary but disengaged enemy as not pinned.
+- Thresholds are in AIConfig, per unit type, so they can be tuned without
+  touching code.
+- On Best-possible, a unit that fakes engagement for less than the minimum
+  hold duration does not register as pinned.
+
+Depends on: unit center-tracking history — a small ring buffer per unit
+added in Stage B or supplied by Unit.
+
+B3. PLAN / ACTION COST-RISK GATE
+Problem: a plan that succeeds 70% of the time and fails catastrophically the
+other 30% is worse than reactive behavior, because the failures are what the
+player remembers. Hammer-and-anvil that lands clean two out of three times
+and throws a cavalry unit into a braced spear wall the other time produces a
+worse outcome than an AI that never attempted the charge. "Will it land?"
+(feasibility — the existing entry/exit conditions) is necessary but not
+sufficient. "Is it worth the risk if it doesn't land clean?" is a separate
+question and needs its own gate.
+
+Desired behavior: before a plan (or any weighted candidate under B4) is
+eligible for selection, it passes an expected-value estimate: projected
+benefit if it succeeds, weighted against projected cost if it fails, using a
+conservative prior derived from current world state (unit counts, morale,
+terrain-blind since terrain is out of scope). Because the opponent is a
+human and does not behave like a fixed AI, this cannot be tuned against
+opponent history — it uses a conservative prior ("assume average-case enemy
+response") rather than an adaptive opponent model. No cross-battle or
+within-battle player modeling is used anywhere in this system.
+
+Where it lives: PlanRiskGate.js, consulted by PlanScheduler (B1) before a
+plan is added to the weighted candidate pool (B4).
+
+Acceptance criteria:
+- A plan whose projected downside (e.g., losing the hammer group) exceeds a
+  configured risk tolerance is excluded from the candidate pool, even if its
+  upside is high.
+- Risk tolerance is a tier-config parameter (Best-possible tolerates more
+  risk than Weakened).
+- Verified via a scripted scenario where the only available charge target is
+  heavily defended: the plan is excluded, not merely down-weighted.
+
+Depends on: B1 (plan layer).
+
+B4. WEIGHTED PLAN / ACTION SELECTION (unpredictability)
+Problem: a battle that is replayed identically must not produce an AI that
+is a pure deterministic function of the situation. If the AI always picks
+the single best-scored plan or role assignment for a given world state, a
+player who replays the same opening will eventually see the same AI response
+every time and can solve it permanently.
+
+This is explicitly not solved by reading or remembering the player. It is
+solved by the AI itself being non-deterministic at decision time,
+independent of anything about the player.
+
+Desired behavior: at every decision point that currently selects "the best
+X" — plan selection, cavalry group targeting, reinforcement dispatch,
+refused-flank side selection, hammer-and-anvil role assignment, and any
+future equivalent — replace deterministic argmax selection with:
+1. Score all viable candidates (plans, targets, roles) using existing
+   scoring logic plus the B3 risk gate.
+2. Exclude any candidate below a quality floor — a threshold defined as
+   "within X% of the top-scored candidate," not an absolute score. This is
+   what keeps "sometimes suboptimal" from becoming "sometimes bad." The
+   floor width (X%) is a tier-config parameter.
+3. Weighted-random sample among the surviving candidates, weighted toward
+   higher scores (e.g., softmax over score, temperature as a tier-config
+   parameter). The top candidate is picked most often; other good candidates
+   are picked sometimes.
+
+This applies everywhere the codebase currently has a "pick the best one"
+step, not only at the top-level plan scheduler — this is a wider change than
+B1-B3 alone and touches A2 (reinforcement dispatch), A3 (cavalry target
+selection among ties), C3/D1 (role assignment, refused-flank side), and the
+plan scheduler itself.
+
+Selection is made fresh at each decision point using only current world
+state — no memory of prior battles, no memory of earlier in this battle
+beyond what normal world-state reads already provide.
+
+Where it lives: a shared utility, WeightedSelect.js, used by PlanScheduler
+(B1) and retrofitted into A2, A3, C3, and D1's existing selection steps.
+
+Acceptance criteria:
+- Replaying an identical battle opening multiple times produces observably
+  different AI plan choices and role assignments across replays, without any
+  change in world state inputs.
+- No selection ever picks a candidate outside the quality floor — verified
+  by asserting the selected candidate's score against the top score in a
+  scripted test.
+- On Weakened, the quality floor is wider (more permissive) than on
+  Best-possible, so weaker-but-still-technically-eligible options are chosen
+  more often — this is part of what makes Weakened play worse, on top of the
+  other tier parameters, not a separate "deliberately bad" behavior.
+
+Depends on: B1 (plan layer), B3 (risk gate feeds the candidate pool).
+
+!id combat-ai-tier-configuration
+TIER CONFIGURATION
+
+Two named presets, not a slider: best_possible and weakened. Both run
+identical plan-layer machinery, identical behaviors, identical selection
+logic (B4). Only configuration differs. This is the intended way to build
+difficulty — not by making the AI decide badly, but by dialing the same
+decision-making back.
+
+Parameters:
+- Fog of war: Best-possible OFF (full information), Weakened OFF.
+- Plan pool: Best-possible all plans eligible, Weakened subset of plans.
+- Quality floor (B4): Best-possible narrow (only near-top candidates
+  eligible), Weakened wide (mediocre candidates sometimes chosen).
+- Risk tolerance (B3): Best-possible higher (accepts riskier plans for
+  higher upside), Weakened lower (avoids risk aggressively).
+- Abort thresholds: Best-possible tight (commits only when a plan will
+  likely land), Weakened loose (aborts easily, commits less).
+- Reaction delay: Best-possible 0 ticks, Weakened N ticks (waits before
+  responding to new threats).
+- PinDetector minimum hold duration: Best-possible present, tuned to cost
+  the player meaningfully; Weakened shorter or absent.
+- Concentration aggressiveness: Best-possible high, Weakened low.
+- ChargeReadiness bar: Best-possible permissive, Weakened conservative.
+- Telegraphing: Best-possible none — the AI owes the player no legibility
+  on this tier. Weakened may be present as an intentional design choice —
+  visible tells before committing to a charge, readable pauses, etc.
+
+On full information: Best-possible uses full battlefield awareness — the
+existing non-goal ("the AI sees the whole battlefield, fog of war is out of
+scope") applies to both tiers as a baseline, but on Best-possible this is
+also load-bearing for what "best possible" means: an omniscient opponent,
+not merely a smarter one. This should be a named, stated design decision in
+any player-facing difficulty description, not discovered by the player as an
+implicit asymmetry. If a "no full-information" Best-possible tier is wanted
+later, that's a third config preset, not a rewrite of this system.
+
+On telegraphing: Best-possible does not telegraph because it has no
+obligation to be a fair or legible opponent — its only goal is to be the
+hardest fight the AI can produce, and unpredictability (B4) rather than
+readability is what keeps it interesting across replays. Weakened may
+telegraph as one of several parameters that make it feel weaker without the
+AI "playing dumb" in kind — it is still smart, just easier to read and more
+forgiving.
+
+!id combat-ai-stage-c
+STAGE C — BEHAVIORS EXPRESSED AS PLANS
+
+Now that the plan layer exists, the items that were waiting for it can be
+built. All acceptance criteria below are validated against the post-Stage-A
+baseline and against multiple replays of the same battle, not a single
+playthrough — per B4, a single playthrough cannot demonstrate that plan
+selection is actually varying.
+
+C1. RETREAT OPERATION
+Problem: posture 'retreat' currently returns null from LineBehavior, meaning
+TeamAI issues no new order. The unit stands where it is, in contact with the
+enemy, and is ground down. There is no concept of "withdrawing to a specific
+place" — only "moving to a specific place."
+
+Desired behavior: retreat is a multi-phase plan.
+Phase Disengage: units not currently in melee pull back toward a rally line.
+Engaged units hold. Exit condition: all non-engaged units are behind the
+rally line.
+Phase Screen: a designated rear-guard unit holds at the rally line, facing
+the enemy. Exit condition: rear-guard unit is in position.
+Phase Reform: all units rally at the line, re-form facing the enemy. Exit
+condition: no unit is currently routing.
+Phase Reassess: plan dissolves; normal behavior resumes with fresh
+assessment.
+
+If the reassessment still reads 'retreat', a fresh retreat plan is created
+with a new rally line further back. Retreat continues in waves rather than
+one deep withdrawal. Per B1's priority rule, this plan is sticky and cannot
+be preempted by combined-arms or hammer-and-anvil while active.
+
+Where it lives: src/ai/plans/RetreatPlan.js. Triggered from TeamAI._decide()
+when assessment.posture === 'retreat' and no plan is currently active.
+
+Acceptance criteria:
+- A team losing badly visibly withdraws to a defensible line rather than
+  standing in place and dying.
+- Engaged units are not yanked out of melee — the retreat starts with
+  unengaged units.
+- If the enemy doesn't pursue, the retreat stabilizes at the rally line and
+  the team reforms.
+- A fresh combined-arms opportunity appearing mid-retreat does not interrupt
+  the retreat (verifies B1's priority rule).
+
+Depends on: B1 (plan layer).
+
+C2. COMBINED-ARMS SEQUENCING
+Problem: archers fire, cavalry charges, and infantry advances all happen in
+parallel, on independent clocks. Real combined arms is about sequence:
+soften with arrows, charge the softened target, advance through the gap.
+
+Desired behavior: a combined-arms plan applied to a single objective unit.
+Phase Bombard: all archers focus-fire the objective. Infantry hold at
+standoff. Cavalry hold at staging. Exit condition: objective at or below a
+threshold HP fraction, or N volleys fired, or timeout.
+Phase Charge: cavalry charges the objective (using ChargeReadiness).
+Infantry advance to contact. Exit condition: cavalry is engaged with the
+objective, or charge aborted.
+Phase Exploit: all units press the objective; whatever survives charges
+through. Exit condition: objective destroyed, or timeout.
+
+Key timing property: the charge phase does not begin until the bombard
+phase's exit condition holds. If the objective is not softened, the charge
+is delayed — and if the bombard times out without softening, the plan aborts
+to reactive behavior rather than charging into a fresh target.
+
+Where it lives: src/ai/plans/CombinedArmsPlan.js. Triggered from
+PlanScheduler when the WinPlanner objective exists and the team is in
+'press' or 'hold' posture (not retreat), subject to B4's weighted selection
+against other viable plans and B3's risk gate.
+
+Acceptance criteria:
+- Archers fire first; cavalry does not commit until archer fire has landed.
+- If the objective never softens (archers blocked, or the objective is
+  shielded and regenerating), the plan aborts without a charge.
+- Against the post-Stage-A reactive AI, combined-arms sequencing visibly
+  produces better outcomes than the same units without sequencing.
+
+Depends on: B1 (plan layer), B3 (risk gate), B4 (weighted selection against
+hammer-and-anvil when both are viable), A3 (cavalry group as the charge
+force). B2 (PinDetector) not needed here — the exit condition is HP-based,
+not pin-based.
+
+C3. POSTURE CONSUMPTION
+Problem: press and hold postures are computed and never read. Only 'retreat'
+has any effect (and even that is weak, per C1).
+
+Desired behavior:
+- Press loosens the line-concentration detour limit, widens the focus-fire
+  preference toward aggressive targets, and allows cavalry to accept riskier
+  charges (a lower ChargeReadiness bar).
+- Hold changes nothing.
+- Retreat triggers the retreat plan (C1).
+
+Where posture-conditional parameters offer multiple viable choices (e.g.,
+which aggressive target to concentrate on under press), selection uses B4's
+weighted approach rather than always picking the single best target.
+
+Where it lives: AIConfig gains posture-conditional parameters; TeamAI._decide()
+selects the parameter set based on the current posture before passing them to
+behaviors.
+
+Acceptance criteria:
+- A team with press posture visibly concentrates harder on one point than
+  the same team with hold posture.
+- Posture changes do not cause thrashing — a team flipping press/hold/press
+  on consecutive cycles doesn't oscillate its orders.
+
+Depends on: B1 (plan layer for the retreat half).
+
+!id combat-ai-stage-d
+STAGE D — HAMMER-AND-ANVIL
+
+The first concrete tactic. Exercises every part of the plan layer, and is
+the visible payoff for Stages A-C.
+
+D1. HAMMER-AND-ANVIL TACTIC
+Problem: the AI has no way to execute a timing-dependent tactical
+combination. Each arm acts independently; cavalry charges whatever passes
+readiness, whenever it passes readiness.
+
+Desired behavior: a plan with phases.
+Phase Advance — Anvil (line units): advance to contact with the objective.
+Hammer (cavalry group): move to a staging point off the objective's flank,
+out of contact range. Exit: anvil within engagement range of objective.
+Phase Pin — Anvil: fight the objective. Do not pursue if it retreats.
+Hammer: hold at staging. Exit: PinDetector says the objective is pinned
+(including minimum hold duration on Best-possible — see B2).
+Phase Strike — Anvil: continue fighting, hold the objective's attention.
+Hammer: charge the objective's flank or rear. Exit: hammer makes contact,
+or charge aborts.
+Phase Exploit — Anvil: press through. Hammer: regroup and re-engage. Exit:
+objective destroyed, or timeout.
+
+Role assignment:
+- Anvil — the line units nearest the objective, capped at a number
+  proportional to the objective's size (roughly 1.5 anvil units per enemy
+  line unit engaged). Fragile units (A4) are excluded and instead follow
+  A4's defined fallback behavior.
+- Hammer — the cavalry group on the flank nearer the objective (A3). If no
+  cavalry is available, the plan aborts — no cavalry, no hammer.
+- Everyone else — reactive, in case the tactic fails and a broader fight
+  develops.
+
+Where more than one objective or more than one cavalry group is a viable
+hammer, B4's weighted selection picks among good options rather than always
+the single best-scored pairing.
+
+Abort conditions: the plan aborts if:
+- The objective dies (success — dissolves cleanly).
+- The anvil is destroyed.
+- The hammer is destroyed.
+- The PinDetector never reports pinned within the plan's total timeout.
+- Any phase's individual timeout is exceeded.
+- B3's risk gate would no longer justify the plan given a significant
+  change in world state since entry (e.g., the objective gained
+  reinforcements).
+
+On abort, the plan returns the team to reactive behavior and clears the role
+map — the units that were anvils and hammers become normal units again.
+
+Where it lives: src/ai/plans/HammerAndAnvilPlan.js. Triggered from
+PlanScheduler when the WinPlanner objective is a good candidate and cavalry
+is available and the team is in a 'press' or 'hold' posture, subject to B3's
+risk gate and B4's weighted selection against combined-arms.
+
+Acceptance criteria:
+- A visibly better outcome than the same units fighting reactively (against
+  the post-Stage-A baseline) — the charge lands on a pinned unit rather than
+  a maneuvering one.
+- If the enemy refuses to engage (never gets pinned), the plan aborts
+  cleanly without a wasted charge.
+- If the enemy reacts by turning to face the hammer, the plan is not
+  defeated by this alone — the charge may still land clean, or may abort,
+  but the tactic does not collapse into confusion.
+- Across multiple replays of the same battle with the same player opening,
+  the AI does not always choose hammer-and-anvil over combined-arms (or vice
+  versa) when both are viable — demonstrates B4 is actually active at the
+  tactic-selection level, not just within a single tactic's role assignment.
+
+Depends on: B1 (plan layer), B2 (PinDetector), B3 (risk gate), B4 (weighted
+selection), A3 (cavalry group), A4 (fragile exclusion and fallback).
+
+!id combat-ai-stage-e
+STAGE E — TACTIC VARIATIONS
+
+Cheaper once Stage D exists. Each is a variation on the plan machinery.
+
+E1. REFUSED FLANK
+One end of the line sits further back so the enemy stretches to reach it and
+exposes their own flank. The vocabulary exists (depthOffset); the missing
+piece is a reason to refuse a flank, which the posture system supplies.
+
+Triggered when the team is locally weaker on one side. The plan assigns a
+deeper depthOffset to the weak-side units and shifts the concentration
+objective toward the strong side. Side selection (left vs. right, when both
+are plausible) goes through B4's weighted selection rather than always
+picking the single best-scored side.
+
+Depends on: B1, B4, C3.
+
+E2. REFUSED CENTER
+Same idea, applied to the middle of the line. Requires non-straight line
+geometry, which BattleLineFormation does not currently produce. Moderate
+work — the formation needs a "bowed line" mode.
+
+Depends on: B1, E1 (as a template).
+
+E3. DOUBLE ENVELOPMENT
+Both flanks wrap simultaneously. Two hammer groups, two objectives, or one
+objective attacked from two sides.
+
+Depends on: B1, A3 (for multiple cavalry groups), D1 (as a template).
+
+!id combat-ai-stage-f
+STAGE F — ADVANCED TACTICS
+
+Last. Each has a specific additional requirement.
+
+F1. FEIGNED RETREAT
+Pull back to draw pursuers, then counterattack into them.
+
+Additional requirement: a "combat-ready withdrawal" state, distinct from
+current retreat. Units maintain formation and facing while withdrawing, and
+retain the ability to turn and fight. This is a soldier-state-machine
+addition, not a plan-layer concern.
+
+On Best-possible, this tactic is not obligated to telegraph or be fair —
+consistent with the tier table above. Its robustness against a player who
+learns to recognize it across replays comes from B4: the AI does not always
+open with, or always commit to, a feigned retreat under the same conditions,
+so the player cannot rely on "the AI always fakes here." On Weakened, this
+tactic may be visibly telegraphed or simply excluded from the plan pool
+entirely, consistent with the tier table.
+
+Depends on: B1, C1, B4, soldier state-machine extension.
+
+F2. ECHELON ATTACK
+Commit units in sequence, rotate tired units out. Needs unit-level stamina
+(soldier fatigue exists; unit-level aggregation does not) and a rotation
+schedule.
+
+Depends on: B1, unit-level stamina tracking.
+
+!id combat-ai-non-goals
+NON-GOALS
+
+- Perfect information (fog of war). The AI will continue to see the whole
+  battlefield on both tiers. Scouting and fog of war are out of scope. (Note
+  this is reinforced as an explicit choice on Best-possible; see the tier
+  config entry.)
+
+- Terrain awareness. The AI treats the field as a blank plane. If terrain is
+  added later, this roadmap is a prerequisite but not a solution.
+
+- Player-side AI. The player-controlled team is not driven by any of this.
+
+- Micro-level optimization. This roadmap is about tactics, not about making
+  individual soldiers fight better. Soldier-level combat is unchanged.
+
+- Any opponent modeling, within-battle or cross-battle. Explicitly and
+  deliberately excluded. The AI does not read player tendencies during a
+  battle and does not persist any profile of the player between battles.
+  Unpredictability across replays is achieved entirely through B4's weighted
+  selection at decision time, not through adapting to the player. This was
+  seriously considered and rejected during design review: it adds substantial
+  complexity (a bad opponent model is worse than none) and isn't what's
+  wanted — the AI should always plan smart and react properly to the actual
+  current world state, and separately, sometimes choose a good-but-not-
+  optimal action for unpredictability's sake. Those are the only two things
+  going on.
+
+- Mixed human/AI teams and player-order/plan interaction. Out of scope by
+  construction — confirmed single-human-vs-single-AI, no mixed-control teams
+  exist. Not deferred by assumption; deferred because the scenario doesn't
+  exist in this game.
+
+- A third, continuous difficulty slider. Two named presets only. Do not
+  build a generalized difficulty-parameter slider system; it isn't needed
+  and adds complexity the two-preset system doesn't have.
+
+!id combat-ai-ordering-rationale
+ORDERING RATIONALE
+
+Every stage depends on the ones before it, and the dependency is not
+optional. In summary:
+
+- Stage A supplies vocabulary: a stable cavalry group, a coordinated
+  reinforcement pattern, a fragile-unit read (and its fallback behavior).
+  The plan layer consumes all of it.
+
+- Stage B supplies the infrastructure: persistent plans, phase state
+  machines, role assignment, a pin detector, a cost-risk gate, and weighted
+  unpredictable selection.
+
+- Stage C uses Stage B to express the behaviors that were waiting for it:
+  retreat, combined-arms, posture consumption — validated against the
+  post-Stage-A baseline and across multiple replays.
+
+- Stage D is the first real tactic — the visible payoff.
+
+- Stage E and F are variations, each cheaper than the last because the
+  machinery exists.
+
+Doing stages out of order produces code that gets rewritten. Building the
+plan layer before A produces a role system that doesn't fit the coordination
+patterns Stage A establishes. Building tactics before B means hardcoding the
+same sequence multiple times. Building B4 (weighted selection) after D
+instead of within B means retrofitting non-determinism into a tactic that was
+designed and tested deterministic — significantly more expensive than
+building it in from the start.
+
+!id combat-ai-resolved-questions
+RESOLVED QUESTIONS (previously open)
+
+1. Where does the plan layer's trigger logic live?
+   Resolved: a separate PlanScheduler, invoked from _decide(). More testable
+   than an inline pre-pass, and it's the natural home for B4's weighted
+   selection.
+
+2. How are roles cleared on abort?
+   Resolved: the role map is dropped; units resume reactive behavior next
+   cycle. One tick of stale order is accepted as invisible. Plan events are
+   logged from Stage B onward so this is debuggable early.
+
+3. Does the plan layer interact with UnitIntent?
+   Resolved: kept separate. Intent is per-unit persistence; plan is team-
+   level persistence. A plan assigns the cavalry group a role; the group's
+   internal intents still govern individual unit behavior within that role.
+
+4. What happens if two plans want the same unit?
+   Resolved: only one plan runs per team at a time. Retreat is sticky and
+   cannot be preempted. Non-retreat plans do not preempt each other and only
+   end via their own abort conditions.
+
+5. How is plan success measured?
+   Resolved: each plan defines its own success condition, logged at plan
+   dissolution (objective died for hammer-and-anvil; no units died during
+   the retreat for C1).
+
+6. Does opponent modeling belong in this system, at any timescale?
+   Resolved, after review: no. Neither within-battle nor cross-battle
+   player modeling is built. Unpredictability comes entirely from B4.
+
+7. Player-order / plan interaction for mixed-control teams?
+   Resolved: out of scope by construction — no mixed-control teams exist in
+   this game (single human vs. single AI).
+
+!id combat-ai-change-log
+CHANGE LOG
+
+v1. Initial version. Covers Stages A-F, with the emergence/plan taxonomy as
+the guiding design principle.
+
+v2. Added: reflexes as a fourth taxonomy bucket; fragile-unit fallback
+behavior (A4); PinDetector per-unit-type thresholds and exploit-resistance
+via minimum hold duration (B2); plan priority rules with retreat stickiness
+(B1); plan-event logging moved to Stage B (B1); a plan/action cost-risk gate
+(B3, new); weighted, unpredictable plan and role selection to prevent the AI
+being solved across repeated replays of the same battle (B4, new); a
+two-tier (best_possible / weakened) configuration system replacing a
+continuous-difficulty assumption; explicit rejection of any opponent-
+modeling approach (within-battle or cross-battle) as a non-goal, in favor of
+B4's decision-time unpredictability; baseline-shift note for Stage C/D
+acceptance criteria; explicit scope note on the human-vs-AI, repeated-battle
+context driving these changes.
+
+!id problems-and-missing-pieces
+1-cavalry charges through friendly rank. this will later be set as dangerous. and currently looks like shit
+
+2- if enemy starts very week they just panic and start running. very unfun to play against. there should be an ai mod that tells ai: if you are weak take up position and deal as much as damage you can. Valiant defence set true by scenario
+
+!id roles
+each unit type will have one or more  roles for ai to understand how to use. for example elkriders or horsemen both might be considered cavalry. so that addition of new units wont confuse the ai.
+
+something like a horse archer can also be used both as ranged or cavalry. so Ai will decide in what way to use it
+
+!id cavalry
+Cavalry should only has these jobs: 
+1- being hammer to anvil. 
+2 - taking out routers that it can catch. 
+3- catching open (but not obvious trap, no nearby friendlies) archers. 
+4- acting as reserves and prevention of flanking by enemy cavalry.
+
+!id urgent
+ai does not yet hold a coherent line, organize coordinated action or plan around player formation.
+
+the larget plan needs to be able to identify player weaknesses, where to send the cavalry, how to get around player line. 
+
+Also needs to be able to see dangers from player. such as about to flank. about to envelope etc
+
