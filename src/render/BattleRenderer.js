@@ -353,7 +353,137 @@ export class BattleRenderer {
     return this.views.get(soldierId);
   }
 
-  render() {
+render() {
     this.sceneSetup.render();
+    if (this._flickerAuditOn) this._runFlickerAudit();
+  }
+
+  // Enable/disable per-frame draw-position audit.
+  //
+  // When on, every render checks each visible soldier's last-drawn XZ
+  // position (captured at instance-write time in SoldierInstancer) against
+  // its current scene-graph position. Any MISSING soldier (was not
+  // written to any bucket this frame) or WRONG-POS soldier (written at a
+  // position that differs from its scene-graph position by more than
+  // 0.02 world units) is reported to the console.
+  //
+  // MISSING = culled (frustum check excluded it from the walk entirely,
+  // so no bucket got its instance data). This is the "body disappears for
+  // a frame" case. Shadow throttle then keeps the shadow visible for
+  // 1-3 more frames, producing the visible flicker.
+  //
+  // WRONG-POS should never fire in this pipeline (the write always uses
+  // the current scene-graph matrixWorld), so if it does, something else
+  // is modifying matrices between write and render — a much more serious
+  // bug.
+  //
+  // Cost when ON: one Map iteration over views per render frame.
+  // Cost when OFF: one boolean check per render. Safe to leave in
+  // production with the flag off.
+  setFlickerAudit(on) {
+    this._flickerAuditOn = !!on;
+    if (on) {
+      this._flickerAuditFrame = 0;
+      this._flickerAuditReported = new Map();
+      console.log('[flicker-audit] ON. Watch for [FLICKER] lines. ' +
+        'Rates: MISSING = culled, WRONG-POS = stale buffer (should not happen).');
+    } else {
+      console.log('[flicker-audit] OFF.');
+    }
+  }
+
+_runFlickerAudit() {
+    const frame = ++this._flickerAuditFrame;
+    const findings = [];
+
+    for (const [id, view] of this.views) {
+      if (!view.group.visible) continue;
+      const s = view.soldier;
+
+      // Skip mounted dead soldiers.
+      //
+      // When a mounted soldier dies, the group rotates -π/2 around X to
+      // topple. The rider group carries a local Y offset
+      // (userData.riderMountHeight, 0.50 for every mount), and that
+      // offset gets rotated into a WORLD-SPACE Z offset by the topple.
+      // The body mesh's world XZ therefore differs from the view group's
+      // XZ by exactly 0.50 for every dead mounted soldier — every frame,
+      // forever. This is not a bug; it is the correct transform chain
+      // doing exactly what it should. The audit was comparing the body
+      // mesh's world XZ to view.group.position XZ, so it false-
+      // positived on every dead mounted soldier with a 0.5 err. Killing
+      // those reports is what lets real flicker stand out in the log.
+      if (s.state === 'dead' && view.horseBase) continue;
+
+      const ex = view.group.position.x;
+      const ez = view.group.position.z;
+
+      // MISSING / FLICKER-CULL.
+      //
+      // _auditDrawnX is cleared at the top of SoldierInstancer.update()
+      // for every view (before the frustum-cull check) and set again
+      // only if the view actually walks. So `undefined` here means the
+      // view was CULLED THIS FRAME.
+      //
+      // A culled view is fine if it has been off-screen for a while —
+      // that's the whole point of culling. It is SUSPICIOUS only if the
+      // view was visible within the last few frames, which is the
+      // signature of a boundary flip under a camera pan. Track
+      // _auditVisibleAge (frames since last visible, set by
+      // SoldierInstancer.update) and only report the short-cull case.
+      if (view.group._auditDrawnX === undefined) {
+        const age = view.group._auditVisibleAge || 0;
+        if (age > 0 && age <= 3) {
+          findings.push({
+            kind: 'FLICKER-CULL',
+            soldierId: id,
+            teamId: s.teamId,
+            state: s.state,
+            pos: { x: +s.pos.x.toFixed(3), z: +s.pos.z.toFixed(3) },
+            cullAge: age,
+          });
+        }
+        continue;
+      }
+
+      // WRONG-POS. Should never fire for live soldiers in this
+      // pipeline (the walk always records the just-composed world
+      // matrix), so if it does something else is modifying matrices
+      // between the instancer write and the render.
+      const ddx = view.group._auditDrawnX - ex;
+      const ddz = view.group._auditDrawnZ - ez;
+      const err = Math.hypot(ddx, ddz);
+      if (err > 0.02) {
+        findings.push({
+          kind: 'WRONG-POS',
+          soldierId: id,
+          teamId: s.teamId,
+          state: s.state,
+          expected: { x: +ex.toFixed(3), z: +ez.toFixed(3) },
+          drawn: {
+            x: +view.group._auditDrawnX.toFixed(3),
+            z: +view.group._auditDrawnZ.toFixed(3),
+          },
+          err: +err.toFixed(3),
+        });
+      }
+    }
+
+    if (findings.length === 0) return;
+
+    const toReport = [];
+    for (const f of findings) {
+      const last = this._flickerAuditReported.get(f.soldierId) || 0;
+      if (frame - last < 30) continue;
+      this._flickerAuditReported.set(f.soldierId, frame);
+      toReport.push(f);
+    }
+    if (toReport.length === 0) return;
+
+    console.warn(
+      `[FLICKER] frame=${frame} views=${this.views.size} ` +
+      `findings=${findings.length} new=${toReport.length}`
+    );
+    console.table(toReport);
   }
 }

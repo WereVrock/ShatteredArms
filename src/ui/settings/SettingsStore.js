@@ -22,19 +22,33 @@ const STORAGE_KEY = 'battle.settings.v1';
 //
 // Design intent per tier:
 //   ultraLow — every scene cost cut AND the most aggressive LOD: closest
-//              soldiers render at Simplified, distant ones at Abstracted.
-//              The "will it run on a decade-old laptop" floor.
+//              soldiers render at Simplified, distant ones at Abstracted,
+//              shadow range tightened to 40 units, LOD distance shrunk
+//              to 0.5, animations frozen, MSAA off. The "will it run on
+//              a decade-old laptop" floor.
 //   low      — the same scene cuts, but with Detailed models at closest
-//              range and Abstracted at distance. Lets a player who can
-//              afford triangles but not fill rate keep the fidelity they
-//              care about where they are looking, and pay nothing at
-//              distance.
-//   medium   — everything on at native resolution and medium shadows.
-//              Same LOD range as low. Matches DEFAULTS, so a fresh
-//              install starts on Medium.
+//              range and Abstracted at distance, shadow range at 60
+//              units, LOD distance at 0.7, MSAA off. Lets a player who
+//              can afford triangles but not fill rate keep the fidelity
+//              they care about where they are looking, and pay nothing
+//              at distance.
+//   medium   — everything on at native resolution, medium shadows, full
+//              shadow range, full LOD distance, MSAA on. Matches
+//              DEFAULTS, so a fresh install starts on Medium. This is
+//              the vanilla experience: everything visible, with the
+//              cheap perf guards already in place (no supersampling, no
+//              high-res shadow map).
 //   max      — every quality knob at its ceiling, supersampled render
-//              scale, and LOD disabled so every soldier is Detailed at
-//              every distance. For high-end hardware.
+//              scale, full shadow range, full LOD distance, MSAA on,
+//              and LOD disabled so every soldier is Detailed at every
+//              distance. For high-end hardware.
+//
+// instancedRendering is deliberately absent from every preset — including
+// max — because it is a bug-escape hatch, not a quality tier. Turning it
+// off fixes rendering glitches on some drivers, and a preset switch must
+// never silently re-enable the broken path; the player would have to find
+// the toggle all over again. enableTestFeatures and rushMode are also
+// absent for the same "escape hatch / non-quality" reason.
 const PRESETS = Object.freeze({
   ultraLow: {
     shadowQuality: 'none',
@@ -44,9 +58,12 @@ const PRESETS = Object.freeze({
     fieldEdge: false,
     fog: false,
     lodEnabled: true,
-    modelDetail: 3,       // Simplified at closest range
-    minModelDetail: 4,    // Abstracted at distance
-    disableAnimations: true
+    modelDetail: 3,          // Simplified at closest range
+    minModelDetail: 4,       // Abstracted at distance
+    disableAnimations: true,
+    antialias: false,
+    soldierShadowRange: '40',
+    lodDistanceScale: '0.5'
   },
   low: {
     shadowQuality: 'none',
@@ -56,9 +73,12 @@ const PRESETS = Object.freeze({
     fieldEdge: false,
     fog: false,
     lodEnabled: true,
-    modelDetail: 1,       // Detailed at closest range
-    minModelDetail: 4,    // Abstracted at distance
-    disableAnimations: false
+    modelDetail: 1,          // Detailed at closest range
+    minModelDetail: 4,       // Abstracted at distance
+    disableAnimations: false,
+    antialias: false,
+    soldierShadowRange: '60',
+    lodDistanceScale: '0.7'
   },
   medium: {
     shadowQuality: 'medium',
@@ -68,9 +88,12 @@ const PRESETS = Object.freeze({
     fieldEdge: true,
     fog: true,
     lodEnabled: true,
-    modelDetail: 1,       // Detailed at closest range
-    minModelDetail: 4,    // Abstracted at distance
-    disableAnimations: false
+    modelDetail: 1,          // Detailed at closest range
+    minModelDetail: 4,       // Abstracted at distance
+    disableAnimations: false,
+    antialias: true,
+    soldierShadowRange: 'all',
+    lodDistanceScale: '1'
   },
   max: {
     shadowQuality: 'high',
@@ -79,10 +102,13 @@ const PRESETS = Object.freeze({
     grass: true,
     fieldEdge: true,
     fog: true,
-    lodEnabled: false,    // LOD off — every soldier stays at modelDetail
-    modelDetail: 1,       // Detailed
-    minModelDetail: 4,    // unused when LOD is off; still a valid value
-    disableAnimations: false
+    lodEnabled: false,       // LOD off — every soldier stays at modelDetail
+    modelDetail: 1,          // Detailed
+    minModelDetail: 4,       // unused when LOD is off; still a valid value
+    disableAnimations: false,
+    antialias: true,
+    soldierShadowRange: 'all',
+    lodDistanceScale: '1'
   }
 });
 
@@ -236,23 +262,35 @@ const DEFAULTS = Object.freeze({
   // Draws all soldier parts through a few instanced draw calls instead of
   // one draw call per part. Same geometry, materials, lighting and
   // shadows — only the submission path changes. Turn off to fall back to
-  // the classic per-mesh path. Orthogonal to the graphics presets.
+  // the classic per-mesh path.
+  //
+  // Deliberately not listed by any preset, INCLUDING max: this is a
+  // bug-escape hatch, not a quality tier. Turning it off is a fix for
+  // rendering glitches on some drivers, and a preset switch must never
+  // silently re-enable the broken path behind the player's back. Presets
+  // leave it exactly where the player (or DEFAULTS) put it.
   instancedRendering: true,
   // Optional shadow cut-off for soldiers: 'all' keeps every visible
   // soldier casting a shadow (no visual loss); a number is the distance,
   // in world units from the camera's look-at point, beyond which soldiers
-  // stop casting shadows. Orthogonal to the graphics presets.
+  // stop casting shadows. Part of the graphics presets — the low tiers
+  // tighten the range — but written through set() so a manual tweak made
+  // afterwards survives until the next explicit preset switch.
   soldierShadowRange: 'all',
   // Optional LOD distance multiplier, stored as a string like the other
   // select settings. '1' keeps the authored thresholds (no visual loss);
-  // smaller values shrink the high-detail zones around the camera.
-  // Orthogonal to the graphics presets.
+  // smaller values shrink the high-detail zones around the camera. Part
+  // of the graphics presets — the low tiers shrink it — but written
+  // through set() so a manual tweak made afterwards survives until the
+  // next explicit preset switch.
   lodDistanceScale: '1',
   // Hardware multisampling (MSAA). Smooths edges on small high-contrast
   // parts such as helmets. Only read when the WebGL context is created, so
-  // a change applies after the next battle start / Restart. Costs GPU fill
-  // rate, hence off by default. Orthogonal to the graphics presets.
-  antialias: false,
+  // a change applies after the next battle start / Restart. Costs GPU
+  // fill rate. Default on — Medium (the vanilla experience) includes it,
+  // and the two low preset tiers turn it off as part of their perf
+  // budget.
+  antialias: true,
   // Master switch for in-development features that are not balanced for
   // normal play. Exposed only in the main-menu Settings dialog (see
   // SettingsPanel.open context handling) — the in-game pause menu does

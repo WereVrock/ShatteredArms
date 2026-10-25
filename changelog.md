@@ -14,7 +14,7 @@
 -Units allow each other to pass through. 
 -Tweaked morale and power effects. Morale no longer drain
 -Low discipline troops now look and act like rabble
--Soldiers now fight while moving. Making cavalry be able to pass through enemy unit, moving them down on the way.
+-Soldiers now fight while moving. Making cavalry be able to pass through enemy unit, mowing them down on the way.
 
 # Sun Tzu  Edition : 0.5.2
 -Added Campaign difficulty explanations.

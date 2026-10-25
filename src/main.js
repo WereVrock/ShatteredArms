@@ -642,7 +642,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   // global appears; leave it false and ordinary play is completely
   // silent. Nothing outside the block reads either the wrappers or the
   // window global, so gating the IIFE on the flag is sufficient.
-  const RENDER_DIAG_ENABLED = false;
+  const RENDER_DIAG_ENABLED = true;
   if (RENDER_DIAG_ENABLED) (() => {
     if (window.__diag && typeof window.__diag.off === 'function') {
       try { window.__diag.off(); } catch (e) { /* previous renderer gone */ }
@@ -888,6 +888,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
       },
       dumpCensus: _dumpDrawCensus,
       bisect: () => new RenderBisect(sceneSetup, battleRenderer).run(),
+      flickerAudit: (on) => battleRenderer.setFlickerAudit(on),
       frameStarts,
       syncTimes,
       renderTimes

@@ -584,6 +584,27 @@ _createGroundTexture() {
     this.cameraTarget.x += dx;
     this.cameraTarget.z += dz;
     this._updateCameraTransform();
+
+    // Sun position is derived from cameraTarget (see
+    // _updateCameraTransform above), so a pan moves the sun. Without
+    // this refresh, the shadow map is only updated on the regular
+    // ~30 Hz throttle — and for 1-3 frames after each pan the shadow
+    // is baked with the OLD sun position while the body is drawn with
+    // the NEW camera pose. That reads as "the body shifts while its
+    // shadow stays put" during a pan, exactly like a body-shadow
+    // desync. During pause this is the ONLY shadow-refresh trigger,
+    // because visualDelta is 0 so the forceShadowUpdate path in
+    // BattleRenderer.syncWithSimulation never fires.
+    //
+    // Resetting _lastShadowUpdateMs alongside needsUpdate prevents the
+    // regular throttle from ALSO firing the following frame (which
+    // would double the refresh rate during continuous pan). Net cost:
+    // exactly one shadow render per pan frame, which is what the body
+    // needs to stay visually in sync with its shadow.
+    if (this.renderer) {
+      this.renderer.shadowMap.needsUpdate = true;
+      this._lastShadowUpdateMs = performance.now();
+    }
   }
 
   orbitCamera(dYaw, dPitch) {

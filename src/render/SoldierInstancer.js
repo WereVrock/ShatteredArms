@@ -257,6 +257,16 @@ export class SoldierInstancer {
   // Computes world matrices top-down and emits every visible mesh. Hidden
   // subtrees are skipped entirely (their matrices are not needed).
   _walk(node, parentWorld, soldierCast) {
+    // Top-level call for a view's root group: reset the audit slot for
+    // this view. `parentWorld === IDENTITY` only ever matches the very
+    // first call of the walk (see `_walk(group, IDENTITY, cast)` in
+    // update()); every nested call passes a real node's matrixWorld.
+    if (parentWorld === IDENTITY) {
+      node._auditDrawnX = undefined;
+      node._auditDrawnZ = undefined;
+      this._auditCurrentRoot = node;
+    }
+
     if (node.matrixAutoUpdate) node.updateMatrix();
     node.matrixWorld.multiplyMatrices(parentWorld, node.matrix);
 
@@ -325,6 +335,28 @@ export class SoldierInstancer {
     bucket.colArr[o] = c.r;
     bucket.colArr[o + 1] = c.g;
     bucket.colArr[o + 2] = c.b;
+
+    // Audit tracking: record the FIRST mesh emitted per view per frame.
+    //
+    // Every body builder adds its merged body mesh (torso + head) to the
+    // body group BEFORE adding legs, helmet, weapons, or quiver, so the
+    // first mesh the walk reaches for any soldier is the body mesh. The
+    // body mesh's local position is (0, 0, 0) inside the rider, and the
+    // rider's local position is (0, mountHeight, 0) — Y only. So the
+    // body's world XZ equals view.group.position XZ exactly. That makes
+    // it the correct reference for the flicker audit: "was this soldier
+    // drawn, and if so at the position the scene graph says it should
+    // be?". Legs, weapons, and shields all sit at offsets from that and
+    // are intentionally not used.
+    //
+    // The slot is cleared in _walk at the start of each view's walk and
+    // filled exactly once per frame (the first mesh emitted claims it,
+    // subsequent parts are ignored via the `=== undefined` guard).
+    const root = this._auditCurrentRoot;
+    if (root && root._auditDrawnX === undefined) {
+      root._auditDrawnX = matrix.elements[12];
+      root._auditDrawnZ = matrix.elements[14];
+    }
   }
 
   // --- looks and buckets --------------------------------------------------

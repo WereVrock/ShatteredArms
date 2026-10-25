@@ -1,8 +1,7 @@
 // ===== SettingsPanel.js =====
 // The settings dialog. Three pages, swapped in place inside one modal shell:
 //   root      — a list of category entries (Graphics / Gameplay / UI)
-//   graphics  — the Shadows / Ground texture / Grass / Field boundary / Fog
-//               toggles plus the resolution scale and FPS counter
+//   graphics  — Scene / Quality / Soldiers sections (see _showGraphics)
 //   gameplay  — the double-click direct-march toggle
 //   ui        — the power-balance-scale toggle
 //
@@ -27,7 +26,11 @@ export class SettingsPanel {
     // Toggle-row references. Non-null only while the graphics page is
     // mounted; nulled when returning to the root page so _syncFromStore
     // does not touch detached DOM nodes.
-    this._shadowQualitySelect = null;
+    //
+    // _shadowRow bundles the two shadow selects (quality + range) that
+    // sit side-by-side in the Quality section. The row owns the two
+    // <select> elements as `_qualitySelect` and `_rangeSelect`.
+    this._shadowRow = null;
     this._renderScaleSelect = null;
     this._groundToggle = null;
     this._grassToggle = null;
@@ -198,6 +201,11 @@ export class SettingsPanel {
     this._notifyPage('root');
   }
 
+  // The Graphics page is organised into three visual sections — Scene,
+  // Quality, Soldiers — separated by _buildSectionHeader labels. The
+  // section header is a light text label, not a clickable nav row, so
+  // the Graphics page keeps working as a single scrollable page while
+  // still reading as grouped. See _buildSectionHeader.
   _showGraphics() {
     this._clearToggleRefs();
     this._panel.innerHTML = '';
@@ -210,22 +218,30 @@ export class SettingsPanel {
     this._presetSelect = this._buildPresetRow();
     this._panel.appendChild(this._presetSelect);
 
-    // Shadows. A single dropdown, not a checkbox plus a quality tier —
-    // 'None' turns the shadow pass off, any other value turns it on at
-    // that resolution. Two controls for one concern could drift into an
-    // inconsistent state (Shadows: off, Shadow quality: High) that had no
-    // meaning; a single enum cannot represent that state at all.
-    this._shadowQualitySelect = this._buildSelectRow(
-      'Shadows',
-      'shadowQuality',
-      [
-        { value: 'high',   label: 'High' },
-        { value: 'medium', label: 'Medium' },
-        { value: 'low',    label: 'Low' },
-        { value: 'none',   label: 'None' }
-      ]
-    );
-    this._panel.appendChild(this._shadowQualitySelect);
+    // --- Scene -------------------------------------------------------
+    // Things that change what the battlefield looks like rather than how
+    // fast it renders. None of these cost a shadow pass or a resolution
+    // multiplier, so they cluster together on their own.
+    this._panel.appendChild(this._buildSectionHeader('Scene'));
+    this._groundToggle = this._buildToggleRow('Ground texture', 'groundTexture');
+    this._panel.appendChild(this._groundToggle);
+    this._grassToggle = this._buildToggleRow('Grass', 'grass');
+    this._panel.appendChild(this._grassToggle);
+    this._fieldEdgeToggle = this._buildToggleRow('Field boundary', 'fieldEdge');
+    this._panel.appendChild(this._fieldEdgeToggle);
+    this._fogToggle = this._buildToggleRow('Fog', 'fog');
+    this._panel.appendChild(this._fogToggle);
+
+    // --- Quality -----------------------------------------------------
+    // The big levers — shadow pass, resolution multiplier, anti-aliasing.
+    // Shadows and their range cutoff share one row (see _buildShadowRow)
+    // because they describe one concern; keeping them apart meant a
+    // player could see "Shadows: Medium" and "Soldier shadow range: 60
+    // units" on separate lines and not realise the second only matters
+    // when the first is on.
+    this._panel.appendChild(this._buildSectionHeader('Quality'));
+    this._shadowRow = this._buildShadowRow();
+    this._panel.appendChild(this._shadowRow);
 
     // Resolution scale. Percentage of the (DPR-capped) native backing
     // store: lower renders fewer pixels and the browser upscales, higher
@@ -244,31 +260,24 @@ export class SettingsPanel {
     );
     this._panel.appendChild(this._renderScaleSelect);
 
-    this._groundToggle = this._buildToggleRow('Ground texture', 'groundTexture');
-    this._panel.appendChild(this._groundToggle);
-
-    this._grassToggle = this._buildToggleRow('Grass', 'grass');
-    this._panel.appendChild(this._grassToggle);
-
-    this._fieldEdgeToggle = this._buildToggleRow('Field boundary', 'fieldEdge');
-    this._panel.appendChild(this._fieldEdgeToggle);
-
-    this._fogToggle = this._buildToggleRow('Fog', 'fog');
-    this._panel.appendChild(this._fogToggle);
-
-    // Level-of-detail block. One unit — the LOD master toggle plus the two
-    // tier dropdowns it governs. See _buildLodBlock for the layout and the
-    // range guard between the two tier values.
-    this._panel.appendChild(this._buildLodBlock());
-
-    // Animation freeze. Takes effect immediately — SoldierView reads the
-    // setting every frame. Does not affect death topples or airborne
-    // tumbles, which are state transitions rather than animations.
-    this._disableAnimationsToggle = this._buildToggleRow(
-      'Disable animations',
-      'disableAnimations'
+    // Optional MSAA. Smooths shimmer on small bright parts (helmets,
+    // weapon tips) while units move. Applies on the next battle start.
+    this._antialiasToggle = this._buildToggleRow(
+      'Anti-aliasing (restart to apply)',
+      'antialias'
     );
-    this._panel.appendChild(this._disableAnimationsToggle);
+    this._antialiasToggle.title =
+      'Smooths jagged edges and pixel shimmer on moving units. Takes ' +
+      'effect after pressing Restart or starting a new battle. Costs GPU time.';
+    this._panel.appendChild(this._antialiasToggle);
+
+    // --- Soldiers ----------------------------------------------------
+    // Per-unit LOD and rendering path. The LOD block bundles the master
+    // toggle, the detail-distance select, and the two model-tier
+    // dropdowns — see _buildLodBlock for why it is one block rather than
+    // five sibling rows.
+    this._panel.appendChild(this._buildSectionHeader('Soldiers'));
+    this._panel.appendChild(this._buildLodBlock());
 
     // Instanced soldier rendering. Same visuals, far fewer draw calls.
     // Only worth turning off if something looks wrong.
@@ -281,50 +290,14 @@ export class SettingsPanel {
       'much faster in large battles. Turn off only if you see rendering problems.';
     this._panel.appendChild(this._instancedToggle);
 
-    // Optional shadow cut-off. Costs a little visual quality at the edge
-    // of the screen when set below "Everything visible".
-    this._shadowRangeSelect = this._buildSelectRow(
-      'Soldier shadow range',
-      'soldierShadowRange',
-      [
-        { value: 'all', label: 'Everything visible' },
-        { value: '60',  label: '60 units' },
-        { value: '40',  label: '40 units' },
-        { value: '25',  label: '25 units' }
-      ]
+    // Animation freeze. Takes effect immediately — SoldierView reads the
+    // setting every frame. Does not affect death topples or airborne
+    // tumbles, which are state transitions rather than animations.
+    this._disableAnimationsToggle = this._buildToggleRow(
+      'Disable animations',
+      'disableAnimations'
     );
-    this._shadowRangeSelect.title =
-      'Soldiers farther than this from the camera focus stop casting ' +
-      'shadows. Faster in huge battles.';
-    this._panel.appendChild(this._shadowRangeSelect);
-
-    // Optional: shrink the zones where soldiers render at full detail.
-    // "Normal" is the authored look; the others trade some close-up
-    // detail for speed in big battles.
-    this._lodScaleSelect = this._buildSelectRow(
-      'Detail distance',
-      'lodDistanceScale',
-      [
-        { value: '1',   label: 'Normal' },
-        { value: '0.7', label: 'Reduced (faster)' },
-        { value: '0.5', label: 'Minimal (fastest)' }
-      ]
-    );
-    this._lodScaleSelect.title =
-      'How far from the camera soldiers keep their high-detail models. ' +
-      'Only matters while Level of Detail is on.';
-    this._panel.appendChild(this._lodScaleSelect);
-
-    // Optional MSAA. Smooths shimmer on small bright parts (helmets,
-    // weapon tips) while units move. Applies on the next battle start.
-    this._antialiasToggle = this._buildToggleRow(
-      'Anti-aliasing (restart to apply)',
-      'antialias'
-    );
-    this._antialiasToggle.title =
-      'Smooths jagged edges and pixel shimmer on moving units. Takes ' +
-      'effect after pressing Restart or starting a new battle. Costs GPU time.';
-    this._panel.appendChild(this._antialiasToggle);
+    this._panel.appendChild(this._disableAnimationsToggle);
 
     this._panel.appendChild(this._buildBackRow(() => this._showMain()));
 
@@ -355,13 +328,14 @@ export class SettingsPanel {
     this._notifyPage('gameplay');
   }
 
-  // UI page: on-screen widget visibility. Currently a single toggle
-  // (the power-balance scale). Kept as its own category rather than
-  // folded into Graphics because "which HUD widgets are on screen" is a
-  // distinct concern from "how the scene is rendered" — a player on
-  // low-end hardware may want Graphics settings cranked down but every
-  // HUD element on, and vice versa. This is the natural home for any
-  // future overlay/readout toggles (range circles, order lines, etc.).
+  // UI page: on-screen widget visibility. Currently the FPS counter, the
+  // army-bar overlays, the world-space unit overlays, and the power
+  // balance widget. Kept as its own category rather than folded into
+  // Graphics because "which HUD widgets are on screen" is a distinct
+  // concern from "how the scene is rendered" — a player on low-end
+  // hardware may want Graphics settings cranked down but every HUD
+  // element on, and vice versa. This is the natural home for any future
+  // overlay/readout toggles (range circles, order lines, etc.).
   _showUI() {
     this._clearToggleRefs();
     this._panel.innerHTML = '';
@@ -415,10 +389,7 @@ export class SettingsPanel {
     // Two independent gauges. Either, both or neither can be pinned on
     // screen. With only one pinned, clicking the widget in battle reveals
     // the other plus a numbers readout; with neither, the widget stays
-    // hidden. Kept as its own category rather than folded into Graphics
-    // because "which HUD widgets are on screen" is a distinct concern
-    // from "how the scene is rendered". This is also the natural home for
-    // any future overlay/readout toggles.
+    // hidden.
     this._powerScaleToggle = this._buildToggleRow(
       'Power balance scale',
       'showPowerScale'
@@ -453,10 +424,6 @@ export class SettingsPanel {
   // master toggle today; future test-only settings belong here rather
   // than on the production pages, so their "dev-only" framing cannot
   // drift apart.
-// Main-menu-only page. Gated on _context — see open(). Hosts a single
-  // master toggle today; future test-only settings belong here rather
-  // than on the production pages, so their "dev-only" framing cannot
-  // drift apart.
   _showTestFeatures() {
     this._clearToggleRefs();
     this._panel.innerHTML = '';
@@ -475,7 +442,7 @@ export class SettingsPanel {
   }
 
   _clearToggleRefs() {
-    this._shadowQualitySelect = null;
+    this._shadowRow = null;
     this._renderScaleSelect = null;
     this._groundToggle = null;
     this._grassToggle = null;
@@ -497,7 +464,6 @@ export class SettingsPanel {
     this._unitFlagsToggle = null;
     this._unitBarsToggle = null;
     this._instancedToggle = null;
-    this._shadowRangeSelect = null;
     this._lodScaleSelect = null;
     this._antialiasToggle = null;
     this._testFeaturesToggle = null;
@@ -537,6 +503,25 @@ export class SettingsPanel {
     closeBtn.addEventListener('click', () => this.close());
     row.appendChild(closeBtn);
 
+    return row;
+  }
+
+  // A dim uppercase label that groups the rows below it into a visual
+  // section — "SCENE", "QUALITY", "SOLDIERS" on the Graphics page. Not
+  // clickable; purely visual grouping. The border that separates one
+  // section from the previous one is the previous row's borderBottom,
+  // so this label only needs its own spacing.
+  _buildSectionHeader(labelText) {
+    const row = document.createElement('div');
+    row.textContent = labelText;
+    Object.assign(row.style, {
+      fontSize: '11px',
+      fontWeight: '600',
+      letterSpacing: '0.8px',
+      textTransform: 'uppercase',
+      opacity: '0.5',
+      padding: '14px 0 2px'
+    });
     return row;
   }
 
@@ -637,6 +622,20 @@ export class SettingsPanel {
     text.style.fontSize = '14px';
     row.appendChild(text);
 
+    const select = this._makeSelect(options);
+    select.addEventListener('change', () => {
+      SettingsStore.set(settingsKey, select.value);
+    });
+    row.appendChild(select);
+
+    row._select = select;
+    return row;
+  }
+
+  // Small helper: builds a <select> pre-populated with `options` (an
+  // array of { value, label }) and styled to match the panel palette.
+  // Shared by every select row so their visual language stays identical.
+  _makeSelect(options) {
     const select = document.createElement('select');
     Object.assign(select.style, {
       background: '#2a2f3a',
@@ -654,13 +653,7 @@ export class SettingsPanel {
       el.textContent = opt.label;
       select.appendChild(el);
     }
-    select.addEventListener('change', () => {
-      SettingsStore.set(settingsKey, select.value);
-    });
-    row.appendChild(select);
-
-    row._select = select;
-    return row;
+    return select;
   }
 
   // Preset dropdown. Selecting a non-Custom option calls
@@ -686,32 +679,13 @@ export class SettingsPanel {
     text.style.fontSize = '14px';
     row.appendChild(text);
 
-    const select = document.createElement('select');
-    Object.assign(select.style, {
-      background: '#2a2f3a',
-      color: '#e8e8e8',
-      border: '1px solid #384050',
-      borderRadius: '4px',
-      padding: '3px 6px',
-      fontSize: '13px',
-      fontFamily: 'inherit',
-      cursor: 'pointer'
-    });
-
-    const options = [
+    const select = this._makeSelect([
       { value: 'custom',   label: 'Custom' },
       { value: 'ultraLow', label: 'Ultra low' },
       { value: 'low',      label: 'Low' },
       { value: 'medium',   label: 'Medium' },
       { value: 'max',      label: 'Max' }
-    ];
-    for (const opt of options) {
-      const el = document.createElement('option');
-      el.value = opt.value;
-      el.textContent = opt.label;
-      select.appendChild(el);
-    }
-
+    ]);
     select.addEventListener('change', () => {
       if (select.value === 'custom') return;
       SettingsStore.applyPreset(select.value);
@@ -722,15 +696,94 @@ export class SettingsPanel {
     return row;
   }
 
-  // Level-of-detail block: a master toggle plus two dependent tier
-  // dropdowns. Stored on `this` in four parts because _syncFromStore needs
-  // to write to each independently; the block itself is just the visual
-  // container.
+  // Shadow row. One label, two selects side-by-side — quality on the
+  // left, soldier range on the right — because they describe one
+  // concern: how the shadow pass behaves. A single enum cannot
+  // represent the quality tiers (High / Medium / Low / None); the
+  // second select is the optional distance cutoff beyond which soldiers
+  // stop casting. Keeping them on one row means the player sees both
+  // knobs together instead of hunting the range cutoff on a separate
+  // line. The row stores both selects as `_qualitySelect` and
+  // `_rangeSelect` so _syncFromStore can write to each without a DOM
+  // query.
+  _buildShadowRow() {
+    const row = document.createElement('div');
+    Object.assign(row.style, {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '10px 0',
+      borderBottom: '1px solid #2a2f3a',
+      gap: '8px'
+    });
+
+    const text = document.createElement('span');
+    text.textContent = 'Shadows';
+    text.style.fontSize = '14px';
+    row.appendChild(text);
+
+    const controls = document.createElement('div');
+    Object.assign(controls.style, {
+      display: 'flex',
+      gap: '6px',
+      alignItems: 'center'
+    });
+
+    // Quality select. 'None' turns the shadow pass off; any other value
+    // turns it on at that resolution. SceneSetup maps the three
+    // resolution tiers to 2048² / 1024² / 512² (see SHADOW_MAP_SIZES).
+    const qualitySelect = this._makeSelect([
+      { value: 'high',   label: 'High' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'low',    label: 'Low' },
+      { value: 'none',   label: 'None' }
+    ]);
+    qualitySelect.addEventListener('change', () => {
+      SettingsStore.set('shadowQuality', qualitySelect.value);
+    });
+    controls.appendChild(qualitySelect);
+
+    // Soldier range select. 'all' keeps every visible soldier casting;
+    // any numeric value is the distance, in world units from the camera
+    // look-at point, beyond which soldiers stop casting. Only matters
+    // while shadows are actually on, so the tooltip spells that out.
+    const rangeSelect = this._makeSelect([
+      { value: 'all', label: 'Everything visible' },
+      { value: '60',  label: '60 units' },
+      { value: '40',  label: '40 units' },
+      { value: '25',  label: '25 units' }
+    ]);
+    rangeSelect.title =
+      'Soldiers farther than this from the camera focus stop casting ' +
+      'shadows. Faster in huge battles.';
+    rangeSelect.addEventListener('change', () => {
+      SettingsStore.set('soldierShadowRange', rangeSelect.value);
+    });
+    controls.appendChild(rangeSelect);
+
+    row.appendChild(controls);
+    row._qualitySelect = qualitySelect;
+    row._rangeSelect = rangeSelect;
+    return row;
+  }
+
+  // Level-of-detail block: a master toggle + detail-distance select on
+  // one row, plus two dependent tier dropdowns below. Stored on `this`
+  // in four parts because _syncFromStore needs to write to each
+  // independently; the block itself is just the visual container.
   //
-  // Why one method rather than three sibling rows: the min-tier
-  // dropdown's ENABLED state depends on the master toggle, and both
-  // dropdowns need a range guard that can rewrite the other when the
-  // player picks an out-of-range value.
+  // Why the distance select shares the master row: it is the one knob
+  // that "LOD on / off" makes meaningful, and putting it on its own
+  // line further down made it look independent. On the master row it
+  // reads as part of the same control. The tier dropdowns stay on their
+  // own indented rows because their values are separate concerns (max
+  // detail vs min detail) and want their own titles.
+  //
+  // Why one block rather than four sibling rows: the min-tier
+  // dropdown's ENABLED state depends on the master toggle, the
+  // distance select's ENABLED state depends on the master toggle, and
+  // both dropdowns need a range guard that can rewrite the other when
+  // the player picks an out-of-range value.
   //
   // The min-tier dropdown deliberately OMITS tier 1 — a minimum of
   // "Detailed" would pin every soldier to the most-detailed tier at every
@@ -744,7 +797,7 @@ export class SettingsPanel {
       paddingBottom: '4px'
     });
 
-    // --- master toggle row ---
+    // --- master row: label + checkbox + detail-distance select ---
     const lodRow = document.createElement('label');
     Object.assign(lodRow.style, {
       display: 'flex',
@@ -760,23 +813,48 @@ export class SettingsPanel {
     lodText.style.fontSize = '14px';
     lodRow.appendChild(lodText);
 
-    const lodCheckbox = document.createElement('input');
-    lodCheckbox.type = 'checkbox';
-    lodCheckbox.style.cursor = 'pointer';
-
     const lodHint =
       'Distance-based detail: units close to the camera render at the ' +
       'highest quality, units far away switch to lower-quality models ' +
       'for performance. When off, every unit uses the Model Detail tier ' +
       'below regardless of distance.';
+
+    const controls = document.createElement('div');
+    Object.assign(controls.style, {
+      display: 'flex',
+      gap: '6px',
+      alignItems: 'center'
+    });
+
+    const lodCheckbox = document.createElement('input');
+    lodCheckbox.type = 'checkbox';
+    lodCheckbox.style.cursor = 'pointer';
+    lodCheckbox.title = lodHint;
+    controls.appendChild(lodCheckbox);
+
+    // Detail distance multiplier. Stored as a string; smaller values
+    // shrink the high-detail zones around the camera. 'Normal' is the
+    // authored look. Only meaningful while LOD is on, so this select is
+    // disabled when the master toggle is off — see _applyLodDisabledState.
+    const distanceSelect = this._makeSelect([
+      { value: '1',   label: 'Normal' },
+      { value: '0.7', label: 'Reduced' },
+      { value: '0.5', label: 'Minimal' }
+    ]);
+    distanceSelect.title =
+      'How far from the camera soldiers keep their high-detail models. ' +
+      'Only matters while Level of Detail is on.';
+    distanceSelect.addEventListener('change', () => {
+      SettingsStore.set('lodDistanceScale', distanceSelect.value);
+    });
+    controls.appendChild(distanceSelect);
+
     lodText.title = lodHint;
     lodRow.title = lodHint;
-    lodCheckbox.title = lodHint;
-
-    lodRow.appendChild(lodCheckbox);
+    lodRow.appendChild(controls);
     block.appendChild(lodRow);
 
-    // --- Model Detail dropdown ---
+    // --- Model Detail dropdown (indented) ---
     const modelRow = this._buildIndentedSelectRow(
       'Model Detail',
       [
@@ -793,7 +871,7 @@ export class SettingsPanel {
     const modelSelect = modelRow._select;
     block.appendChild(modelRow);
 
-    // --- Minimum Model Version dropdown ---
+    // --- Minimum Model Version dropdown (indented, tier 1 absent) ---
     // Tier 1 intentionally absent — see the method header.
     const minRow = this._buildIndentedSelectRow(
       'Minimum Model Version',
@@ -817,7 +895,8 @@ export class SettingsPanel {
       this._applyLodDisabledState(
         lodCheckbox.checked,
         minSelect,
-        minRow
+        minRow,
+        distanceSelect
       );
     });
 
@@ -845,6 +924,7 @@ export class SettingsPanel {
     this._modelDetailSelect = modelSelect;
     this._minModelDetailSelect = minSelect;
     this._minModelDetailRow = minRow;
+    this._lodScaleSelect = distanceSelect;
 
     return block;
   }
@@ -873,35 +953,25 @@ export class SettingsPanel {
     text.style.opacity = '0.85';
     row.appendChild(text);
 
-    const select = document.createElement('select');
-    Object.assign(select.style, {
-      background: '#2a2f3a',
-      color: '#e8e8e8',
-      border: '1px solid #384050',
-      borderRadius: '4px',
-      padding: '3px 6px',
-      fontSize: '13px',
-      fontFamily: 'inherit',
-      cursor: 'pointer'
-    });
-    for (const opt of options) {
-      const el = document.createElement('option');
-      el.value = opt.value;
-      el.textContent = opt.label;
-      select.appendChild(el);
-    }
+    const select = this._makeSelect(options);
     row.appendChild(select);
 
     row._select = select;
     return row;
   }
 
-  // Enables or disables the minimum-tier row based on the LOD master
-  // toggle, and dims it when disabled so the visual state matches the
-  // functional state.
-  _applyLodDisabledState(enabled, minSelect, minRow) {
+  // Enables or disables the minimum-tier and detail-distance controls
+  // based on the LOD master toggle, and dims them when disabled so the
+  // visual state matches the functional state. The master checkbox
+  // itself stays enabled — the player must always be able to turn LOD
+  // back on.
+  _applyLodDisabledState(enabled, minSelect, minRow, distanceSelect) {
     minSelect.disabled = !enabled;
     minRow.style.opacity = enabled ? '1' : '0.45';
+    if (distanceSelect) {
+      distanceSelect.disabled = !enabled;
+      distanceSelect.style.opacity = enabled ? '1' : '0.45';
+    }
   }
 
   _buildBackRow(onClick) {
@@ -937,7 +1007,10 @@ export class SettingsPanel {
     if (this._presetSelect) {
       this._presetSelect._select.value = SettingsStore.getMatchingPreset() || 'custom';
     }
-    if (this._shadowQualitySelect) this._shadowQualitySelect._select.value     = s.shadowQuality;
+    if (this._shadowRow) {
+      this._shadowRow._qualitySelect.value = s.shadowQuality;
+      this._shadowRow._rangeSelect.value = String(s.soldierShadowRange || 'all');
+    }
     if (this._renderScaleSelect)   this._renderScaleSelect._select.value       = s.renderScale;
     if (this._groundToggle)        this._groundToggle._checkbox.checked        = !!s.groundTexture;
     if (this._grassToggle)         this._grassToggle._checkbox.checked         = !!s.grass;
@@ -963,8 +1036,12 @@ export class SettingsPanel {
       this._applyLodDisabledState(
         !!s.lodEnabled,
         this._minModelDetailSelect,
-        this._minModelDetailRow
+        this._minModelDetailRow,
+        this._lodScaleSelect
       );
+    }
+    if (this._lodScaleSelect) {
+      this._lodScaleSelect.value = String(s.lodDistanceScale || '1');
     }
     if (this._disableAnimationsToggle) this._disableAnimationsToggle._checkbox.checked = !!s.disableAnimations;
     if (this._doubleClickToggle)   this._doubleClickToggle._checkbox.checked   = !!s.doubleClickDirectMarch;
@@ -984,8 +1061,6 @@ export class SettingsPanel {
     if (this._unitBarsToggle)   this._unitBarsToggle._checkbox.checked   = s.showUnitBars !== false;
     if (this._testFeaturesToggle) this._testFeaturesToggle._checkbox.checked = !!s.enableTestFeatures;
     if (this._instancedToggle) this._instancedToggle._checkbox.checked = s.instancedRendering !== false;
-    if (this._shadowRangeSelect) this._shadowRangeSelect._select.value = String(s.soldierShadowRange || 'all');
-    if (this._lodScaleSelect) this._lodScaleSelect._select.value = String(s.lodDistanceScale || '1');
     if (this._antialiasToggle) this._antialiasToggle._checkbox.checked = !!s.antialias;
   }
 }
