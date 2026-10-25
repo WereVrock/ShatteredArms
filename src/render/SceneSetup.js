@@ -605,7 +605,31 @@ _createGroundTexture() {
     this.camera.updateProjectionMatrix();
   }
 
-  render() {
+// Force a shadow-map refresh on the next render, bypassing the throttle.
+  //
+  // The throttle alone is correct for stationary soldiers, but wrong for
+  // moving ones: the sim tick and the throttle timer are independent
+  // clocks (both ~30 Hz but not phase-locked), so on a tick frame the
+  // soldier's body is drawn at its new position while the shadow map
+  // still holds the previous tick's pose. For 1-2 frames the body is
+  // visibly offset from its own shadow — the "body flickers / body
+  // appears behind its shadow" artifact.
+  //
+  // BattleRenderer calls this on every frame the sim has actually
+  // advanced, so body and shadow always agree whenever soldier
+  // positions change. When paused or stationary, no call is made and
+  // the regular throttle takes over (shadow updates at ~30 Hz but
+  // positions do not change, so no mismatch is possible).
+  //
+  // Resetting _lastShadowUpdateMs keeps the regular throttle from ALSO
+  // firing the following frame, so the effective refresh rate stays at
+  // the sim tick rate rather than doubling.
+  forceShadowUpdate() {
+    this.renderer.shadowMap.needsUpdate = true;
+    this._lastShadowUpdateMs = performance.now();
+  }
+
+render() {
     // Throttled shadow map refresh. autoUpdate is off (see constructor), so
     // the map only re-renders on frames where needsUpdate is set — three.js
     // clears the flag after that one render. Soldiers move a fraction of a

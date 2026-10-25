@@ -128,6 +128,26 @@ export class BattleRenderer {
       shadowRange > 0 ? shadowRange : Infinity
     );
 
+    // Force the shadow map to refresh whenever the sim has advanced.
+    //
+    // The throttle in SceneSetup.render() is fine for stationary
+    // soldiers, but not for moving ones: the throttle timer and the sim
+    // tick are independent clocks (both ~30 Hz but not phase-locked), so
+    // a tick frame can leave the body at its new pose while the shadow
+    // map still holds the previous pose. For 1-2 frames the body is
+    // visibly offset from its own shadow — the "body flickers / body
+    // appears behind its shadow" artifact.
+    //
+    // deltaSeconds is the visual delta from main.js: 0 while paused,
+    // frameDelta otherwise. Any non-zero value means the sim may have
+    // advanced (and the instancer has just rewritten its bucket data
+    // above), so the shadow must be refreshed this frame to stay in
+    // sync. When paused or between ticks, no call is made and the
+    // regular throttle continues to govern the update rate.
+    if (deltaSeconds > 0) {
+      this.sceneSetup.forceShadowUpdate();
+    }
+
     this._syncProjectileViews(projectiles);
 
     this.shieldBreaks = this.shieldBreaks.filter(effect => {
