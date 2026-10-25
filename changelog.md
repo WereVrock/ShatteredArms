@@ -4,7 +4,7 @@
 -Heavy graphic optimization
 -Some ui quality of life updates
 -Scenario player customization
--ordering multiple units at once preserves relationship
+-Ordering multiple units at once preserves relationship
 -AI tweaks:
 	*Fixed some mistakes
 	*Horses now escort archers

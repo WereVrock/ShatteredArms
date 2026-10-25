@@ -33,7 +33,7 @@ function _finiteOr(v, fallback) {
 }
 
 export const AIDebugLog = {
-  enabled: false,
+  enabled: true,
   // When empty, all categories log (once enabled). Add specific category
   // strings to narrow output when the log gets noisy.
   enabledCategories: new Set(),

@@ -494,6 +494,25 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
         const dot = headingX * pushDirX + headingZ * pushDirZ;
         if (dot < dotThreshold) continue;
 
+        // Same-direction gate. When both the pusher and the yielder are
+        // walking in roughly the same direction, they are travelling in
+        // a queue, not passing through each other. The old branch treated
+        // the pair as mutual pass-throughs and toggled the unit spread
+        // factor on/off every tick, producing visible side-to-side
+        // shake. Skip the yield for this pair entirely.
+        //
+        // Head-on (headingDot < 0) and perpendicular (headingDot ≈ 0)
+        // motion still yield as before — those are genuine pass-through
+        // cases. A stationary yielder never reaches this gate
+        // (movedThisTick is false), so it still steps aside for a moving
+        // pusher.
+        if (yielder.movedThisTick && pusher.movedThisTick) {
+          const yHeadX = Math.sin(yielder.moveFacing);
+          const yHeadZ = Math.cos(yielder.moveFacing);
+          const headingDot = headingX * yHeadX + headingZ * yHeadZ;
+          if (headingDot > 0) continue;
+        }
+
         // Flag the yielder's unit for formation spread. This is the
         // unit-level response to the pass-through — the yielder's whole
         // unit widens its ranks laterally so a real corridor opens,
