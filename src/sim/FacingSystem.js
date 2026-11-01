@@ -29,10 +29,13 @@ export class FacingSystem {
     // reached for spear-armed soldiers, but avoids one array allocation
     // per such soldier per tick.
     this._nearbyBuf = [];
+    // Injected by BattleSimulation: per-tick shared id lookup (null = build
+    // a private one).
+    this.soldiersById = null;
   }
 
   update(allSoldiers, unitsById) {
-    const byId = new Map(allSoldiers.map(s => [s.id, s]));
+    const byId = this.soldiersById || new Map(allSoldiers.map(s => [s.id, s]));
 
     for (const soldier of allSoldiers) {
       if (!soldier.isAlive()) continue;

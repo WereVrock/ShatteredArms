@@ -48,6 +48,12 @@ export class ProjectileSystem {
     this.projectiles = [];
     this.events = [];
     this._nextId = 1;
+    // Reusable candidate buffer for the per-projectile spatial query.
+    // Cleared and refilled each call; avoids one array allocation per
+    // arrow per tick. Each query fully consumes `candidates` before the
+    // next projectile's query begins, so cross-arrow aliasing is not
+    // possible — _findCollision returns immediately after the query loop.
+    this._collisionBuffer = [];
   }
 
   // Called by RangedCombatSystem when a volley fires. One arrow per
@@ -79,12 +85,14 @@ export class ProjectileSystem {
     return this.projectiles;
   }
 
-  update(allSoldiers, unitsById, deltaSeconds) {
-    // byId is built once per tick and passed to _resolveHit so an arrow
-    // kill can credit the shooter without a linear scan on every arrow
-    // that lands. Only consulted on a kill, but the map build is cheap
-    // relative to the collision sweep that follows.
-    const byId = new Map(allSoldiers.map(s => [s.id, s]));
+  update(allSoldiers, unitsById, deltaSeconds, soldiersById) {
+    // soldiersById is the shared per-tick id map BattleSimulation already
+    // built for the other systems — passed in so this method does not
+    // rebuild an identical map from allSoldiers every tick. Only consulted
+    // on a kill by _resolveHit. The fallback build keeps the method usable
+    // from any caller that does not have the shared map (headless tools,
+    // tests, one-off scripts).
+    const byId = soldiersById || new Map(allSoldiers.map(s => [s.id, s]));
 
     // Build a fresh list rather than splicing in place — update() can run
     // while outer code (main.js) has already captured a reference to the
@@ -140,7 +148,11 @@ export class ProjectileSystem {
     const segHalfLen = Math.sqrt(segLenSq) / 2;
     const searchRadius = segHalfLen + cfg.hitRadius;
     const radiusInCells = Math.ceil(searchRadius / this.spatialGrid.cellSize) + 1;
-    const candidates = this.spatialGrid.queryNearby(cx, cz, radiusInCells);
+    // Reuse the shared candidate buffer. radiusInCells varies per
+    // projectile, but queryNearbyInto clears and refills the buffer, so
+    // each call sees exactly the cells it asked for.
+    const candidates = this._collisionBuffer;
+    this.spatialGrid.queryNearbyInto(candidates, cx, cz, radiusInCells);
 
     let best = null;
     let bestT = Infinity;

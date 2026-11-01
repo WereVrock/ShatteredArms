@@ -48,6 +48,12 @@ import { CombatConfig } from '../config/CombatConfig.js';
 export class ContactAttackSystem {
   constructor(spatialGrid) {
     this.spatialGrid = spatialGrid;
+    // Reusable candidate buffer for the per-soldier spatial query.
+    // Cleared and refilled each call; saves one array allocation per
+    // marching soldier per tick. The `nearby` reference is fully
+    // consumed by the inner loop before the next soldier's query, so
+    // cross-soldier aliasing is not possible.
+    this._nearbyBuffer = [];
   }
 
   update(allSoldiers) {
@@ -70,9 +76,8 @@ export class ContactAttackSystem {
         continue;
       }
 
-      const nearby = this.spatialGrid.queryNearby(
-        soldier.pos.x, soldier.pos.z, 1
-      );
+      const nearby = this._nearbyBuffer;
+      this.spatialGrid.queryNearbyInto(nearby, soldier.pos.x, soldier.pos.z, 1);
       const moveFacing = soldier.moveFacing;
 
       let bestId = null;

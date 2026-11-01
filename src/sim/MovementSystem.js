@@ -1,4 +1,5 @@
 import { CombatConfig } from '../config/CombatConfig.js';
+import { MakeWayGate } from './MakeWayGate.js';
 
 // Moves soldiers each tick based on their state, and tracks each soldier's
 // actual current speed + movement heading (moveFacing).
@@ -27,10 +28,15 @@ export class MovementSystem {
     // Each yielder's iteration completes before the next yielder starts,
     // so nothing holds a reference across calls.
     this._nearbyBuf = [];
+    // Injected by BattleSimulation: per-tick shared id lookup (null = build
+    // a private one).
+    this.soldiersById = null;
+    // Pre-filter for the make-way neighbour scan. See MakeWayGate.js.
+    this._makeWayGate = new MakeWayGate();
   }
 
 update(allSoldiers, unitsById, deltaSeconds) {
-    const byId = new Map(allSoldiers.map(s => [s.id, s]));
+    const byId = this.soldiersById || new Map(allSoldiers.map(s => [s.id, s]));
 
     // Pre-pass: which units currently have a soldier in melee. Idle unit-mates
     // advance on the fight instead of holding formation.
@@ -408,6 +414,8 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     // standing yielder from close range. Fed to _updateUnitSpread below
     // to ramp each affected unit's lateral formation spread.
     const passingThroughUnits = new Set();
+    const gate = this._makeWayGate;
+    gate.build(allSoldiers);
 
     // Higher speed threshold for the unit-wide spread flag than for the
     // per-soldier nudge. The nudge fires as soon as a pusher is barely
@@ -453,7 +461,14 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
       // inner pusher loop can read them for the unit-proximity gate
       // without recomputing per pusher.
       const yielderUnit = unitsById ? unitsById.get(yielder.unitId) : null;
-      const yielderUnitCenter = yielderUnit ? yielderUnit.getCenter() : null;
+      // Resolved lazily at first use inside the pusher loop. No position
+      // changes between here and there, so the value is identical to an
+      // eager lookup, but yielders with no pusher nearby never pay for it.
+      let yielderUnitCenter;
+
+      // No other-unit walking friendly within reach: the scan below could
+      // only leave weightSum at 0 and `continue`, so skip it.
+      if (!gate.mayHavePusher(yielder)) continue;
 
       const nearby = this.spatialGrid.queryNearbyInto(
         this._nearbyBuf, yielder.pos.x, yielder.pos.z, 1);
@@ -545,6 +560,9 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
           (pusherUnit.hasActiveOrder || pusherUnit.focusTargetUnitId));
 
         let unitCentersClose = true;
+        if (yielderUnitCenter === undefined) {
+          yielderUnitCenter = yielderUnit ? yielderUnit.getCenter() : null;
+        }
         if (yielderUnitCenter && pusherUnit) {
           const puCenter = pusherUnit.getCenter();
           const dxc = puCenter.x - yielderUnitCenter.x;
@@ -652,7 +670,11 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
       if (unit._spreadFactor === undefined) unit._spreadFactor = 1.0;
 
       const detected = passingThroughUnits.has(unit.id);
-      const engaged = this._unitInMelee(unit);
+      // Only read when the unit is being passed through, or by the debug
+      // trace below, so the per-unit soldier walk is skipped otherwise.
+      const engaged = (detected || (typeof window !== 'undefined' && window.__spreadDebug))
+        ? this._unitInMelee(unit)
+        : false;
 
       // Opt-in debug trace. Enable from the browser console with
       //   window.__spreadDebug = true

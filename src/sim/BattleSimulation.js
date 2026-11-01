@@ -1,5 +1,6 @@
 // ===== BattleSimulation.js =====
 import { SpatialGrid } from './SpatialGrid.js';
+import { ProximityMap } from './ProximityMap.js';
 import { TargetingSystem } from './TargetingSystem.js';
 import { MovementSystem } from './MovementSystem.js';
 import { ThreatFacingSystem } from './ThreatFacingSystem.js';
@@ -60,6 +61,18 @@ export class BattleSimulation {
       this.battleAI.onVolleyFired(unitId, teamId);
     };
     this.moraleSystem = new MoraleSystem(this.spatialGrid, this.playerTeamId);
+
+    // Coarse presence map + one shared id lookup, both refreshed inside
+    // tick(). They let systems skip per-soldier neighbour scans that cannot
+    // find anything (see ProximityMap.js) and stop each system from
+    // rebuilding its own per-tick Map of every soldier.
+    this.proximityMap = new ProximityMap(CombatConfig.mapBounds);
+    this._soldiersById = new Map();
+    this.targetingSystem.proximity = this.proximityMap;
+    this.targetingSystem.soldiersById = this._soldiersById;
+    this.movementSystem.soldiersById = this._soldiersById;
+    this.facingSystem.soldiersById = this._soldiersById;
+    this.moraleSystem.proximity = this.proximityMap;
     this.collisionSystem = new CollisionSystem(this.spatialGrid);
     this.boundsSystem = new BoundsSystem();
     // Passing-attack detection. Runs after CollisionSystem so all
@@ -112,9 +125,21 @@ export class BattleSimulation {
   }
 
   getAllSoldiers() {
-    const all = [];
+    // Preallocate and fill directly. The spread in push(...unit.soldiers)
+    // goes through the arguments object and, on units with hundreds of
+    // soldiers, can approach engine argument-count limits. Both problems
+    // are avoided with a counted write into a sized array — same order,
+    // same references, no behavioural difference. Called once per frame
+    // by main.js for the renderer sync, so this is on the render hot path.
+    let total = 0;
+    for (const unit of this.units) total += unit.soldiers.length;
+    const all = new Array(total);
+    let idx = 0;
     for (const unit of this.units) {
-      all.push(...unit.soldiers);
+      const soldiers = unit.soldiers;
+      for (let i = 0; i < soldiers.length; i++) {
+        all[idx++] = soldiers[i];
+      }
     }
     return all;
   }
@@ -156,6 +181,11 @@ export class BattleSimulation {
     if (prof) prof.mark('unitUpdate');
 
     this.spatialGrid.rebuild(allSoldiers);
+    // Same positions as the grid: lets targeting skip scans that cannot hit.
+    this.proximityMap.rebuild(allSoldiers);
+    const soldiersById = this._soldiersById;
+    soldiersById.clear();
+    for (const s of allSoldiers) soldiersById.set(s.id, s);
     if (prof) prof.mark('grid');
     this.targetingSystem.update(allSoldiers, this.unitsById);
     if (prof) prof.mark('targeting');
@@ -177,7 +207,7 @@ export class BattleSimulation {
     if (prof) prof.mark('melee');
     this.rangedCombatSystem.update(allSoldiers, this.unitsById);
     if (prof) prof.mark('ranged');
-    this.projectileSystem.update(allSoldiers, this.unitsById, this.deltaSeconds);
+    this.projectileSystem.update(allSoldiers, this.unitsById, this.deltaSeconds, this._soldiersById);
     if (prof) prof.mark('projectile');
 
     // Champion death check runs BEFORE morale so a Blood Pact revive
@@ -193,6 +223,9 @@ export class BattleSimulation {
     this.orphanedMountSystem.update(pendingMounts, this);
     if (prof) prof.mark('champion');
 
+    // Positions and routing flags have changed since the grid rebuild; the
+    // morale neighbour gate needs the current ones.
+    this.proximityMap.rebuild(allSoldiers);
     this.moraleSystem.update(allSoldiers, this.unitsById, this.debugHistoryEnabled);
     if (prof) prof.mark('morale');
     this.boundsSystem.update(allSoldiers);

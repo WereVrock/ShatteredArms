@@ -24,6 +24,17 @@ export class TargetingSystem {
     // function return.
     this._candidates = [];
 
+    // Injected by BattleSimulation. proximity answers "may an enemy stand
+    // inside this square?" in O(1) so empty scans are skipped; soldiersById
+    // is the per-tick shared id lookup (null = build a private one).
+    this.proximity = null;
+    this.soldiersById = null;
+
+    // Per-pass caches for focus-target units. Every soldier of an attacking
+    // unit asks the same unit the same two questions each tick.
+    this._focusAliveCache = new Map();
+    this._focusDefeatedCache = new Map();
+
     // Cooldown applied when a marching soldier's scan returns null. During
     // the approach phase the nearby grid is ~200 ALLIED soldiers per soldier
     // (the formation is packed together), all filtered by teamId, so every
@@ -41,7 +52,9 @@ export class TargetingSystem {
   }
 
   update(allSoldiers, unitsById) {
-    const byId = new Map(allSoldiers.map(s => [s.id, s]));
+    const byId = this.soldiersById || new Map(allSoldiers.map(s => [s.id, s]));
+    this._focusAliveCache.clear();
+    this._focusDefeatedCache.clear();
     const allyBeaconsByUnit = this._buildAllyRallyBeacons(allSoldiers, byId);
 
     for (const soldier of allSoldiers) {
@@ -83,7 +96,15 @@ export class TargetingSystem {
         : null;
       if (unit && focusId) {
         const focusUnit = unitsById.get(focusId);
-        if (!focusUnit || focusUnit.isDefeated()) {
+        let focusDefeated = true;
+        if (focusUnit) {
+          focusDefeated = this._focusDefeatedCache.get(focusId);
+          if (focusDefeated === undefined) {
+            focusDefeated = focusUnit.isDefeated();
+            this._focusDefeatedCache.set(focusId, focusDefeated);
+          }
+        }
+        if (focusDefeated) {
           // Clear whichever field was supplying this id, so a stale
           // dead-unit id does not persist across cycles.
           if (unit.focusTargetUnitId === focusId) unit.focusTargetUnitId = null;
@@ -121,7 +142,11 @@ export class TargetingSystem {
           // (e.g. the goblin archer's 12) is respected here the same
           // way it already is in _searchRadiusFor and in
           // RangedCombatSystem's fire check.
-          const focusSoldiers = focusUnit.getAliveSoldiers();
+          let focusSoldiers = this._focusAliveCache.get(focusId);
+          if (focusSoldiers === undefined) {
+            focusSoldiers = focusUnit.getAliveSoldiers();
+            this._focusAliveCache.set(focusId, focusSoldiers);
+          }
           let nearest = null;
           let nearestDistSq = Infinity;
           for (const fs of focusSoldiers) {
@@ -329,6 +354,14 @@ export class TargetingSystem {
 _findNearestEnemy(soldier, searchRadius) {
     const radius = searchRadius ?? CombatConfig.targetSearchRadius;
     const radiusSq = radius * radius;
+    // O(1) presence test: no enemy inside the search square means the grid
+    // scan below could only return null, so skip it.
+    const proximity = this.proximity;
+    if (proximity !== null &&
+        !proximity.hasEnemyWithin(
+          soldier.teamId, soldier.pos.x, soldier.pos.z, radius)) {
+      return null;
+    }
     // Early-out threshold. Any enemy inside engagement range is close
     // enough to fight, so returning the first one found is behaviourally
     // identical to "nearest" once the soldier has committed to melee. This

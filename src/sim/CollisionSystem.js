@@ -43,7 +43,10 @@ update(allSoldiers) {
         this._nearbyBuf, a.pos.x, a.pos.z, 1);
 
       for (const b of nearby) {
-        if (b === a) continue;
+        // Pair ownership first (also covers b === a): half the candidates
+        // leave here without touching isAlive() or state. The later checks
+        // are pure filters, so reordering does not change any result.
+        if (a.id >= b.id) continue;
         if (!b.isAlive()) continue;
         if (b.state === 'knockedDown') continue;
         // Process each pair once. Lower id wins the tie so the outer loop

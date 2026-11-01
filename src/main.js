@@ -1043,6 +1043,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
         console.log('[diag] disabled');
       },
       dumpCensus: _dumpDrawCensus,
+      matCensus: () => battleRenderer.dumpMaterialCensus(),
       bisect: () => new RenderBisect(sceneSetup, battleRenderer).run(),
       flickerAudit: (on) => battleRenderer.setFlickerAudit(on),
       frameStarts,

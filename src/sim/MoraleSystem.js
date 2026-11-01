@@ -4,6 +4,13 @@ import { soldierHasProperty } from '../config/RaceConfig.js';
 import { Property } from '../config/Properties.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
 
+// Half extent (world units) of the square the neighbour-scan gate checks.
+// The grid query reaches 2 cells (cell size 2.0) around the soldier, up to
+// 6 units away, plus one cell of slack for the grid origin and ~1.5 units
+// of movement / collision drift since the grid was rebuilt. A soldier with
+// an enemy or a routing soldier inside this square takes the full scan.
+const SCAN_GATE_HALF_EXTENT = 10;
+
 // Runs once per sim tick, after combat. Reads each soldier's local situation
 // and updates their morale, entering / leaving 'routing' at the thresholds.
 //
@@ -54,6 +61,15 @@ export class MoraleSystem {
     // within one _updateSoldier call, so reuse is safe.
     this._nearbyBuf = [];
 
+    // Neighbour-scan gate (see ProximityMap.js). `proximity` is injected by
+    // BattleSimulation; null keeps the full scan for every soldier.
+    this.proximity = null;
+    this._emptyBuf = Object.freeze([]);
+    // Cleared when a soldier flips to routing during the current pass:
+    // later soldiers in the same pass must then see that routing flag, so
+    // they fall back to the full scan.
+    this._fastScanOk = true;
+
     // Reusable scratch object for the per-source breakdown. Filled in place
     // for every soldier, but only ever READ when a transition is about to be
     // logged (or the soldier is on the watch list) — so it costs no
@@ -81,6 +97,7 @@ export class MoraleSystem {
   }
 
   update(allSoldiers, unitsById, debugHistoryEnabled) {
+    this._fastScanOk = true;
     const aliveByUnit = new Map();
     for (const [unitId, unit] of unitsById) {
       aliveByUnit.set(unitId, unit.getAliveSoldiers().length);
@@ -378,7 +395,16 @@ export class MoraleSystem {
     }
 
     // --- Single nearby pass: strength sums, nearest enemy, rout perception ---
-    const nearby = this.spatialGrid.queryNearbyInto(
+    // With no enemy and no routing soldier nearby the scan below can only
+    // sum ally mass, and only the debug breakdown reads that, so it is
+    // replaced by an empty candidate list.
+    const proximity = this.proximity;
+    const skipScan = this._fastScanOk && proximity !== null &&
+      !proximity.hasEnemyWithin(
+        soldier.teamId, soldier.pos.x, soldier.pos.z, SCAN_GATE_HALF_EXTENT) &&
+      !proximity.hasRoutingWithin(
+        soldier.pos.x, soldier.pos.z, SCAN_GATE_HALF_EXTENT);
+    const nearby = skipScan ? this._emptyBuf : this.spatialGrid.queryNearbyInto(
       this._nearbyBuf, soldier.pos.x, soldier.pos.z, 2);
 
     let allyStrength = soldier.effectiveMass;
@@ -660,6 +686,7 @@ export class MoraleSystem {
       }
 
       soldier.isRouting = true;
+      this._fastScanOk = false;
       soldier.targetId = null;
       soldier.fleeDirection = { x: 0, z: 0 };
       if (shouldShatter) {

@@ -16,6 +16,12 @@ const DEATH_FALL_DURATION = 0.55;
 // Soldiers at this LOD tier or farther are fully synced every second frame
 // (staggered across soldiers) instead of every frame.
 const FAR_TIER = 4;
+
+// A far soldier does one full sync every FAR_SYNC_PERIOD frames; the
+// skipped frames' time is carried into the next full sync. The sim only
+// moves soldiers at 15 Hz, so at far-tier distance a 4-frame period is
+// below what the eye can separate. Set to 2 for the previous half-rate.
+const FAR_SYNC_PERIOD = 4;
 let _syncPhaseCounter = 0;
 
 // Blood-thrall body tint. A raised skeleton blends toward this dark blood
@@ -134,7 +140,7 @@ export class SoldierView {
 
     // Half-rate sync state for far soldiers. The phase alternates per
     // call; the stagger spreads views evenly across the two frame parities.
-    this._skipPhase = (_syncPhaseCounter++ & 1) === 1;
+    this._skipCounter = _syncPhaseCounter++ % FAR_SYNC_PERIOD;
     this._carriedDelta = 0;
     this._forceSync = false;
 
@@ -269,8 +275,8 @@ export class SoldierView {
     // into the next full sync so timers and walk phase stay correct. A
     // pending forced sync (new model after a tier change) is never skipped.
     if (this._tier >= FAR_TIER && !this._forceSync) {
-      this._skipPhase = !this._skipPhase;
-      if (this._skipPhase) {
+      this._skipCounter = (this._skipCounter + 1) % FAR_SYNC_PERIOD;
+      if (this._skipCounter !== 0) {
         this._carriedDelta += deltaSeconds;
         return;
       }

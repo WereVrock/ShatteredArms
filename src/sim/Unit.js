@@ -277,11 +277,22 @@ _layoutGrid(cols, spacing, soldiers = this.soldiers) {
     return this.getAliveSoldiers().length === 0;
   }
 
+  // Direct loop instead of filter + reduce: same result, no intermediate
+  // array (getAliveSoldiers) and no per-soldier accumulator object. Called
+  // from centerTowardUnit on every pair TeamAI's weak-point scorer touches,
+  // so the allocation saving is per-pair, per-decision-cycle.
   getCenter() {
-    const alive = this.getAliveSoldiers();
-    if (alive.length === 0) return { x: 0, z: 0 };
-    const sum = alive.reduce((acc, s) => ({ x: acc.x + s.pos.x, z: acc.z + s.pos.z }), { x: 0, z: 0 });
-    return { x: sum.x / alive.length, z: sum.z / alive.length };
+    let sumX = 0;
+    let sumZ = 0;
+    let count = 0;
+    for (const s of this.soldiers) {
+      if (!s.isAlive()) continue;
+      sumX += s.pos.x;
+      sumZ += s.pos.z;
+      count++;
+    }
+    if (count === 0) return { x: 0, z: 0 };
+    return { x: sumX / count, z: sumZ / count };
   }
 
   // Ranged power: a single number representing this unit's contribution
@@ -903,9 +914,15 @@ _recomputeShapeForWidth(widthUnits) {
   // grid (a thin, off-centre front row) until the next order. When the
   // living count differs from the count the layout was built for, re-lay
   // out now so the smaller row ends up centered at the back.
-reflowIfCasualties() {
+  reflowIfCasualties() {
     if (this._laidOutCount === undefined) return;
-    const count = this.getAliveSoldiers().length;
+    // Count directly — the alive array is only needed when the count has
+    // actually changed, which is the rare path. Skips the array allocation
+    // on every tick for every unit.
+    let count = 0;
+    for (const s of this.soldiers) {
+      if (s.isAlive()) count++;
+    }
     if (count === 0 || count === this._laidOutCount) return;
 
     // Reflow reassigns formation offsets by world position, which is

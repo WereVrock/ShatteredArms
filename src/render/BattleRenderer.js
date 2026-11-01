@@ -182,6 +182,20 @@ export class BattleRenderer {
   // never selects more than a few dozen soldiers allocates the initial
   // capacity once and never touches it again.
   _syncSelectionRings(allSoldiers, unitsById) {
+    // Early-exit when nothing is selected. Walks unitsById (cheap, tens
+    // of entries) instead of allSoldiers (thousands) when the selection
+    // is empty — the per-soldier walk is the hot cost this method exists
+    // to avoid, and it runs every frame regardless of selection state.
+    let anySelected = false;
+    for (const unit of unitsById.values()) {
+      if (unit.selected) { anySelected = true; break; }
+    }
+    if (!anySelected) {
+      if (this._selectionRingMesh.count !== 0) {
+        this._selectionRingMesh.count = 0;
+      }
+      return;
+    }
     // Capacity vs drawn-count: `instanceMatrix.count` is the allocated
     // buffer size and never changes except on an explicit grow. `.count`
     // is how many instances drew LAST frame. An earlier version of this

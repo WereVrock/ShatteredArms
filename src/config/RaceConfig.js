@@ -355,3 +355,54 @@ export function raceHasProperty(unitTypeDef, property) {
   const race = raceOf(unitTypeDef);
   return Array.isArray(race.properties) && race.properties.includes(property);
 }
+
+// Soldier-aware race resolution. A soldier may carry its own `race` field,
+// set at construction from the unit type and (for the champion soldier of
+// the champion's retinue) re-assigned to the champion's own race record by
+// CampaignBattleBuilder.applyChampionToUnit. Falls back to
+// raceOf(soldier.unitTypeDef) for every other soldier, so existing
+// behaviour is preserved exactly when the override is not present.
+export function raceOfSoldier(soldier) {
+  if (!soldier) return Races[DEFAULT_RACE];
+  const r = soldier.race;
+  if (typeof r === 'string') return getRace(r);
+  if (r && typeof r === 'object') return r;
+  return raceOf(soldier.unitTypeDef);
+}
+
+// Soldier-aware property lookup. Combines the type's own extraProperties /
+// excludesProperties lists with the soldier's own per-soldier lists (if
+// any) and the resolved race's properties. Precedence, highest first:
+//
+//   1. Type-level excludesProperties — a "stamp" that applies to every
+//      soldier of the type, regardless of that soldier's individual race.
+//   2. Type-level extraProperties — same stamp, additive.
+//   3. Soldier-level excludesProperties — per-soldier opt-out.
+//   4. Soldier-level extraProperties — per-soldier addition.
+//   5. Race properties (via raceOfSoldier).
+//
+// On a soldier without its own extra/exclude fields, this returns the same
+// answer as raceHasProperty(soldier.unitTypeDef, p) — the two are
+// deliberately interchangeable in that case.
+export function soldierHasProperty(soldier, property) {
+  if (!soldier) return false;
+  const typeDef = soldier.unitTypeDef;
+  if (typeDef && Array.isArray(typeDef.excludesProperties)
+      && typeDef.excludesProperties.includes(property)) {
+    return false;
+  }
+  if (typeDef && Array.isArray(typeDef.extraProperties)
+      && typeDef.extraProperties.includes(property)) {
+    return true;
+  }
+  if (Array.isArray(soldier.excludesProperties)
+      && soldier.excludesProperties.includes(property)) {
+    return false;
+  }
+  if (Array.isArray(soldier.extraProperties)
+      && soldier.extraProperties.includes(property)) {
+    return true;
+  }
+  const race = raceOfSoldier(soldier);
+  return Array.isArray(race.properties) && race.properties.includes(property);
+}
