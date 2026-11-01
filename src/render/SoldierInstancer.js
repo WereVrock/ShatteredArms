@@ -66,6 +66,43 @@ function touchAttribute(attr, floats) {
   attr.needsUpdate = true;
 }
 
+// Everything one soldier wrote into the buckets during its last full walk:
+// the destination bucket, the material (for its colour) and the world
+// matrix of every emitted part. Replaying it reproduces that walk's output
+// without touching the scene graph.
+class PartRecord {
+  constructor() {
+    this.generation = -1;
+    this.cast = false;
+    this.count = 0;
+    this.buckets = [];
+    this.materials = [];
+    this.matrices = new Float32Array(16 * 8);
+  }
+
+  begin(generation, cast) {
+    this.generation = generation;
+    this.cast = cast;
+    this.count = 0;
+  }
+
+  push(bucket, material, matrix) {
+    const k = this.count++;
+    if ((k + 1) * 16 > this.matrices.length) {
+      const grown = new Float32Array(this.matrices.length * 2);
+      grown.set(this.matrices);
+      this.matrices = grown;
+    }
+    this.buckets[k] = bucket;
+    this.materials[k] = material;
+    matrix.toArray(this.matrices, k * 16);
+  }
+
+  matches(generation, cast) {
+    return this.generation === generation && this.cast === cast;
+  }
+}
+
 export class SoldierInstancer {
   constructor(scene, enabled = true) {
     this.scene = scene;
@@ -93,6 +130,30 @@ export class SoldierInstancer {
     this._drawnSoldiers = 0;
     this._culledSoldiers = 0;
 
+    // Bumped by dispose() so records that point at discarded buckets are
+    // never replayed.
+    this._generation = 0;
+
+    // Every adopted view, so the rebuild check can scan them without
+    // depending on the one-shot iterable update() receives.
+    this._views = [];
+
+    // What the buckets were last rebuilt from (see _needsRebuild).
+    this._sigValid = false;
+    this._sigGeneration = -1;
+    this._sigProjView = new Float64Array(16);
+    this._sigShadowX = NaN;
+    this._sigShadowZ = NaN;
+    this._sigShadowRange = NaN;
+    this._sigHidden = false;
+    this._sigNoCast = false;
+
+    // True when the last update() rebuilt the buckets, false when it
+    // found nothing changed and left them as they were.
+    this.rebuiltLastUpdate = true;
+    // PartRecord being filled by the walk in progress, or null.
+    this._rec = null;
+
     this._cpuMsSum = 0;
     this._cpuFrames = 0;
   }
@@ -101,6 +162,7 @@ export class SoldierInstancer {
   // group to the scene in its constructor; when instancing is on that group
   // must come back out.
   adopt(view) {
+    this._views.push(view);
     if (this.enabled) this.scene.remove(view.group);
   }
 
@@ -109,6 +171,7 @@ export class SoldierInstancer {
     on = !!on;
     if (on === this.enabled) return;
     this.enabled = on;
+    this._sigValid = false;
 
     for (const view of views) {
       if (on) this.scene.remove(view.group);
@@ -133,13 +196,24 @@ export class SoldierInstancer {
   //   shadowCenter { x, z } the point shadow range is measured from
   //   shadowRange  world units; Infinity (or <= 0) = every soldier casts
   update(views, camera, shadowCenter, shadowRange) {
-    if (!this.enabled) return;
+    if (!this.enabled) {
+      this.rebuiltLastUpdate = true;
+      return;
+    }
 
     const t0 = performance.now();
 
     camera.updateMatrixWorld();
     this._projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this._frustum.setFromProjectionMatrix(this._projView);
+
+    if (!this._needsRebuild(shadowCenter, shadowRange)) {
+      this.rebuiltLastUpdate = false;
+      this._cpuMsSum += performance.now() - t0;
+      this._cpuFrames++;
+      return;
+    }
+    this.rebuiltLastUpdate = true;
 
     const all = this._all;
     for (let i = 0; i < all.length; i++) all[i].n = 0;
@@ -207,7 +281,7 @@ export class SoldierInstancer {
         cast = dx * dx + dz * dz <= range2;
       }
 
-      this._walk(group, IDENTITY, cast);
+      this._drawView(view, group, cast);
       drawn++;
     }
 
@@ -248,11 +322,107 @@ export class SoldierInstancer {
     }
     for (const look of this._lookByKey.values()) look.material.dispose();
     this._all.length = 0;
+    this._generation++;
     this._buckets.clear();
     this._lookByKey.clear();
   }
 
   // --- traversal ----------------------------------------------------------
+
+  // True when anything that decides the buckets' contents changed since the
+  // last rebuild: the camera frustum, the shadow centre or range, a debug
+  // switch, a discarded bucket set, or a visible view whose sync rewrote
+  // its nodes. A culled dirty view is ignored: only a camera change can
+  // bring it back, and the frustum check catches that.
+  _needsRebuild(shadowCenter, shadowRange) {
+    const pv = this._projView.elements;
+    const last = this._sigProjView;
+
+    let changed = !this._sigValid
+      || this._sigGeneration !== this._generation
+      || this._sigShadowX !== shadowCenter.x
+      || this._sigShadowZ !== shadowCenter.z
+      || this._sigShadowRange !== shadowRange
+      || this._sigHidden !== this.debugHidden
+      || this._sigNoCast !== this.debugNoCast;
+
+    for (let i = 0; !changed && i < 16; i++) {
+      if (pv[i] !== last[i]) changed = true;
+    }
+
+    if (!changed) {
+      const views = this._views;
+      for (let i = 0; i < views.length; i++) {
+        const view = views[i];
+        if (view._dirty && view._cullVisible !== false) {
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    if (changed) {
+      for (let i = 0; i < 16; i++) last[i] = pv[i];
+      this._sigValid = true;
+      this._sigGeneration = this._generation;
+      this._sigShadowX = shadowCenter.x;
+      this._sigShadowZ = shadowCenter.z;
+      this._sigShadowRange = shadowRange;
+      this._sigHidden = this.debugHidden;
+      this._sigNoCast = this.debugNoCast;
+    }
+    return changed;
+  }
+
+  // Draws one soldier. A view whose sync was skipped since its last walk has
+  // exactly the same node tree, so its recorded parts are replayed instead
+  // of walking the tree again. The record is also rebuilt when the shadow
+  // flag changed, since that selects a different bucket.
+  _drawView(view, group, cast) {
+    let record = view._partRecord;
+    if (!record) record = view._partRecord = new PartRecord();
+
+    if (!view._dirty && record.matches(this._generation, cast)) {
+      this._replay(record, group);
+      return;
+    }
+
+    record.begin(this._generation, cast);
+    this._rec = record;
+    this._walk(group, IDENTITY, cast);
+    this._rec = null;
+    view._dirty = false;
+  }
+
+  // Writes a recorded soldier into the buckets. Mirrors the write in
+  // _emitPart; the colour is read from the material again so a material
+  // whose colour changes in place is never replayed stale.
+  _replay(record, group) {
+    const { count, buckets, materials, matrices } = record;
+
+    for (let k = 0; k < count; k++) {
+      const bucket = buckets[k];
+      if (bucket.n >= bucket.cap) this._grow(bucket);
+
+      const i = bucket.n++;
+      const src = k * 16;
+      const dst = i * 16;
+      const matArr = bucket.matArr;
+      for (let j = 0; j < 16; j++) matArr[dst + j] = matrices[src + j];
+
+      const c = materials[k].color;
+      const o = i * 3;
+      bucket.colArr[o] = c.r;
+      bucket.colArr[o + 1] = c.g;
+      bucket.colArr[o + 2] = c.b;
+    }
+
+    // Keep the flicker audit fed: the first emitted part is the body mesh.
+    if (count > 0) {
+      group._auditDrawnX = matrices[12];
+      group._auditDrawnZ = matrices[14];
+    }
+  }
 
   // Computes world matrices top-down and emits every visible mesh. Hidden
   // subtrees are skipped entirely (their matrices are not needed).
@@ -335,6 +505,8 @@ export class SoldierInstancer {
     bucket.colArr[o] = c.r;
     bucket.colArr[o + 1] = c.g;
     bucket.colArr[o + 2] = c.b;
+
+    if (this._rec) this._rec.push(bucket, material, matrix);
 
     // Audit tracking: record the FIRST mesh emitted per view per frame.
     //

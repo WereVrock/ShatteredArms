@@ -23,6 +23,10 @@ const FLEE_LOOKAHEAD = 8;
 export class MovementSystem {
   constructor(spatialGrid) {
     this.spatialGrid = spatialGrid;
+    // Reusable candidate buffer for _applyMakeWay's per-yielder query.
+    // Each yielder's iteration completes before the next yielder starts,
+    // so nothing holds a reference across calls.
+    this._nearbyBuf = [];
   }
 
 update(allSoldiers, unitsById, deltaSeconds) {
@@ -451,7 +455,8 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
       const yielderUnit = unitsById ? unitsById.get(yielder.unitId) : null;
       const yielderUnitCenter = yielderUnit ? yielderUnit.getCenter() : null;
 
-      const nearby = this.spatialGrid.queryNearby(yielder.pos.x, yielder.pos.z, 1);
+      const nearby = this.spatialGrid.queryNearbyInto(
+        this._nearbyBuf, yielder.pos.x, yielder.pos.z, 1);
 
       let moveX = 0;
       let moveZ = 0;

@@ -23,6 +23,13 @@ export class WeaponViewFactory {
     }
     if (weaponType === 'lance') return SoldierMeshFactory.createLance();
     if (weaponType === 'sword') {
+      // The slave's club is a blunt visual on top of the crude sword's
+      // mechanical stats: the sim treats it as a sword swing (the swing
+      // animation lives in the sword-arm branch of SoldierModelComposer,
+      // driven by unitTypeDef.weaponType === 'sword'), and only the
+      // mesh differs. This is the exact pattern the crude goblin sword
+      // uses — a visual variant on a shared combat type.
+      if (bodyVariant === 'goblinSlave') return SoldierMeshFactory.createClub();
       if (bodyVariant === 'goblin') return SoldierMeshFactory.createCrudeSword();
       return SoldierMeshFactory.createSword();
     }

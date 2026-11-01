@@ -23,6 +23,11 @@
 import { unitIconSvg } from './UnitIcon.js';
 import { attachRankBadge } from './UnitRank.js';
 import { SettingsStore } from './settings/SettingsStore.js';
+import {
+  computeArmyBarLayout,
+  ARMY_BAR_SIDE_MARGIN,
+  ARMY_BAR_MAX_HEIGHT_FRACTION
+} from './ArmyBarLayout.js';
 
 // Icon shown in the top-right corner. One glyph per unit, chosen by
 // _activityFor() with a strict priority order (fighting > shooting >
@@ -119,6 +124,15 @@ export class ArmyBarView {
   constructor(rootElement, selectionController, playerTeamId, onUnitFocus = null) {
     ensureBarStyles();
 
+    // Wipe any cards left by a previous battle. #armyBar is a fixed
+    // DOM node shared across every battle, so when a new battle starts
+    // on the same page as an old one (no reload boundary — e.g.
+    // first battle -> back -> new campaign -> first battle), the old
+    // cards would otherwise sit under the new ones. Doing this in the
+    // constructor (not update()) means not a single stale frame is
+    // rendered.
+    rootElement.innerHTML = '';
+
     this.root = rootElement;
     this.selectionController = selectionController;
     this.playerTeamId = playerTeamId;
@@ -135,6 +149,10 @@ export class ArmyBarView {
     // unitId -> Unit, refreshed every update() so the click handler never
     // holds a stale reference to a unit object.
     this.unitById = new Map();
+
+    // "count|width|height" of the last applied layout. Layout is only
+    // recomputed when one of the three changes.
+    this._layoutKey = '';
   }
 
   update(units) {
@@ -178,6 +196,42 @@ export class ArmyBarView {
     }
 
     this._syncChildOrder(orderedChildren);
+    this._applyLayout(orderedChildren.length);
+  }
+
+  // Fits every card into the bar by scaling them (see ArmyBarLayout.js).
+  // Runs only when the unit count or the window size changed. The
+  // scrollable flag is a last resort for armies too big even at the
+  // minimum scale.
+  _applyLayout(count) {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const key = count + '|' + w + '|' + h;
+    if (key === this._layoutKey) return;
+    this._layoutKey = key;
+
+    const layout = computeArmyBarLayout({
+      count,
+      availableWidth: w - ARMY_BAR_SIDE_MARGIN,
+      availableHeight: h * ARMY_BAR_MAX_HEIGHT_FRACTION
+    });
+    const style = this.root.style;
+    style.setProperty('--army-scale', String(layout.scale));
+
+    const overlap = layout.mode === 'overlap';
+    this.root.classList.toggle('overlap', overlap);
+    if (overlap) {
+      style.setProperty('--army-cols', String(layout.perRow));
+      style.setProperty('--army-step', layout.step.toFixed(2) + 'px');
+      style.setProperty('--army-card-w', layout.cardW.toFixed(2) + 'px');
+      style.setProperty('--army-card-h', layout.cardH.toFixed(2) + 'px');
+      style.setProperty('--army-overhang', layout.overhang.toFixed(2) + 'px');
+    }
+
+    this.root.classList.toggle(
+      'scrollable',
+      this.root.scrollHeight > this.root.clientHeight + 1
+    );
   }
 
   // Cheap order check: if the DOM already matches, do nothing. If it
@@ -324,7 +378,51 @@ export class ArmyBarView {
     attachRankBadge(imageEl, unit.unitLevel);
   }
 
+  // Reads the unit's visible state and rewrites the card only when it
+  // differs from the last write. Fractions are rounded to the 0.1% the
+  // bar widths are written at.
   _updateCard(card, unit) {
+    const key = this._cardKey(unit);
+    if (key === card.lastKey) return;
+    card.lastKey = key;
+    this._writeCard(card, unit);
+  }
+
+  _cardKey(unit) {
+    const alive = unit.getAliveSoldiers();
+    let routing = 0;
+    let moraleSum = 0;
+    let maxMoraleSum = 0;
+    let fatigueSum = 0;
+    for (const s of alive) {
+      if (s.isRouting) routing++;
+      moraleSum += s.morale;
+      maxMoraleSum += (s.maxMorale ?? 100);
+      fatigueSum += s.fatigue;
+    }
+
+    const moraleKey = maxMoraleSum > 0
+      ? Math.round(Math.max(0, Math.min(1, moraleSum / maxMoraleSum)) * 1000)
+      : 0;
+    const fatigueKey = alive.length > 0
+      ? Math.round(Math.max(0, Math.min(1, fatigueSum / alive.length / 100)) * 1000)
+      : 0;
+
+    const champ = unit.championSoldier;
+    let champKey = -1;
+    if (champ && champ.isAlive()) {
+      champKey = champ.maxHp > 0
+        ? Math.round(Math.max(0, Math.min(1, champ.hp / champ.maxHp)) * 1000)
+        : 0;
+    }
+
+    return `${alive.length}|${unit.soldiers.length}|${routing}|` +
+      `${this._activityFor(unit)}|${unit.selected ? 1 : 0}|` +
+      `${moraleKey}|${fatigueKey}|${champKey}|` +
+      `${this._showMoraleBar ? 1 : 0}${this._showFatigueBar ? 1 : 0}`;
+  }
+
+  _writeCard(card, unit) {
     const alive = unit.getAliveSoldiers().length;
     const total = unit.soldiers.length;
     const routingCount = this._routingCount(unit);

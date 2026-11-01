@@ -41,28 +41,22 @@
 // ---------------------------------------------------------------------------
 // FEATURE FLAG — champion system on/off.
 //
-// When false:
-//   - startNewCampaign skips the champion picker entirely.
-//   - No Champion instance is created, no retinue entry is added.
-//   - Every downstream reader (state.champion?.…) is null-safe and
-//     degrades to "no champion" — the campaign runs identically to a
-//     pre-champion build.
-//   - Any `champion` field present on a legacy save is stripped by
-//     CampaignState.load, so a half-built champion from a WIP build
-//     cannot leak into a clean run.
+// Enabled: the champion picker is always shown, and every entry in
+// ChampionConfig (Goblin Warlord, Mercenary Captains) is selectable. The
+// old "Enable test features" runtime toggle has been removed from the
+// Settings dialog; this flag is now the single source of truth.
 //
-// Flip to true to re-enable the champion system exactly as it is now.
-// No other code change is required — the flows are all gated on
-// `state.champion` being non-null, and startNewCampaign is the only
-// site that creates one.
+// To disable the system again: flip to false. startNewCampaign will skip
+// the champion picker, no Champion instance will be created, and every
+// downstream reader (state.champion?.…) degrades to "no champion" via
+// null-safe access. Any `champion` field on a legacy save is stripped by
+// CampaignState.load so a half-built champion from a WIP save cannot
+// leak into a clean run.
 //
-// This flag FORCES the champion system on regardless of the player's
-// runtime setting. When false, the system can still be enabled at
-// runtime via the "Enable test features" toggle in the main-menu
-// Settings dialog — see areChampionsEnabled() below. Read that function
-// at every gate, not this constant directly: the runtime setting is only
-// meaningful if it is honoured consistently across all decision sites.
-export const CHAMPIONS_ENABLED = false;
+// Read areChampionsEnabled() below at every gate, not this constant
+// directly — that is the one place to change if the gating model ever
+// grows beyond a single flag.
+export const CHAMPIONS_ENABLED = true;
 
 export const ChampionConfig = {
   goblin_warlord: {
@@ -77,6 +71,24 @@ export const ChampionConfig = {
     // retinue is a single-row formation (preferredRows: 1 on the type),
     // so the champion and his guards stand shoulder to shoulder.
     initialBodyguards: 6,
+    // Absolute champion HP. When present, overrides the derived
+    // bodyguardHp × championHpMultiplier formula in both the preview
+    // (previewStartingStats, updated below) and the battle builder
+    // (CampaignBattleBuilder.buildChampionUnit — must be updated to
+    // read this field; see that file for the application site).
+    // 126 is the value the old formula produced against the pre-
+    // hobgoblin-race bodyguard (42 × 3.0). Pinned so future bodyguard
+    // HP retunes cannot silently move the champion's HP.
+    championHp: 126,
+    // Race record the champion soldier uses. Bodyguards keep the unit
+    // type's race (hobgoblin); the champion is swapped to this at build
+    // time via CampaignBattleBuilder.buildChampionUnit. See
+    // RaceConfig.goblin_warlord_champion for the manual stats (dirty
+    // fighting, spear resistance, 1.5× morale ceiling, nominal goblin).
+    championRace: 'goblin_warlord_champion',
+    // Legacy: still read by buildChampionUnit as a fallback when
+    // championHp is absent. Kept for backward compat; remove once
+    // buildChampionUnit reads championHp directly.
     championHpMultiplier: 3.0,
     passive: {
       name: "Warlord's Muster",
@@ -179,7 +191,11 @@ export function previewStartingStats(def) {
   const race = raceOf(unitType);
   const hpMult = race.hpMultiplier ?? 1.0;
   const bodyguardHp = Math.max(1, Math.round(unitType.baseHp * hpMult));
-  const championHp = Math.round(bodyguardHp * (def.championHpMultiplier ?? 1.0));
+  // Prefer the absolute championHp override when present; fall back to
+  // the legacy bodyguardHp × championHpMultiplier formula so an older
+  // champion config without championHp still previews correctly.
+  const championHp = def.championHp
+    ?? Math.round(bodyguardHp * (def.championHpMultiplier ?? 1.0));
 
   return {
     bodyguardCount: def.initialBodyguards || 0,

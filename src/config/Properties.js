@@ -47,6 +47,70 @@
 //     moment it is still fresh. Applied as a flat multiplier on the final
 //     power total. Numeric tuning lives on the race entry
 //     (RaceConfig.goblin.fastTiring.powerMultiplier).
+//
+//   WORTHLESS — MoraleSystem._updateSoldier.
+//     A worthless unit is SILENT to any other unit, both when it
+//     routs and when it is wiped out. Both are the CROSS-UNIT panic
+//     paths, and worthlessness suppresses both:
+//
+//       allyRout penalty   — a routing worthless ally contributes
+//                            ZERO to either the expendable or the
+//                            non-expendable rout bucket, so no
+//                            observer takes anything from it.
+//       adjacentUnitWiped  — a worthless unit being wiped out on a
+//         shock              given tick generates no shock in any
+//                            adjacent friendly of its team.
+//
+//     This is STRONGER than EXPENDABLE (which still half-panics other
+//     expendables and still inflicts the wipe shock) and SUPERSEDES it
+//     when a unit carries both: worthlessness wins at both detection
+//     sites, so the net outward panic from a unit that is both
+//     properties is exactly nil on both paths.
+//
+//     NOT covered, by design:
+//       casualtyLossPenaltyPerSoldier — a worthless soldier dying
+//         still panics the OTHER soldiers IN ITS OWN UNIT. That is
+//         intra-unit cohesion, not cross-unit panic. Without it, a
+//         slave unit could never break at all (its members would see
+//         comrades fall and feel nothing). Worthlessness is "my panic
+//         does not spread to OTHER units," not "my death does not
+//         matter."
+//       _autoShatterFullyRoutedTeams — an all-worthless army that has
+//         fully routed is still a broken army and shatters. Silence to
+//         allies is not indestructibility.
+//
+//     INCOMING counterpart — the worthless observer PANICS HARDER, not
+//     softer, from an expendable rout. MoraleSystem's ally-rout bucket
+//     splits observers three ways:
+//
+//       worthless observer  → full penalty (allyRoutPenaltyPerTick)
+//       expendable observer → half penalty (× expendableAllyRoutPenaltyMult)
+//       everyone else       → zero penalty
+//
+//     So a slave watching a neighbouring goblin break takes the SAME
+//     hit a human would take watching another human break — the
+//     opposite of the zero an ordinary non-expendable observer takes
+//     from an expendable rout. Worthlessness is silence OUTWARD; it
+//     does not dull reactions INWARD. Design intent: chaff with no
+//     cohesion breaks harder, not gentler, when the chaff next to it
+//     breaks. See MoraleSystem._updateSoldier for the code.
+//
+//     ALSO CONSUMED BY UnitPower.compute (scoring-only): the unit's
+//     final power total is multiplied by WORTHLESS_POWER_MULT (0.5).
+//     The AI and the preview badges therefore read a worthless unit
+//     at roughly half of an equivalent-stat non-worthless unit — the
+//     score-side counterpart to the morale-side "nobody depends on
+//     this unit" reading. See the constant's own comment in
+//     UnitPower.js for the rationale and how to retune. Does NOT
+//     touch the sim.
+//
+//     Declared as a per-TYPE addition (UnitTypes.extraProperties)
+//     rather than a race-level property: the goblin race carries
+//     EXPENDABLE (weaker), and a slave needs WORTHLESS in place of it
+//     — declared on the type as a WORTHLESS addition plus an
+//     excludesProperties entry for EXPENDABLE — without inflicting
+//     that stronger property on every goblin in the army. See
+//     RaceConfig.raceHasProperty for how both lists are honoured.
 export const Property = {
   // Special case: UNDEAD is a per-SOLDIER trait rather than a per-RACE
   // one. A race record has no UNDEAD flag — being undead is a property
@@ -65,5 +129,12 @@ export const Property = {
 
   DIRTY_FIGHTING: 'dirtyFighting',
   EXPENDABLE: 'expendable',
+  // Stronger sibling of EXPENDABLE. An expendable rout half-panics other
+  // expendables; a worthless rout panics no one. Both properties on the
+  // same soldier is legal — worthlessness is checked first at the
+  // rout-detection site and wins. See the consumer comment above for
+  // the exact scope (ally-rout panic only, not casualty shock or
+  // adjacent-unit-wipe shock).
+  WORTHLESS: 'worthless',
   FAST_TIRING: 'fastTiring'
 };

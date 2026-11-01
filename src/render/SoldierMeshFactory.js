@@ -32,6 +32,7 @@
 // three (arrow) will degrade exactly one step.
 import { createBlobBody } from './mesh/BlobBodyBuilder.js';
 import { createGoblinBody } from './mesh/GoblinBodyBuilder.js';
+import { createGoblinSlaveBody } from './mesh/GoblinSlaveBodyBuilder.js';
 import { createHobgoblinBody } from './mesh/HobgoblinBodyBuilder.js';
 import { createGoblinWarlordBody } from './mesh/GoblinWarlordBuilder.js';
 import { createSkeletonBody } from './mesh/SkeletonBodyBuilder.js';
@@ -45,6 +46,7 @@ import { createSpear, createGoblinSpear } from './mesh/SpearBuilder.js';
 import { createBow, createGoblinShortbow } from './mesh/BowBuilder.js';
 import { createLance } from './mesh/LanceBuilder.js';
 import { createSword, createCrudeSword } from './mesh/SwordBuilder.js';
+import { createClub } from './mesh/ClubBuilder.js';
 import { createHorseBase } from './mesh/HorseBuilder.js';
 import { createSkeletonHorseBase } from './mesh/SkeletonHorseBuilder.js';
 import { createBeastMount } from './mesh/BeastMountBuilder.js';
@@ -145,6 +147,12 @@ export const SoldierMeshFactory = {
 
   createBlobBody: pick(createBlobBody, createMediumBlobBody, createSimpleBlobBody, createUltraSimpleBlobBody),
   createGoblinBody: pick(createGoblinBody, createMediumGoblinBody, createSimpleGoblinBody, createUltraSimpleGoblinBody),
+  // Goblin slave: unique silhouette (collar, loincloth-only) with no
+  // simplified variants. Falls through to detailed at every tier — the
+  // collar and the missing waist wrap are the whole read, so shrinking
+  // the shape for lower tiers would erase it. Same reasoning as
+  // goblinWarlord below.
+  createGoblinSlaveBody: pick(createGoblinSlaveBody, createGoblinSlaveBody, createGoblinSlaveBody, createGoblinSlaveBody),
   createSkeletonBody: pick(createSkeletonBody, createMediumSkeletonBody, createSimpleSkeletonBody, createUltraSimpleSkeletonBody),
   createHobgoblinBody: pick(createHobgoblinBody, createMediumHobgoblinBody, createSimpleHobgoblinBody, createUltraSimpleHobgoblinBody),
   // The Goblin Warlord is a unique character; the detailed-tier armored
@@ -175,6 +183,11 @@ export const SoldierMeshFactory = {
   createGoblinShortbow: pick(createGoblinShortbow, createMediumGoblinShortbow, createSimpleGoblinShortbow, createUltraSimpleGoblinShortbow),
   createLance: pick(createLance, createMediumLance, createSimpleLance, createUltraSimpleLance),
   createSword: pick(createSword, createMediumSword, createSimpleSword, createUltraSimpleSword),
+  // Club: single-tier weapon. One merged mesh, already minimal, so every
+  // tier uses the detailed build. Same pattern as the crude goblin sword
+  // above — the weapon's silhouette at battle zoom does not improve from
+  // a lower-poly variant.
+  createClub: pick(createClub, createClub, createClub, createClub),
   createCrudeSword: pick(createCrudeSword, createMediumCrudeSword, createSimpleCrudeSword, createUltraSimpleCrudeSword),
   createHorseBase: pick(createHorseBase, createMediumHorseBase, createSimpleHorseBase, createUltraSimpleHorseBase),
   createSkeletonHorseBase: pick(createSkeletonHorseBase, createMediumSkeletonHorseBase, createSimpleSkeletonHorseBase, createUltraSimpleSkeletonHorseBase),

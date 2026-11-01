@@ -25,6 +25,10 @@ export class FacingSystem {
   constructor(deltaSeconds, spatialGrid) {
     this.deltaSeconds = deltaSeconds;
     this.spatialGrid = spatialGrid;
+    // Reusable candidate buffer for _updateSpearHandling's query. Only
+    // reached for spear-armed soldiers, but avoids one array allocation
+    // per such soldier per tick.
+    this._nearbyBuf = [];
   }
 
   update(allSoldiers, unitsById) {
@@ -124,8 +128,8 @@ _updateSpearHandling(soldier) {
 
     // One grid query per soldier per tick, shared by the contact check and
     // the sweep check.
-    const nearby = this.spatialGrid.queryNearby(
-      soldier.pos.x, soldier.pos.z, 1
+    const nearby = this.spatialGrid.queryNearbyInto(
+      this._nearbyBuf, soldier.pos.x, soldier.pos.z, 1
     );
     // Contact is independent of rotation: a friendly in front of the
     // shaft forces the spear up whether or not the soldier is turning.

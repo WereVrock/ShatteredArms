@@ -75,6 +75,21 @@ function bowLayer() {
   `;
 }
 
+// Crude wooden club. Used by the goblin slave, whose sim weaponType is
+// still 'sword' (sword combat tables, sword-arm swing animation, sword
+// damage numbers) but whose body model carries a club rather than a
+// blade. The icon mirrors the model so the card reads as "club" without
+// touching the sim classification. Tapered haft widening into a
+// weighted bulbous head — see src/render/mesh/ClubBuilder.js for the
+// matching 3D mesh.
+function clubLayer() {
+  return `
+    <polygon points="33,90 39,90 41,42 31,42" fill="#5a3d20"/>
+    <ellipse cx="36" cy="27" rx="12" ry="14" fill="#3a2414"/>
+    <ellipse cx="32" cy="22" rx="4" ry="5" fill="#5a3d20" opacity="0.55"/>
+  `;
+}
+
 const WEAPON_LAYERS = {
   sword: swordLayer,
   spear: spearLayer,
@@ -276,7 +291,18 @@ export function unitIconSvg(unitTypeDef, isUndead) {
   if (isCav) parts.push(horseHeadLayer());
 
   const weaponType = unitTypeDef ? unitTypeDef.weaponType : null;
-  const weaponBuilder = WEAPON_LAYERS[weaponType] || spearLayer;
+  // Goblin slave carries a club in the body model even though the SIM
+  // still classifies it as a sword (weaponType 'sword' drives the AI
+  // targeting, the sword combat tables, and the sword-arm swing). The
+  // icon should show the weapon the soldier actually holds; bodyVariant
+  // is the render-side selector already used for that purpose (see
+  // WeaponViewFactory routing bodyVariant === 'goblinSlave' to the
+  // club mesh), so it is the correct key here too.
+  const isSlaveClub = !!unitTypeDef
+    && unitTypeDef.bodyVariant === 'goblinSlave';
+  const weaponBuilder = isSlaveClub
+    ? clubLayer
+    : (WEAPON_LAYERS[weaponType] || spearLayer);
   parts.push(weaponBuilder());
 
   if (unitTypeDef && unitTypeDef.race === 'goblin') {

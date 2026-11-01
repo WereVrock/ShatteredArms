@@ -13,6 +13,11 @@ const ATTACK_ANIM_DURATION = 0.18;
 const BLOCK_FLASH_DURATION = 0.22;
 const DEATH_FALL_DURATION = 0.55;
 
+// Soldiers at this LOD tier or farther are fully synced every second frame
+// (staggered across soldiers) instead of every frame.
+const FAR_TIER = 4;
+let _syncPhaseCounter = 0;
+
 // Blood-thrall body tint. A raised skeleton blends toward this dark blood
 // red so a friendly undead reads as a blood-thrall rather than as a
 // normal skeleton on the champion's team. The blend runs after the
@@ -86,7 +91,8 @@ export class SoldierView {
 
     // Flag position varies by body variant — a goblin's head is well
     // below a human's, so the flag height has to match.
-    const flagY = soldier.bodyVariant === 'goblin' ? 0.85 : 1.15;
+    const flagY = (soldier.bodyVariant === 'goblin'
+      || soldier.bodyVariant === 'goblinSlave') ? 0.85 : 1.15;
     this.flag = SoldierMeshFactory.createWhiteFlag();
     this.flag.position.set(-0.18, flagY, -0.1);
     this.flag.visible = false;
@@ -125,9 +131,19 @@ export class SoldierView {
     this._horseAmplitude = 0;
 
     this._syncCache = null;
+
+    // Half-rate sync state for far soldiers. The phase alternates per
+    // call; the stagger spreads views evenly across the two frame parities.
+    this._skipPhase = (_syncPhaseCounter++ & 1) === 1;
+    this._carriedDelta = 0;
     this._forceSync = false;
 
     this._usingStaticLegs = false;
+
+    // True once a full sync has rewritten this view's node tree. The
+    // instancer clears it after re-walking the tree; while it stays clear
+    // the tree is unchanged and the instancer replays its last walk.
+    this._dirty = true;
   }
 
   // Builds a fresh model at the given tier and installs it as the active
@@ -249,6 +265,19 @@ export class SoldierView {
 
     this._maybeUpdateLod(cameraPos);
 
+    // Far soldiers: sync every second frame and carry the skipped time
+    // into the next full sync so timers and walk phase stay correct. A
+    // pending forced sync (new model after a tier change) is never skipped.
+    if (this._tier >= FAR_TIER && !this._forceSync) {
+      this._skipPhase = !this._skipPhase;
+      if (this._skipPhase) {
+        this._carriedDelta += deltaSeconds;
+        return;
+      }
+      deltaSeconds += this._carriedDelta;
+    }
+    this._carriedDelta = 0;
+
     const c = this._syncCache;
     const hpRatio = s.maxHp > 0 ? s.hp / s.maxHp : 0;
     const hpBand = Math.max(0, Math.min(10, (hpRatio * 10) | 0));
@@ -275,9 +304,9 @@ export class SoldierView {
     // one staying positive keeps the full sync running until both reach
     // zero.)
     const animating =
-      this.attackAnimTimeLeft > 0 ||
-      this.blockFlashTimeLeft > 0 ||
-      (s.state === 'dead' && this.deathProgress < 1) ||
+      (deltaSeconds > 0 && this.attackAnimTimeLeft > 0) ||
+      (deltaSeconds > 0 && this.blockFlashTimeLeft > 0) ||
+      (deltaSeconds > 0 && s.state === 'dead' && this.deathProgress < 1) ||
       this._walkAmplitude > 0 ||
       this._walkSpeed > 0 ||
       this._horseAmplitude > 0 ||
@@ -298,6 +327,7 @@ export class SoldierView {
     }
 
     this._forceSync = false;
+    this._dirty = true;
     if (!c) {
       this._syncCache = {
         x: NaN, z: NaN, facing: NaN,
@@ -449,7 +479,7 @@ export class SoldierView {
     this._prevWalkZ = s.pos.z;
 
     const dt = deltaSeconds > 1e-4 ? deltaSeconds : 1e-4;
-    const instantSpeed = Math.hypot(dx, dz) / dt;
+    const instantSpeed = Math.sqrt(dx * dx + dz * dz) / dt;
     this._walkSpeed += (instantSpeed - this._walkSpeed) * WALK_SPEED_SMOOTHING;
     if (this._walkSpeed < 0.01) this._walkSpeed = 0;
   }

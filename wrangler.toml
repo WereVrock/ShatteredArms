@@ -10,6 +10,14 @@ binding = "ASSETS"
 name = "MATCHMAKER"
 class_name = "Matchmaker"
 
+[[durable_objects.bindings]]
+name = "HIGHSCORES"
+class_name = "HighscoreBoard"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Matchmaker"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["HighscoreBoard"]

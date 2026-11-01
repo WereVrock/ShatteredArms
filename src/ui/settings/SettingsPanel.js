@@ -47,19 +47,12 @@ export class SettingsPanel {
     this._virtualCursorDragToggle = null;
     this._powerScaleToggle = null;
     this._powerSwordsToggle = null;
-    this._testFeaturesToggle = null;
-
-    // Which opener last invoked open(). Determines whether the
-    // main-menu-only Test Features page is reachable — see open() and
-    // _showMain(). 'main' (default) exposes it; 'pause' hides it.
-    this._context = 'main';
 
     // Page listeners. Fired with the page name on every page transition:
     //   'root'      — top-level category list
     //   'graphics'  — graphics toggles
     //   'gameplay'  — gameplay toggles
     //   'ui'        — HUD/widget toggles
-    //   'test'      — main-menu-only test-feature toggles
     //   null        — dialog closed
     // Used by openers (PauseMenuPanel) that want to step aside for
     // specific pages — e.g. hide the pause menu's dark backdrop while
@@ -80,13 +73,10 @@ export class SettingsPanel {
   // _showMain() fires the page listener with 'root', so a subscriber that
   // stepped aside for the graphics page sees the transition back the
   // moment the dialog reopens.
-  open(context) {
-    // Which opener is showing the dialog. 'main' (default) exposes the
-    // main-menu-only Test Features page; 'pause' hides it. Hiding it from
-    // the in-game pause menu is deliberate: the features it gates are
-    // development-only and not balanced for play, and toggling them
-    // mid-battle could destabilise an active session.
-    this._context = context === 'pause' ? 'pause' : 'main';
+  // Context argument is accepted for API compatibility with callers that
+  // still pass 'main' / 'pause'; it no longer affects the panel (the
+  // Test Features page that used it was removed).
+  open(_context) {
     this.el.style.display = 'flex';
     this._showMain();
   }
@@ -187,17 +177,6 @@ export class SettingsPanel {
     this._panel.appendChild(this._buildNavRow('Graphics', () => this._showGraphics()));
     this._panel.appendChild(this._buildNavRow('Gameplay', () => this._showGameplay()));
     this._panel.appendChild(this._buildNavRow('UI', () => this._showUI()));
-    // Test Features is a main-menu-only category — see open(). Keeping
-    // the entry point on the root page (rather than as a permanent
-    // sibling toggle) means future test-only settings land in this page
-    // rather than being sprinkled across the Graphics / Gameplay / UI
-    // pages, so the "not balanced for play" framing stays attached to
-    // every entry.
-    if (this._context === 'main') {
-      this._panel.appendChild(
-        this._buildNavRow('Test Features', () => this._showTestFeatures())
-      );
-    }
     this._notifyPage('root');
   }
 
@@ -420,26 +399,7 @@ export class SettingsPanel {
     this._notifyPage('ui');
   }
 
-  // Main-menu-only page. Gated on _context — see open(). Hosts a single
-  // master toggle today; future test-only settings belong here rather
-  // than on the production pages, so their "dev-only" framing cannot
-  // drift apart.
-  _showTestFeatures() {
-    this._clearToggleRefs();
-    this._panel.innerHTML = '';
-    this._panel.appendChild(this._buildTitleRow('Test Features'));
 
-    this._testFeaturesToggle = this._buildToggleRow(
-      'Enable test features',
-      'enableTestFeatures'
-    );
-    this._panel.appendChild(this._testFeaturesToggle);
-
-    this._panel.appendChild(this._buildBackRow(() => this._showMain()));
-
-    this._syncFromStore();
-    this._notifyPage('test');
-  }
 
   _clearToggleRefs() {
     this._shadowRow = null;
@@ -466,7 +426,6 @@ export class SettingsPanel {
     this._instancedToggle = null;
     this._lodScaleSelect = null;
     this._antialiasToggle = null;
-    this._testFeaturesToggle = null;
   }
 
   // --- builders -------------------------------------------------------------
@@ -1057,9 +1016,6 @@ export class SettingsPanel {
     // virtualCursorDragToggle guard above.
     if (this._moraleBarToggle)  this._moraleBarToggle._checkbox.checked  = s.showMoraleBar !== false;
     if (this._fatigueBarToggle) this._fatigueBarToggle._checkbox.checked = s.showFatigueBar !== false;
-    if (this._unitFlagsToggle)  this._unitFlagsToggle._checkbox.checked  = s.showUnitFlags !== false;
-    if (this._unitBarsToggle)   this._unitBarsToggle._checkbox.checked   = s.showUnitBars !== false;
-    if (this._testFeaturesToggle) this._testFeaturesToggle._checkbox.checked = !!s.enableTestFeatures;
     if (this._instancedToggle) this._instancedToggle._checkbox.checked = s.instancedRendering !== false;
     if (this._antialiasToggle) this._antialiasToggle._checkbox.checked = !!s.antialias;
   }

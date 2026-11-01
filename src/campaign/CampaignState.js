@@ -1,79 +1,128 @@
-// ===== CampaignState.js =====
-// Campaign state persistence via sessionStorage. Survives page reloads
-// within the same tab (which is how the campaign advances between battles,
-// since the codebase has no controller teardown). Cleared when the player
-// explicitly exits the campaign.
+// ===== src/campaign/CampaignState.js =====
+// Campaign state persistence. Keys are scoped to the active profile so
+// each local profile owns exactly one campaign slot.
 //
-// Shape:
+// Backed by localStorage (NOT sessionStorage): a campaign save must
+// survive closing the browser tab, otherwise "I closed the tab and lost
+// my save" happens every session even though the profile itself
+// (ProfileStore, also localStorage) survives. The other Active* stores
+// (ActiveScenario, ActiveCustomBattle, ActiveLocalMultiplayer) stay on
+// sessionStorage intentionally — those represent "what was running in
+// this tab", not a save game.
+//
+// Shape (v5 — adds campaignScore / battleScores / battleAiStartPower;
+// v4 saves without those fields still load):
 // {
-//   phase: 'pick-difficulty' | 'pick-initial' | 'battle' | 'pick-reward'
-//          | 'pick-recover' | 'game-over',
-//   battleIndex: number,          // 0-based
-//   difficulty: 'easy'|'normal'|'hard' | null,
-//   gold: number,                 // campaign currency
-//   roster: [{ id, typeId, isUndead, aliveCount, maxCount }],
-//   aiRoster: [{ id, typeId, aliveCount, maxCount, isUndead }],
-//   rewardOptions: [{ typeId, isUndead }] | null,
-//   recoveredThisReward: boolean, // one paid heal per reward phase
-//   lastBattleOutcome: 'won' | 'lost' | null,
-//   initialPickState: {
-//     picksRemaining: number,
-//     currentOffer: [{ typeId, isUndead }, ...]
-//   } | null
+//   phase, battleIndex, difficulty, gold, roster, aiRoster,
+//   rewardOptions, recoveredThisReward, lastBattleOutcome,
+//   initialPickState, champion, mercenaryCaptain,
+//   campaignScore: number,          // running total
+//   battleScores: [{ battleIndex, score, won }],
+//   battleAiStartPower: number|null // set at battle begin for scoring
+//   highscoreSubmitted: boolean     // avoid double-submit on re-show
 // }
-//
-// v4: campaigns start with a difficulty pick, which is stored on the state
-// and read by CampaignBattleBuilder (enemy gold growth, first-battle
-// roster) and CampaignFlow (AI tier). v3 campaigns that lack a difficulty
-// field fall back to 'normal' at read time — see CampaignConfig
-// .difficulties for the presets.
 
 import { CampaignConfig } from './CampaignConfig.js';
 import { Champion } from './Champion.js';
 import { areChampionsEnabled } from './ChampionConfig.js';
+import { ProfileStore } from '../profile/ProfileStore.js';
 
-const STORAGE_KEY = 'battle-prototype-campaign-v4';
+const BASE_KEY = 'battle-prototype-campaign-v5';
+// Legacy single-slot key (pre-profile). Migrated once into the active
+// profile if present, then removed.
+const LEGACY_KEY = 'battle-prototype-campaign-v4';
+
+function keyFor(profileId) {
+  if (!profileId) return null;
+  return `${BASE_KEY}:${profileId}`;
+}
+
+function readKey(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeKey(key, state) {
+  try {
+    localStorage.setItem(key, JSON.stringify(state));
+  } catch (e) { /* private mode */ }
+}
+
+function removeKey(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch (e) {}
+}
+
+function hydrateChampion(parsed) {
+  if (!parsed) return parsed;
+  if (!areChampionsEnabled()) {
+    parsed.champion = null;
+  } else if (parsed.champion && typeof parsed.champion === 'object') {
+    parsed.champion = Champion.fromJSON(parsed.champion);
+  }
+  // Score fields default for older saves.
+  if (typeof parsed.campaignScore !== 'number') parsed.campaignScore = 0;
+  if (!Array.isArray(parsed.battleScores)) parsed.battleScores = [];
+  if (parsed.battleAiStartPower == null) parsed.battleAiStartPower = null;
+  if (typeof parsed.highscoreSubmitted !== 'boolean') {
+    parsed.highscoreSubmitted = false;
+  }
+  // Mid-battle simulation snapshot for easy-difficulty resume. Null
+  // means "no mid-battle state saved" — resuming restarts the battle
+  // from start-of-battle, identical to non-easy behavior.
+  if (parsed.battleSnapshot === undefined) parsed.battleSnapshot = null;
+  return parsed;
+}
 
 export const CampaignState = {
   load() {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      // Champion is a class instance, not a plain object. Its toJSON()
-      // (invoked automatically by JSON.stringify during save) writes the
-      // persistent fields; fromJSON reconstructs the instance here so
-      // method calls on state.champion work after a reload.
-      //
-      // When the champion feature is disabled, any champion field on the
-      // save is DROPPED here rather than rehydrated. This prevents a
-      // champion from a WIP build (or a dev-toggled flag) leaking into a
-      // flow that no longer expects one — the resume path and every
-      // subsequent picker gate cleanly on `state.champion` being null.
-      if (!areChampionsEnabled()) {
-        if (parsed) parsed.champion = null;
-      } else if (parsed && parsed.champion && typeof parsed.champion === 'object') {
-        parsed.champion = Champion.fromJSON(parsed.champion);
+    const profileId = ProfileStore.getActiveId();
+    if (!profileId) return null;
+
+    const key = keyFor(profileId);
+    let parsed = readKey(key);
+
+    // One-shot migration from the pre-profile global slot.
+    if (!parsed) {
+      const legacy = readKey(LEGACY_KEY);
+      if (legacy) {
+        parsed = legacy;
+        writeKey(key, legacy);
+        removeKey(LEGACY_KEY);
       }
-      return parsed;
-    } catch (e) {
-      return null;
     }
+
+    return hydrateChampion(parsed);
   },
 
   save(state) {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch (e) {
-      // sessionStorage may be disabled; the campaign still works within the
-      // current page, just not across reloads.
-    }
+    const profileId = ProfileStore.getActiveId();
+    if (!profileId) return;
+    writeKey(keyFor(profileId), state);
   },
 
   clear() {
-    try {
-      sessionStorage.removeItem(STORAGE_KEY);
-    } catch (e) {}
+    const profileId = ProfileStore.getActiveId();
+    if (!profileId) return;
+    removeKey(keyFor(profileId));
+  },
+
+  // Wipe a specific profile's campaign (used when deleting a profile).
+  clearForProfile(profileId) {
+    if (!profileId) return;
+    removeKey(keyFor(profileId));
+  },
+
+  hasCampaign(profileId) {
+    const id = profileId || ProfileStore.getActiveId();
+    if (!id) return false;
+    return !!readKey(keyFor(id));
   },
 
   newCampaign() {
@@ -88,14 +137,13 @@ export const CampaignState = {
       recoveredThisReward: false,
       lastBattleOutcome: null,
       initialPickState: null,
-      // Populated by CampaignFlow.startNewCampaign, not by newCampaign
-      // itself — the champion is a choice the flow layer owns.
       champion: null,
-      // Set true when the player picks the Mercenary Captains pseudo-
-      // commander instead of a real champion. No Champion instance
-      // exists for it (state.champion stays null); this flag tells the
-      // battle-end reward handler to add the per-victory gold bonus.
-      mercenaryCaptain: false
+      mercenaryCaptain: false,
+      campaignScore: 0,
+      battleScores: [],
+      battleAiStartPower: null,
+      highscoreSubmitted: false,
+      battleSnapshot: null
     };
   }
 };

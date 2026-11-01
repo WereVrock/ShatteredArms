@@ -291,21 +291,13 @@ const DEFAULTS = Object.freeze({
   // and the two low preset tiers turn it off as part of their perf
   // budget.
   antialias: true,
-  // Master switch for in-development features that are not balanced for
-  // normal play. Exposed only in the main-menu Settings dialog (see
-  // SettingsPanel.open context handling) — the in-game pause menu does
-  // not surface it, because flipping a test flag mid-battle could
-  // destabilise an active session that was built under the other value.
+  // Master switch for in-development features. The settings UI no longer
+  // surfaces it — the Test Features page was removed — and the champion
+  // system is gated by the compile-time CHAMPIONS_ENABLED flag in
+  // ChampionConfig.js instead. Kept as a key so a future test-gated
+  // feature has somewhere to hang; unused today.
   //
-  // When true, gates like the Campaign Commander (champion) system open
-  // up. Read via areChampionsEnabled() in ChampionConfig.js; do not read
-  // this key directly at feature sites — the champion gate is the only
-  // consumer today, but the pattern is to add one helper per gated
-  // subsystem rather than scatter raw key reads.
-  //
-  // Orthogonal to the graphics presets — no preset lists this key, so
-  // applying a preset never flips it, and getMatchingPreset() ignores
-  // it (only compares keys a preset explicitly names).
+  // Orthogonal to the graphics presets — no preset lists this key.
   enableTestFeatures: false
 });
 

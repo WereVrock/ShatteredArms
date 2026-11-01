@@ -20,6 +20,13 @@ import { AIDebugLog } from './ai/AIDebugLog.js';
 import { CampaignState } from './campaign/CampaignState.js';
 import { CampaignFlow } from './campaign/CampaignFlow.js';
 import { buildCampaignScenario } from './campaign/CampaignBattleBuilder.js';
+import { CampaignSession } from './campaign/CampaignSession.js';
+import { SnapshotCodec } from './net/SnapshotCodec.js';
+import { CampaignExitDialog } from './ui/CampaignExitDialog.js';
+import { ProfileStore } from './profile/ProfileStore.js';
+import { ProfileBadge } from './ui/ProfileBadge.js';
+import { ProfilePickerView } from './ui/ProfilePickerView.js';
+import { HighScoresView } from './ui/HighScoresView.js';
 import { ActiveScenario } from './session/ActiveScenario.js';
 import { ActiveCustomBattle } from './session/ActiveCustomBattle.js';
 import { ActiveLocalMultiplayer } from './session/ActiveLocalMultiplayer.js';
@@ -184,6 +191,15 @@ let battleActive = false;
 // Null otherwise — loop() pays one null check per section, nothing else.
 let _diagLoopTimings = null;
 
+// The campaign battle currently running, or null outside one. Set by
+// launchCampaignBattle when it starts a battle, cleared by its
+// onBattleEnded callback (and by returnToMainMenu on exit-save).
+// returnToMainMenu reads this to decide whether to save the campaign
+// slot (with a mid-battle snapshot for easy) instead of clearing it.
+// Shape: { state, simulation } — simulation is filled in once the sim
+// is constructed inside startScenario.
+let activeCampaignBattle = null;
+
 function _recordLoopTimings(preMs, tickMs, postMs) {
   const arr = _diagLoopTimings;
   if (!arr) return;
@@ -198,13 +214,69 @@ function _recordLoopTimings(preMs, tickMs, postMs) {
 
 // --- Shared exit path -----------------------------------------------------
 
+// Shared "wipe the battle and reload" primitive. Does NOT touch
+// CampaignState — campaign save vs. abandon is an explicit choice
+// routed through saveCampaignAndExit / abandonCampaignAndExit below.
+// Scenario / custom / MP paths call this directly, and a saved campaign
+// slot therefore survives those modes untouched (which is the desired
+// behavior — playing a scenario should not cost you your campaign).
 function returnToMainMenu() {
   ActiveScenario.clear();
   ActiveCustomBattle.clear();
   ActiveLocalMultiplayer.clear();
-  CampaignState.clear();
+  activeCampaignBattle = null;
   battleActive = false;
   window.location.reload();
+}
+
+// Exit paths offered to the player when leaving a campaign battle.
+// Both end in a reload; the only difference is what happens to the
+// campaign slot.
+
+// Save & Exit: persist the campaign (with a mid-battle snapshot on
+// easy — see CampaignFlow.saveOnExit). Flag the reload as a deliberate
+// menu return so boot does not auto-launch the battle again.
+function saveCampaignAndExit() {
+  if (activeCampaignBattle) {
+    campaignFlow.saveOnExit(
+      activeCampaignBattle.state,
+      activeCampaignBattle.simulation
+    );
+    activeCampaignBattle = null;
+  }
+  CampaignSession.setPaused();
+  returnToMainMenu();
+}
+
+// Abandon Run: submit the current score (same as a normal campaign end)
+// and wipe the campaign slot entirely.
+function abandonCampaignAndExit() {
+  if (activeCampaignBattle) {
+    campaignFlow.abandonCampaign(activeCampaignBattle.state);
+    activeCampaignBattle = null;
+  }
+  CampaignState.clear();
+  CampaignSession.clearPaused();
+  returnToMainMenu();
+}
+
+// Entry point for the pause menu's "Exit to Main Menu" button.
+//   - Outside a campaign battle: straight to the menu (original
+//     behavior for scenarios / custom battles / MP).
+//   - Inside a campaign battle: two-option dialog. Abandon Run submits
+//     the score and wipes the slot; Save & Exit preserves the campaign
+//     so the next Campaign click offers Continue.
+function promptCampaignExit() {
+  if (!activeCampaignBattle) {
+    returnToMainMenu();
+    return;
+  }
+  campaignExitDialog.show({
+    title: 'Leave campaign?',
+    subtitle: 'Save your progress to continue later, or end this run for good.',
+    onSaveExit: () => saveCampaignAndExit(),
+    onAbandon: () => abandonCampaignAndExit()
+  });
 }
 
 // --- Menu wiring ----------------------------------------------------------
@@ -219,11 +291,65 @@ const helpPanel = new HelpPanel();
 
 const fpsCounter = new FpsCounter();
 
+const profilePicker = new ProfilePickerView();
+const profileBadge = new ProfileBadge({
+  onClick: () => openProfilePicker({ required: false })
+}).mount(document.body);
+
+function refreshProfileBadge() {
+  profileBadge.setProfile(ProfileStore.getActive());
+}
+refreshProfileBadge();
+
+function openProfilePicker({ required = false, onReady = null } = {}) {
+  const refresh = () => {
+    profilePicker.show({
+      profiles: ProfileStore.list(),
+      activeId: ProfileStore.getActiveId(),
+      required,
+      onSelect: (id) => {
+        ProfileStore.select(id);
+        profilePicker.close();
+        refreshProfileBadge();
+        if (onReady) onReady();
+      },
+      onCreate: (name) => {
+        const p = ProfileStore.create(name, { activate: true });
+        if (!p) return null;
+        profilePicker.close();
+        refreshProfileBadge();
+        if (onReady) onReady();
+        return p;
+      },
+      onDelete: (id) => {
+        CampaignState.clearForProfile(id);
+        ProfileStore.remove(id);
+        refreshProfileBadge();
+        refresh();
+      },
+      onLogout: () => {
+        ProfileStore.clearActive();
+        refreshProfileBadge();
+        refresh();
+      },
+      onCancel: () => {
+        profilePicker.close();
+      }
+    });
+  };
+  refresh();
+}
+
+const highScoresView = new HighScoresView(menuElement);
+
 const menu = new MainMenu(menuElement, {
   onScenarios: () => scenarioMenu.show(),
   onCampaign: () => campaignFlow.startNewCampaign(),
   onCustomBattle: () => customBattleSetup.show(ActiveCustomBattle.getLastSetup()),
   onSettings: () => settingsPanel.open('main'),
+  onHighScores: () => {
+    highScoresView.show({ onBack: () => menu.show() });
+  },
   onMultiplayer: () => {
     _pausedBeforePauseMenu = isPaused;
     isPaused = true;
@@ -259,11 +385,25 @@ const scenarioMenu = new ScenarioMenu(menuElement, {
   onBack: () => menu.show()
 });
 
+// Shared Save & Exit / Abandon Run dialog. Used by both the battle-exit
+// path (pause menu -> promptCampaignExit) and every campaign picker
+// exit (CampaignFlow._promptPickerExit). One instance because the two
+// uses are never on screen simultaneously.
+const campaignExitDialog = new CampaignExitDialog();
+
 const campaignFlow = new CampaignFlow({
   menuElement,
   mainMenu: menu,
   onStartBattle: (state) => launchCampaignBattle(state),
-  unitInfoPanel
+  unitInfoPanel,
+  onProfileChange: () => refreshProfileBadge(),
+  // Clearing the "player paused at menu" flag when a battle actually
+  // starts means a reload mid-battle correctly auto-resumes, while a
+  // reload after Save & Exit still shows the menu. See saveCampaignAndExit.
+  onEnterBattle: () => {
+    CampaignSession.clearPaused();
+  },
+  exitDialog: campaignExitDialog
 });
 
 const customBattleSetup = new CustomBattleSetup(menuElement, {
@@ -343,7 +483,10 @@ localMultiplayerSetup = new LocalMultiplayerSetup(menuElement, {
 });
 
 const pauseMenu = new PauseMenuPanel({
-  onExitToMainMenu: () => returnToMainMenu(),
+  // In a campaign battle, this opens a two-option dialog (Save & Exit
+  // vs. Abandon Run). Outside a campaign battle it is the original
+  // straight-to-menu behavior.
+  onExitToMainMenu: () => promptCampaignExit(),
   onClose: () => {
     isPaused = _pausedBeforePauseMenu;
     pauseIndicator.classList.toggle('hidden', !isPaused);
@@ -523,9 +666,22 @@ document.addEventListener('keydown', (e) => {
 
 function launchCampaignBattle(state) {
   ActiveScenario.clear();
+  // Hand the mid-battle snapshot (easy difficulty only) through the
+  // scenario object so startScenario can apply it after the sim exists.
+  // Moving it off state immediately means a failed apply falls back to
+  // start-of-battle rather than looping on a broken snapshot.
   const scenario = buildCampaignScenario(state);
+  if (state.battleSnapshot) {
+    scenario.resumeSnapshot = state.battleSnapshot;
+    state.battleSnapshot = null;
+    CampaignState.save(state);
+  }
   menuElement.classList.add('hidden');
+  activeCampaignBattle = { state, simulation: null };
+  // A battle is definitely starting — clear the paused-at-menu flag.
+  CampaignSession.clearPaused();
   startScenario(scenario, (sim) => {
+    activeCampaignBattle = null;
     campaignFlow.handleBattleEnded(state, sim);
   });
 }
@@ -910,6 +1066,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   const simulation = new BattleSimulation(units, {
     playerTeamId: scenario.playerTeamId
   });
+  if (activeCampaignBattle) activeCampaignBattle.simulation = simulation;
 
   if (isGuest) simulation.tickEnabled = false;
   if (RENDER_DIAG_ENABLED) simulation.tickProfile = new TickProfiler();
@@ -1068,6 +1225,29 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
         );
       }
     }
+  }
+
+  // Resume-from-snapshot: if the campaign builder attached a mid-battle
+  // snapshot (easy difficulty + Save & Exit), skip the deployment phase
+  // so the battle is already live, then apply the saved soldier state.
+  // Applied AFTER deployment setup so the deployment phase's own
+  // start-of-battle positioning runs first and the snapshot overwrites
+  // it — a no-op when deploymentPhase is null (MP paths don't carry a
+  // resume snapshot).
+  if (scenario.resumeSnapshot) {
+    if (deploymentPhase) deploymentPhase.startBattle();
+    try {
+      // SnapshotCodec.decode mutates every soldier's pos/hp/state/etc.
+      // Unit IDs must be stable across buildCampaignScenario calls for
+      // this to match — they are, because the builder reads the same
+      // state.roster / state.aiRoster the snapshot was captured from.
+      // If any unit fails to match, that unit simply stays at its
+      // post-deployment position — the "start-of-battle" fallback.
+      SnapshotCodec.decode(scenario.resumeSnapshot, simulation.unitsById);
+    } catch (e) {
+      console.warn('[campaign] resume snapshot failed to apply', e);
+    }
+    scenario.resumeSnapshot = null;
   }
 
   const powerBalanceView = new PowerBalanceView();
@@ -1667,12 +1847,28 @@ function startMultiplayerBattle(info) {
 // --- Boot -----------------------------------------------------------------
 
 const campaign = CampaignState.load();
+// True when the player chose "Save & Exit" from a campaign battle. In
+// that case boot must NOT auto-launch the battle — it must show the
+// menu and wait for the player to click Campaign → Continue. Set by
+// saveCampaignAndExit; cleared by any path that actually starts a
+// battle (launchCampaignBattle / CampaignFlow.onEnterBattle).
+const campaignPaused = CampaignSession.isPaused();
 
-if (campaign && campaign.phase === 'battle') {
-  launchCampaignBattle(campaign);
-} else if (campaign) {
-  campaignFlow.resume(campaign);
+if (campaign && !campaignPaused) {
+  if (campaign.phase === 'battle') {
+    launchCampaignBattle(campaign);
+  } else {
+    campaignFlow.resume(campaign);
+  }
+} else if (campaign && campaignPaused) {
+  // Player intentionally exited — show the menu. The campaign slot is
+  // intact and reachable via Campaign → Continue.
+  menu.show();
 } else {
+  // No campaign at all — a stale paused flag (left over from a Save &
+  // Exit whose campaign was then abandoned) is dead weight; clear it.
+  CampaignSession.clearPaused();
+
   const localMP = ActiveLocalMultiplayer.load();
   const activeScenarioId = ActiveScenario.get();
   const baseScenario = activeScenarioId

@@ -38,7 +38,7 @@ import {
   DefenderCategoryDamageModifiers
 } from '../config/CombatConfig.js';
 import { isCavalry } from '../config/UnitClasses.js';
-import { raceOf } from '../config/RaceConfig.js';
+import { raceOfSoldier } from '../config/RaceConfig.js';
 import { ShieldBlockCalculator } from './ShieldBlockCalculator.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
 
@@ -270,14 +270,14 @@ _resolveHit(proj, defender, byId) {
 
     // Attacker race outgoing damage multiplier.
     if (shooter) {
-      const attackerRaceMult = raceOf(shooter.unitTypeDef).damageMultiplier;
+      const attackerRaceMult = raceOfSoldier(shooter).damageMultiplier;
       if (attackerRaceMult !== 1.0) damage *= attackerRaceMult;
     }
 
     // Defender race incoming damage multiplier, keyed by the attacker's
     // weapon type. Missing keys default to 1.0 (no change). Mirrors
     // melee, even though no existing race declares a bow key today.
-    const defenderRaceIncoming = raceOf(defender.unitTypeDef).incomingDamageMultipliers;
+    const defenderRaceIncoming = raceOfSoldier(defender).incomingDamageMultipliers;
     const raceIncomingMult = defenderRaceIncoming[proj.weaponType];
     if (raceIncomingMult !== undefined && raceIncomingMult !== 1.0) {
       damage *= raceIncomingMult;

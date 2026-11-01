@@ -22,6 +22,11 @@ import { CombatConfig } from '../config/CombatConfig.js';
 export class CollisionSystem {
   constructor(spatialGrid) {
     this.spatialGrid = spatialGrid;
+    // Reusable candidate buffer. Every alive soldier runs one nearby
+    // query per tick, so the previous version allocated ~2000 arrays
+    // per tick. The buffer is only used within a single soldier's
+    // inner loop, so reuse is safe.
+    this._nearbyBuf = [];
   }
 
 update(allSoldiers) {
@@ -34,7 +39,8 @@ update(allSoldiers) {
       if (a.state === 'knockedDown') continue;
 
       const radiusA = a.unitTypeDef.collisionRadius ?? defaultRadius;
-      const nearby = this.spatialGrid.queryNearby(a.pos.x, a.pos.z, 1);
+      const nearby = this.spatialGrid.queryNearbyInto(
+        this._nearbyBuf, a.pos.x, a.pos.z, 1);
 
       for (const b of nearby) {
         if (b === a) continue;

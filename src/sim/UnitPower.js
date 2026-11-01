@@ -104,6 +104,31 @@ const MIN_FATIGUE_FACTOR = 0.6;
 // See the isCavalry check at the application site below.
 const UNDEAD_POWER_MULT = 1.15;
 
+// Power multiplier applied to the final total for a type that carries
+// Property.WORTHLESS. A slave's raw stats describe what it can physically
+// do; they do not describe what it is WORTH to a commander who is trying
+// to hold a line with it. Worthless is defined as "its collapse is silent
+// to other units" — that is a property of a unit that no one, including
+// its own side, is expected to depend on, and the score should read it
+// the same way. Halving the total makes a slave roughly half of an
+// equivalent-stat non-worthless unit in the AI's eyes and on the preview
+// badges.
+//
+// SCORING ONLY. This value does not touch the sim — a slave still
+// swings, blocks, and takes damage exactly as its unit type declares.
+// The sim-side WORTHLESS contract is the morale suppression in
+// MoraleSystem; this constant is the score-side companion, the same
+// "the score describes what the sim does" split already used by
+// FAST_TIRING (RaceConfig.goblin.fastTiring.powerMultiplier) and by
+// per-discipline powerMultiplier (CombatConfig.discipline).
+//
+// Stacks multiplicatively with every other multiplier in the total —
+// a goblin slave (FAST_TIRING, low discipline, goblin morale ceiling,
+// WORTHLESS) therefore scores at roughly 0.92 × 0.95 × 0.70 × 0.50 ≈
+// 0.31× of a same-stats baseline unit, which is the intended "cheap
+// disposable chaff" reading. Retune here if that stack is too harsh.
+const WORTHLESS_POWER_MULT = 0.5;
+
 // Fallback multiplier for a race that declares Property.FAST_TIRING but
 // does not supply a `fastTiring.powerMultiplier` on its race entry.
 // 1.0 = no penalty, so a mis-configured race is inert rather than
@@ -140,7 +165,12 @@ const DEFAULT_FAST_TIRING_POWER_MULT = 1.0;
 // raw-DPS reading. For range-specific retuning (a longbowman that
 // should scale better than a goblin archer), use the divisor below or
 // the per-type range/accuracy fields instead.
-const RANGED_POWER_BASELINE = 5.0;
+// Raised from 5.0 to 8.0 — every archer's envelope scales up 60%. The
+// higher baseline brings the score into line with observed sim
+// behaviour: a full-strength human archer unit now scores ~1.7× a
+// human swordsman (previously ~1.1×), matching the playtest result
+// that a human archer unit beats a swordsman unit outright.
+const RANGED_POWER_BASELINE = 8.0;
 
 // Ranged-envelope range divisor. A ranged unit's own range (see
 // getRangedRange) is divided by this number to produce the range factor
@@ -279,6 +309,7 @@ export class UnitPower {
     // UnitTypes.goblinArcher.excludesProperties) is honoured without
     // any extra plumbing.
     const staminaDurabilityMult = this._staminaDurabilityMultiplier(typeDef);
+    const worthlessMult = this._worthlessPowerMultiplier(typeDef);
     const disciplineMult = this._disciplinePowerMultiplier(typeDef);
     const moraleCoeff = this._moraleCoefficient(typeDef, unit);
 
@@ -287,8 +318,8 @@ export class UnitPower {
     const raw =
       offense * OFFENSE_WEIGHT + durability * DURABILITY_WEIGHT;
     const total = raw * moraleFactor * healthFactor * fatigueFactor
-                * undeadMult * staminaDurabilityMult * disciplineMult
-                * moraleCoeff;
+                * undeadMult * staminaDurabilityMult * worthlessMult
+                * disciplineMult * moraleCoeff;
 
     return {
       total,
@@ -407,7 +438,13 @@ export class UnitPower {
 
     const unitAcc = typeDef.rangedAccuracy ?? CombatConfig.arrow.defaultAccuracy;
     const refAcc = CombatConfig.arrow.defaultAccuracy;
-    if (unitAcc > 0) scale *= refAcc / unitAcc;
+    // Square root, not linear. A doubled scatter radius (goblin archer
+    // at 3.6 vs the 1.8 reference) penalises the archer by ~29%
+    // instead of halving it — the sim already resolves missed-intended
+    // shots as stray hits on other soldiers, so scatter is a partial
+    // penalty, not a full miss rate. sqrt keeps accuracy meaningful
+    // without crushing loose-scattered archers.
+    if (unitAcc > 0) scale *= Math.sqrt(refAcc / unitAcc);
 
     return scale;
   }
@@ -430,6 +467,22 @@ export class UnitPower {
       return DEFAULT_FAST_TIRING_POWER_MULT;
     }
     return cfg.powerMultiplier;
+  }
+
+  // Flat multiplier on the final power total for a type that carries
+  // Property.WORTHLESS. Returns 1.0 for types that do not carry it (and
+  // for a missing type — same defensive contract the sibling helpers
+  // use), so a worthless unit costs the score half its raw value and a
+  // normal unit is unaffected.
+  //
+  // Routed through raceHasProperty so the per-type extraProperties
+  // declaration on UnitTypes.goblinSlave is honoured without any extra
+  // plumbing at this call site — exactly the pattern _staminaDurability
+  // Multiplier uses for FAST_TIRING.
+  static _worthlessPowerMultiplier(typeDef) {
+    if (!typeDef) return 1.0;
+    if (!raceHasProperty(typeDef, Property.WORTHLESS)) return 1.0;
+    return WORTHLESS_POWER_MULT;
   }
 
 // Flat multiplier on the final power total for a unit's discipline

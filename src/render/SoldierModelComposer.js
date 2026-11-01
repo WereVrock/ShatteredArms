@@ -50,6 +50,7 @@ const SWORD_ARM_ANCHORS = {
   blob:          { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.22, handY: 0.65, handZ: 0    },
   skeleton:      { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.22, handY: 0.65, handZ: 0    },
   goblin:        { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.38, handZ: 0.05 },
+  goblinSlave:   { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.38, handZ: 0.05 },
   hobgoblin:     { shoulderX: 0.16, shoulderY: 0.72, shoulderZ: 0.02, handX: 0.22, handY: 0.55, handZ: 0.02 },
   goblinWarlord: { shoulderX: 0.13, shoulderY: 0.62, shoulderZ: 0.04, handX: 0.18, handY: 0.47, handZ: 0.04 }
 };
@@ -299,13 +300,17 @@ static compose(unitTypeDef, teamId, bodyVariant) {
 
     const color = getTeamColor(teamId);
     const isGoblin = bodyVariant === 'goblin';
+    const isGoblinSlave = bodyVariant === 'goblinSlave';
     const isHobgoblin = bodyVariant === 'hobgoblin';
     const isGoblinWarlord = bodyVariant === 'goblinWarlord';
     const isSkeleton = bodyVariant === 'skeleton';
     // Riderless beast: only the mount draws. See Soldier.isRiderlessMount.
     const isRiderless = bodyVariant === 'riderlessBeast';
 
-    const usesSmallScaleKit = isGoblin;
+    // Same small-kit scale as the common goblin — a slave is not a
+    // separate species. Kept as a single flag so the weapon-scale path
+    // below does not need a second OR.
+    const usesSmallScaleKit = isGoblin || isGoblinSlave;
 
     let body;
     if (isRiderless) {
@@ -319,6 +324,8 @@ static compose(unitTypeDef, teamId, bodyVariant) {
       body = SoldierMeshFactory.createSkeletonBody(color, color);
     } else if (isGoblin) {
       body = SoldierMeshFactory.createGoblinBody(color);
+    } else if (isGoblinSlave) {
+      body = SoldierMeshFactory.createGoblinSlaveBody(color);
     } else if (isGoblinWarlord) {
       body = SoldierMeshFactory.createGoblinWarlordBody(color);
     } else if (isHobgoblin) {

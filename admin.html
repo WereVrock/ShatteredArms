@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin — Shattered Arms</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: #12151b;
+      color: #e0e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .panel {
+      background: #1e222a;
+      border: 1px solid #384050;
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+      width: min(820px, 100%);
+      padding: 24px;
+    }
+    h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; }
+    .subtitle { margin: 0 0 20px; font-size: 13px; color: #7a8a9e; }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    input[type="password"], input[type="text"], input[type="number"] {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 5px;
+      border: 1px solid #384050;
+      background: #10151d;
+      color: #eef2f8;
+      font-family: inherit;
+      font-size: 14px;
+    }
+    button {
+      padding: 8px 16px;
+      border-radius: 5px;
+      border: 1px solid #384050;
+      background: #2a2f3a;
+      color: #eef2f8;
+      font-family: inherit;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover { background: #343a48; }
+    button.primary { background: #2e5c3a; border-color: #4a8a5a; font-weight: 600; }
+    button.primary:hover { background: #3a7248; }
+    button.danger { background: #5a2a2a; border-color: #8a4a4a; }
+    button.danger:hover { background: #7a3a3a; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .menu { display: flex; flex-direction: column; gap: 10px; }
+    .section { border-top: 1px solid #2a3544; padding-top: 16px; margin-top: 8px; }
+    .section-title {
+      font-size: 11px;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: #8a9ab0;
+      margin-bottom: 10px;
+    }
+    .error { color: #d08a6a; font-size: 13px; min-height: 18px; margin-bottom: 8px; }
+    .scores {
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid #2a3544;
+      border-radius: 6px;
+      padding: 4px;
+      margin-top: 10px;
+    }
+    .score-row {
+      display: grid;
+      grid-template-columns: 1fr 100px 80px 90px auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid #1e2836;
+      font-size: 13px;
+    }
+    .score-row:last-child { border-bottom: none; }
+    .score-name { color: #eef2f8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .score-meta { color: #8a9ab0; font-size: 12px; text-transform: capitalize; }
+    .score-val { color: #e0c060; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+    .empty { color: #6a7a8e; font-style: italic; text-align: center; padding: 16px; }
+    .hidden { display: none !important; }
+    .status { font-size: 12px; min-height: 16px; margin-top: 8px; color: #8fd08f; }
+    .status.error { color: #d08a6a; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>Admin Panel</h1>
+    <p class="subtitle">Shattered Arms — administrative actions.</p>
+
+    <div id="gateView">
+      <div class="row">
+        <input type="password" id="passwordInput" placeholder="Password" autocomplete="off">
+        <button class="primary" id="unlockBtn">Unlock</button>
+      </div>
+      <div class="error" id="gateError"></div>
+    </div>
+
+    <div id="adminView" class="hidden">
+      <div class="menu">
+        <div class="row">
+          <label style="min-width: 130px; color: #a0b0c4;">Balance version</label>
+          <input type="number" id="balanceVersionInput" value="1" min="1" max="9999">
+          <button id="refreshBtn">Refresh</button>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Highscores</div>
+          <div class="row">
+            <button class="danger" id="clearAllBtn">Erase All Highscores</button>
+          </div>
+          <div class="scores" id="scoresList">
+            <div class="empty">Not loaded. Click Refresh.</div>
+          </div>
+          <div class="status" id="scoreStatus"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Campaign</div>
+          <div class="row">
+            <button id="aiCampaignBtn">AI Campaign…</button>
+          </div>
+          <div class="status" id="campaignStatus"></div>
+        </div>
+
+        <div class="section">
+          <button id="lockBtn">Lock</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="aiView" class="hidden">
+      <div id="aiCampaignRoot"></div>
+      <div class="section">
+        <button id="aiBackBtn">← Back</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const ADMIN_ENDPOINT = '/api/admin/highscores';
+      let password = '';
+
+      const gateView = document.getElementById('gateView');
+      const adminView = document.getElementById('adminView');
+      const aiView = document.getElementById('aiView');
+      const passwordInput = document.getElementById('passwordInput');
+      const unlockBtn = document.getElementById('unlockBtn');
+      const gateError = document.getElementById('gateError');
+      const balanceVersionInput = document.getElementById('balanceVersionInput');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const clearAllBtn = document.getElementById('clearAllBtn');
+      const scoresList = document.getElementById('scoresList');
+      const scoreStatus = document.getElementById('scoreStatus');
+      const aiCampaignBtn = document.getElementById('aiCampaignBtn');
+      const aiBackBtn = document.getElementById('aiBackBtn');
+      const campaignStatus = document.getElementById('campaignStatus');
+      const lockBtn = document.getElementById('lockBtn');
+
+      function balanceVersion() {
+        const n = parseInt(balanceVersionInput.value, 10);
+        return Number.isFinite(n) && n > 0 ? n : 1;
+      }
+
+      async function adminCall(payload) {
+        const res = await fetch(ADMIN_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({}, payload, { password: password }))
+        });
+        if (res.status === 401) throw new Error('Wrong password.');
+        if (!res.ok) throw new Error('Request failed (' + res.status + ').');
+        return res.json();
+      }
+
+      // Shared with the AI campaign module (src/admin/adminMain.js).
+      window.AdminApi = { call: adminCall };
+
+      function setScoreStatus(msg, isError) {
+        scoreStatus.textContent = msg || '';
+        scoreStatus.className = 'status' + (isError ? ' error' : '');
+      }
+
+      function renderScores(scores) {
+        scoresList.innerHTML = '';
+        if (!scores || scores.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = 'No scores for this balance version.';
+          scoresList.appendChild(empty);
+          return;
+        }
+        for (const s of scores) {
+          const row = document.createElement('div');
+          row.className = 'score-row';
+
+          const name = document.createElement('span');
+          name.className = 'score-name';
+          name.textContent = s.playerName || 'Unknown';
+          name.title = s.playerName || 'Unknown';
+          row.appendChild(name);
+
+          const cmd = document.createElement('span');
+          cmd.className = 'score-meta';
+          cmd.textContent = s.commander || 'None';
+          row.appendChild(cmd);
+
+          const diff = document.createElement('span');
+          diff.className = 'score-meta';
+          diff.textContent = s.difficulty || 'normal';
+          row.appendChild(diff);
+
+          const val = document.createElement('span');
+          val.className = 'score-val';
+          val.textContent = Math.round(s.score || 0).toLocaleString();
+          row.appendChild(val);
+
+          const del = document.createElement('button');
+          del.className = 'danger';
+          del.textContent = '\u00d7';
+          del.title = 'Erase this score';
+          del.addEventListener('click', () => eraseScore(s));
+          row.appendChild(del);
+
+          scoresList.appendChild(row);
+        }
+      }
+
+      async function refreshScores() {
+        setScoreStatus('Loading…');
+        try {
+          const data = await adminCall({
+            action: 'list',
+            balanceVersion: balanceVersion()
+          });
+          renderScores(data.scores || []);
+          setScoreStatus('');
+        } catch (e) {
+          setScoreStatus(e.message || 'Failed to load.', true);
+        }
+      }
+
+      async function eraseAll() {
+        if (!confirm('Erase ALL highscores for this balance version?')) return;
+        setScoreStatus('Erasing…');
+        try {
+          await adminCall({ action: 'clearAll', balanceVersion: balanceVersion() });
+          setScoreStatus('All scores erased.');
+          renderScores([]);
+        } catch (e) {
+          setScoreStatus(e.message || 'Failed to erase.', true);
+        }
+      }
+
+      async function eraseScore(score) {
+        if (!confirm('Erase score "' + (score.playerName || 'Unknown') + '"?')) return;
+        setScoreStatus('Erasing…');
+        try {
+          const res = await adminCall({
+            action: 'remove',
+            balanceVersion: balanceVersion(),
+            submittedAt: score.submittedAt,
+            playerName: score.playerName
+          });
+          if (res.ok) {
+            setScoreStatus('Score erased.');
+            refreshScores();
+          } else {
+            setScoreStatus('Score not found.', true);
+          }
+        } catch (e) {
+          setScoreStatus(e.message || 'Failed to erase.', true);
+        }
+      }
+
+      function unlock() {
+        gateError.textContent = '';
+        const pw = passwordInput.value.trim();
+        if (!pw) {
+          gateError.textContent = 'Enter a password.';
+          return;
+        }
+        password = pw;
+        adminCall({ action: 'list', balanceVersion: balanceVersion() })
+          .then((data) => {
+            gateView.classList.add('hidden');
+            adminView.classList.remove('hidden');
+            renderScores(data.scores || []);
+            setScoreStatus('');
+          })
+          .catch((e) => {
+            password = '';
+            gateError.textContent = e.message || 'Wrong password.';
+          });
+      }
+
+      unlockBtn.addEventListener('click', unlock);
+      passwordInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') unlock();
+      });
+
+      refreshBtn.addEventListener('click', refreshScores);
+      clearAllBtn.addEventListener('click', eraseAll);
+
+      aiCampaignBtn.addEventListener('click', () => {
+        adminView.classList.add('hidden');
+        aiView.classList.remove('hidden');
+      });
+      aiBackBtn.addEventListener('click', () => {
+        aiView.classList.add('hidden');
+        adminView.classList.remove('hidden');
+        refreshScores();
+      });
+
+      lockBtn.addEventListener('click', () => {
+        window.dispatchEvent(new Event('admin:locked'));
+        password = '';
+        passwordInput.value = '';
+        gateView.classList.remove('hidden');
+        adminView.classList.add('hidden');
+        aiView.classList.add('hidden');
+        scoresList.innerHTML = '<div class="empty">Not loaded.</div>';
+        setScoreStatus('');
+        campaignStatus.textContent = '';
+      });
+    })();
+  </script>
+  <script type="module" src="/src/admin/adminMain.js"></script>
+</body>
+</html>

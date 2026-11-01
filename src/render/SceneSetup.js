@@ -110,6 +110,9 @@ export class SceneSetup {
     // -Infinity so the very first frame always updates.
     this.renderer.shadowMap.autoUpdate = false;
     this._lastShadowUpdateMs = -Infinity;
+    // True while the shadow map may not match the scene. The throttled
+    // refresh in render() only runs while this is set.
+    this._shadowStale = true;
     // Current map-size tier. Null means "not yet applied"; applySettings
     // uses this to detect a tier change and reallocate the shadow target.
     this._shadowQuality = null;
@@ -184,6 +187,7 @@ applySettings(settings) {
     // only place the two concerns are joined — every other reader can
     // treat shadowQuality as a plain three-or-four-value enum.
     const shadowsOn = settings.shadowQuality !== 'none';
+    this._shadowStale = true;
     const quality = SHADOW_MAP_SIZES[settings.shadowQuality]
       ? settings.shadowQuality
       : SHADOW_QUALITY_DEFAULT;
@@ -618,6 +622,12 @@ _createGroundTexture() {
     this._updateCameraTransform();
   }
 
+  // Called when the casters' world matrices may have changed. The next
+  // throttled refresh in render() then re-renders the shadow map.
+  markShadowsStale() {
+    this._shadowStale = true;
+  }
+
   _handleResize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -668,7 +678,8 @@ render() {
       SHADOW_MAX_INTERVAL_MS,
       Math.max(1000 / SHADOW_UPDATE_HZ, (this._frameMsEma || 0) * 2)
     );
-    if (now - this._lastShadowUpdateMs >= minIntervalMs) {
+    if (this._shadowStale && now - this._lastShadowUpdateMs >= minIntervalMs) {
+      this._shadowStale = false;
       this.renderer.shadowMap.needsUpdate = true;
       this._lastShadowUpdateMs = now;
     }

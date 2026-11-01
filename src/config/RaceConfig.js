@@ -195,6 +195,90 @@ export const Races = {
     fastTiring: {
       powerMultiplier: 0.92
     }
+  },
+
+  // Hobgoblin race. Extracted from the previous "hobgoblinSwordsman
+  // tagged as goblin with per-type overrides" pattern. Bodyguards of
+  // the Goblin Warlord, plus any future hobgoblin type, use this
+  // record. Values reflect the effective stats the hobgoblin type
+  // currently produces, with three deliberate changes:
+  //   - hpMultiplier 0.9 (was effectively 42 via baseHp 60 × 0.7;
+  //     now baseHp 42 × 0.9 = 37.8 → 38)
+  //   - maxMoraleMultiplier 1.2 (was inheriting 0.7)
+  //   - unitSizeMultiplier 0.9 (was inheriting 2.0)
+  hobgoblin: {
+    id: 'hobgoblin',
+    displayName: 'Hobgoblin',
+    supportsUndead: false,
+    damageMultiplier: 0.6,
+    moveSpeedMultiplier: 1.0,
+    hpMultiplier: 0.9,
+    maxMoraleMultiplier: 1.2,
+    fatigueDrainMultiplier: 1.0,
+    unitSizeMultiplier: 0.9,
+    incomingDamageMultipliers: {},
+    properties: [Property.DIRTY_FIGHTING],
+    dirtyFighting: {
+      flankDamageMult: 1.5,
+      frontalDamageMult: 0.75
+    }
+  },
+
+  // Blank champion race. All multipliers 1.0, no properties. A soldier
+  // with this race takes no race-derived modifiers. Actual champion
+  // stats live on the per-champion race record below (or on per-soldier
+  // overrides), not here. This record exists as a category marker — so
+  // code can recognise "this soldier ignores race modifiers" cleanly,
+  // without a dedicated "isChampion" branch everywhere.
+  champion: {
+    id: 'champion',
+    displayName: 'Champion',
+    supportsUndead: false,
+    damageMultiplier: 1.0,
+    moveSpeedMultiplier: 1.0,
+    hpMultiplier: 1.0,
+    maxMoraleMultiplier: 1.0,
+    fatigueDrainMultiplier: 1.0,
+    unitSizeMultiplier: 1.0,
+    incomingDamageMultipliers: {},
+    properties: []
+  },
+
+  // Goblin Warlord champion. Extends the blank champion race with the
+  // Warlord's hand-set stats. nominalRace is a dormant tag — used only
+  // by future code that wants to know the Warlord is "nominally a
+  // goblin" (e.g. a weapon that damages goblins differently). No
+  // current code reads it.
+  //
+  // Stats (all manual, no inheritance from goblin race):
+  //   damageMultiplier 0.6       — preserves current Warlord damage
+  //   maxMoraleMultiplier 1.5    — human baseline (1.0) × 1.5
+  //   hpMultiplier 1.0           — champion-blank default; actual HP
+  //                                supplied by championHp override on
+  //                                ChampionConfig (126)
+  //   fatigueDrainMultiplier 1.0 — preserves current rate
+  //   incomingDamageMultipliers { spear: 0.9 } — goblin spear resist
+  //   properties [DIRTY_FIGHTING] — personal effect
+  //   dirtyFighting { flank 1.5, frontal 0.75 } — same as goblin
+  goblin_warlord_champion: {
+    id: 'goblin_warlord_champion',
+    displayName: 'Goblin Warlord (Champion)',
+    supportsUndead: false,
+    damageMultiplier: 0.6,
+    moveSpeedMultiplier: 1.0,
+    hpMultiplier: 1.0,
+    maxMoraleMultiplier: 1.5,
+    fatigueDrainMultiplier: 1.0,
+    unitSizeMultiplier: 1.0,
+    incomingDamageMultipliers: {
+      spear: 0.9
+    },
+    properties: [Property.DIRTY_FIGHTING],
+    dirtyFighting: {
+      flankDamageMult: 1.5,
+      frontalDamageMult: 0.75
+    },
+    nominalRace: 'goblin'
   }
 };
 
@@ -248,6 +332,25 @@ export function raceHasProperty(unitTypeDef, property) {
   if (unitTypeDef && Array.isArray(unitTypeDef.excludesProperties)
       && unitTypeDef.excludesProperties.includes(property)) {
     return false;
+  }
+  // Per-type ADDITION. The symmetric half of excludesProperties: a unit
+  // type may carry a property its race does not. The canonical case is
+  // the goblin slave, which inherits the goblin race's FAST_TIRING,
+  // EXCLUDES the race's EXPENDABLE and DIRTY_FIGHTING, and ADDS the
+  // stronger WORTHLESS property that applies only to it. A slave rout
+  // must generate ZERO panic in any observer, which the race's
+  // EXPENDABLE alone cannot deliver (expendables half-panic other
+  // expendables) — so EXPENDABLE is excluded entirely rather than left
+  // to be superseded at detection time. See UnitTypes.goblinSlave for
+  // the declared property set.
+  //
+  // Checked AFTER exclusions so a type cannot both add and exclude the
+  // same property — exclusion wins, matching the existing contract.
+  // Checked BEFORE the race fallback so a type that adds a property its
+  // race also carries is short-circuited rather than double-resolved.
+  if (unitTypeDef && Array.isArray(unitTypeDef.extraProperties)
+      && unitTypeDef.extraProperties.includes(property)) {
+    return true;
   }
   const race = raceOf(unitTypeDef);
   return Array.isArray(race.properties) && race.properties.includes(property);

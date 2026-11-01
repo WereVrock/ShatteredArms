@@ -41,6 +41,12 @@ for (const family of Object.keys(FAMILIES)) {
 const GOBLIN_TYPE_IDS = [
   'goblinSwordsman',
   'goblinSwordsmanNoShield',
+  // Slave sits with the swordsman family — it is a goblin swordsman
+  // stripped to half HP, no shield, no attack-speed bonus, and the
+  // WORTHLESS property instead of DIRTY_FIGHTING. Placed here rather
+  // than with the archers so the pool reads in family order: sword
+  // block, then spear block, then ranged.
+  'goblinSlave',
   'goblinSpearman',
   'goblinSpearmanNoShield',
   'goblinArcher'

@@ -237,6 +237,122 @@ const goblinSwordsmanNoShield = withoutShield(
 //
 // No-shield variant mirrors the goblin sword pattern: derived from the
 // shielded entry so race and all race-side modifiers propagate together.
+// Goblin slave. A goblin swordsman stripped to the bone: no shield, no
+// issued gear beyond a club, half the base HP, and — mechanically — no
+// BLADE bonuses (see noSwordSpecialistBonuses below: no skeleton-
+// shatter, no flanking instant-kill on the undead). It KEEPS the
+// goblin race's DIRTY_FIGHTING instinct: extra damage from the side
+// and rear, less from the front, exactly as a goblin swordsman. The
+// slave's tactical identity is a cheap flanker whose collapse spreads
+// no panic — not a straight downgrade of the swordsman.
+//
+// Excludes the goblin race's EXPENDABLE property in favour of the
+// stronger WORTHLESS — a slave's rout must not spread panic to ANY
+// observer, including other expendables, which EXPENDABLE alone
+// cannot deliver (expendables half-panic other expendables).
+//
+// Properties summary:
+//   - DIRTY_FIGHTING kept (real combat strength on a flank).
+//   - EXPENDABLE excluded (superseded by WORTHLESS below).
+//   - FAST_TIRING kept (scoring-side penalty — the slave still reads
+//     below its already-poor stats).
+//   - WORTHLESS added (per-type; see Property.WORTHLESS).
+//
+// weaponType is 'sword' so the sim uses the crude-sword combat tables
+// and the sword-arm swing animation; WeaponViewFactory routes
+// bodyVariant === 'goblinSlave' to the club mesh (see ClubBuilder.js).
+//
+// bodyVariant 'goblinSlave' is the render-only selector for the
+// collar-and-loincloth slave body model. See GoblinSlaveBodyBuilder.js.
+const goblinSlave = {
+  ...goblinSwordsman,
+  id: 'goblinSlave',
+  displayName: 'Slave',
+  // Half the base HP of the swordsman this is derived from → 21 base,
+  // then the goblin race multiplier 0.7 gives ~15 effective HP — half
+  // the goblin swordsman's ~29. Using the parent's field rather than a
+  // literal keeps the "half a swordsman" contract intact if the human
+  // swordsman's base HP is ever retuned.
+  baseHp: swordsman.baseHp / 2,
+  // "No bonuses." The swordsman's 1.2× attack speed is the class's
+  // defining mechanical advantage — a slave carrying a club gets the
+  // baseline cadence, not the swordsman's. Explicit 1.0 (rather than
+  // deleting the field) so the intent is legible against the parent.
+  attackSpeedMultiplier: 1.0,
+  hasShield: false,
+  shieldSide: null,
+  // No issued headgear. The slave body builder ignores helmetType
+  // entirely; setting it to null makes that explicit and prevents a
+  // future UI skin from inheriting a helmet the slave does not wear.
+  helmetType: null,
+  bodyVariant: 'goblinSlave',
+  // The club uses the sword's weaponType (see the block comment above
+  // this entry — the sim's sword combat tables drive the swing, and the
+  // render layer substitutes the club mesh). But a club is not a
+  // BLADE, and the sword's two signature mechanical bonuses both come
+  // from the blade: the instant kill on a flanking strike against an
+  // undead defender, and the ×1.5 skeleton damage bonus. Neither makes
+  // sense for a blunt weapon, and neither is what a slave is for.
+  //
+  // This flag strips exactly those two branches in
+  // CombatResolutionSystem._resolveAttack. Everything else is
+  // unaffected:
+  //   - the frontal-vs-spearman × 1/3 penalty STILL applies (a club
+  //     is still a bad answer to a spear wall),
+  //   - the standard flank multipliers × 1.25 / × 1.5 STILL apply
+  //     (they are weapon-agnostic — every weapon that flanks gets
+  //     them, and stripping them here would be a different rule),
+  //   - DIRTY_FIGHTING bonuses and maluses are untouched — the slave
+  //     CARRIES that property (see excludesProperties below, which
+  //     lists only EXPENDABLE), so its club strikes get the goblin
+  //     race's ×1.5 flank bonus and take the ×0.75 frontal penalty
+  //     exactly as a goblin swordsman's sword strikes do. The
+  //     noSwordSpecialistBonuses flag strips BLADE abilities, not
+  //     dirty-fighting instincts.
+  //   - the to-hit roll, damage amount, and swing cadence are
+  //     unchanged (the club is "a sword with a different mesh" for
+  //     those).
+  noSwordSpecialistBonuses: true,
+  // Overrides the swordsman description inherited via goblinSwordsman.
+  // Overrides the swordsman description inherited via goblinSwordsman.
+  // The player-facing read of the type's combat identity: low HP, low
+  // morale, and a specific, punishing weakness to a frontal spearwall
+  // (the ×1/3 frontal-vs-spearman damage penalty applies to the club
+  // exactly as it does to a sword). The richer detail — no blade
+  // bonuses, dirty-fighting bonuses/maluses, silent outward rout,
+  // hard inward panic — lives in the Traits and Combat sections, not
+  // duplicated here.
+  description: 'Low health and morale — a body to fill a gap, not to win a fight. Especially bad against frontal spearmen.',
+  // WORTHLESS is a per-type ADDITION on top of the goblin race's
+  // properties, and REPLACES the race's EXPENDABLE (excluded below).
+  // Semantics — see Property.WORTHLESS and MoraleSystem: a routing
+  // slave generates ZERO panic in ANY observer, including other
+  // worthless units. EXPENDABLE alone would half-panic other
+  // expendables and still inflict the adjacent-wipe shock; WORTHLESS
+  // suppresses both, so dropping EXPENDABLE from this unit is a
+  // clarity change on the OUTGOING side — WORTHLESS was already
+  // winning at both detection sites.
+  //
+  // Note on the INCOMING side: the slave's WORTHLESS property does not
+  // shield it from other units' panic — it AMPLIFIES it. MoraleSystem
+  // splits observers of an expendable rout three ways: worthless
+  // takes the FULL penalty, expendable takes half, everyone else
+  // takes zero. So a slave watching a neighbouring goblin break is
+  // panicked MORE than the goblin's own expendable comrades would be,
+  // and far more than a human line watching the same rout (which
+  // takes zero). Worthlessness is silence OUTWARD, not numbness
+  // INWARD. See MoraleSystem._updateSoldier and Property.WORTHLESS.
+  //
+  // DIRTY_FIGHTING and FAST_TIRING are both inherited and kept.
+  // DIRTY_FIGHTING is what makes a slave useful on a flank: extra
+  // damage from the side and rear, less from the front, identical to
+  // a goblin swordsman (RaceConfig.goblin.dirtyFighting). FAST_TIRING
+  // is a scoring-side penalty, not a bonus, and removing it would
+  // make the slave score HIGHER than its already-poor stats suggest.
+  extraProperties: [Property.WORTHLESS],
+  excludesProperties: [Property.EXPENDABLE],
+};
+
 const goblinSpearman = goblinOf(spearman, 'goblinSpearman', 'Spearman', {
   discipline: 'low'
 });
@@ -294,7 +410,7 @@ const hobgoblinSwordsman = {
   ...swordsman,
   id: 'hobgoblinSwordsman',
   displayName: 'Hobgoblin Swordsman',
-  race: 'goblin',
+  race: 'hobgoblin',
   bodyVariant: 'hobgoblin',
 
   // --- mount movement ---
@@ -311,7 +427,6 @@ const hobgoblinSwordsman = {
   baseMoveSpeed: 2.3,
   mass: 3.0,
 
-  baseHp: 60,
   discipline: 'high',
   spriteColor: '#6a8a3a',
 
@@ -339,15 +454,6 @@ const hobgoblinSwordsman = {
   // retinue's two-row formation.
   formationSpacing: 1.2,
 
-  // Override the goblin race's spear resistance. Hobgoblins take full
-  // spear damage. See CombatResolutionSystem._resolveAttack — the
-  // per-type table (when present, even as {}) replaces the race table.
-  incomingDamageMultipliers: {},
-  // Override the goblin race's 1.5× fatigue drain. Hobgoblins tire at the
-  // normal rate.
-  fatigueDrainMultiplier: 1.0,
-  // Exclude the goblin race's soft properties. Honoured by raceHasProperty.
-  excludesProperties: [Property.EXPENDABLE, Property.FAST_TIRING],
   // Hobgoblins in the retinue share the swordsman's helmet silhouette so
   // they read as the same discipline tier at a glance.
   helmetType: 'nasalHelm',
@@ -393,6 +499,7 @@ export const UnitTypes = {
   swordsmanNoShield: withoutShield(swordsman, 'swordsmanNoShield', 'Swordsman (No Shield)', 'bandedHelm'),
   goblinSwordsman,
   goblinSwordsmanNoShield,
+  goblinSlave,
 
   goblinSpearman,
   goblinSpearmanNoShield,

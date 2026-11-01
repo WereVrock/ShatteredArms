@@ -16,6 +16,17 @@ import { ChampionPanelView } from '../ui/ChampionPanelView.js';
 import { computeUnitPrice, buildPreviewUnit } from './UnitPreview.js';
 import { AITierPreference } from '../config/AITierPreference.js';
 import { installCampaignCheats } from './CampaignCheats.js';
+import { ProfileStore } from '../profile/ProfileStore.js';
+import { ProfilePickerView } from '../ui/ProfilePickerView.js';
+import {
+  rosterPower,
+  teamPowerFromSim,
+  battleScore,
+  buildScorePayload
+} from './CampaignScore.js';
+import { HighscoreApi } from '../net/HighscoreApi.js';
+import { SnapshotCodec } from '../net/SnapshotCodec.js';
+import { CampaignSession } from './CampaignSession.js';
 
 // Orchestrates the campaign. All UI rendering is delegated to
 // CardPickerView; this class only builds view-model data and mutates
@@ -151,7 +162,7 @@ function ensureStyles() {
 }
 
 export class CampaignFlow {
-  constructor({ menuElement, mainMenu, onStartBattle, unitInfoPanel }) {
+  constructor({ menuElement, mainMenu, onStartBattle, unitInfoPanel, onProfileChange, onEnterBattle, exitDialog }) {
     ensureStyles();
 
     this.menuElement = menuElement;
@@ -161,6 +172,16 @@ export class CampaignFlow {
     // a synthetic preview unit built from the card's data — no live sim
     // unit exists at this stage. Null-safe.
     this.unitInfoPanel = unitInfoPanel || null;
+    this.onProfileChange = onProfileChange || null;
+    // Fired whenever a battle actually begins (not the picker stages).
+    // main.js uses it to clear the "campaignPaused" flag so the next
+    // reload auto-resumes instead of returning to the menu. Null-safe.
+    this.onEnterBattle = onEnterBattle || null;
+    // Shared Save & Exit / Abandon Run dialog. Same instance main.js
+    // uses for the battle-exit path, so the picker exits read
+    // identically. Nullable — _promptPickerExit falls back to the
+    // save-and-show-menu behavior if it was not supplied.
+    this.exitDialog = exitDialog || null;
 
     // Custom Battle still shows a power score; the campaign shows prices
     // instead. Kept as a flag so a future "show both" toggle is a
@@ -170,6 +191,9 @@ export class CampaignFlow {
     this.picker = new CardPickerView(menuElement);
     // Modal champion sheet. Built once per flow; show()/close() drive it.
     this.championPanel = new ChampionPanelView();
+    // Local profile select / create / delete. Same WC3-style wording as
+    // the top-left badge; required when gating Campaign entry.
+    this.profilePicker = new ProfilePickerView();
 
     // Test-only cheats. The listener is inert unless
     // SettingsStore.enableTestFeatures is on; getState returns the live
@@ -203,16 +227,29 @@ export class CampaignFlow {
   // confirms, so backing out of the picker leaves no orphaned roster
   // entry. See _showChampionPicker / _showChampionPreview.
 startNewCampaign() {
+    if (!ProfileStore.isLoggedIn()) {
+      this._showProfileGate(() => this.startNewCampaign());
+      return;
+    }
+
+    const existing = CampaignState.load();
+    if (existing && existing.phase && existing.phase !== 'game-over') {
+      this._showContinueOrNew(existing);
+      return;
+    }
+    if (existing && existing.phase === 'game-over') {
+      this._showContinueOrNew(existing, { finished: true });
+      return;
+    }
+
+    this._beginFreshCampaign();
+  }
+
+  _beginFreshCampaign() {
+    // Any "paused at menu" flag from a previous campaign is stale now.
+    CampaignSession.clearPaused();
     const state = CampaignState.newCampaign();
     CampaignState.save(state);
-    // Show the commander picker whenever at least one commander is
-    // eligible. Pseudo-commanders (see ChampionConfig.mercenary_captains)
-    // are always eligible — they are not Champions, need no Champion
-    // instance, and their effects run entirely through
-    // state.mercenaryCaptain and the starting-unit hook in
-    // _commitPseudoCommander. Only when the eligible list is empty
-    // (e.g. a future build with no pseudo-commanders and champions
-    // disabled) does the flow skip straight to the difficulty picker.
     if (this._eligibleCommanderIds().length > 0) {
       this._showChampionPicker(state);
     } else {
@@ -220,7 +257,188 @@ startNewCampaign() {
     }
   }
 
-// First screen of a new campaign. Presents every champion in
+  _showContinueOrNew(existing, { finished = false } = {}) {
+    const battleNum = (existing.battleIndex | 0) + 1;
+    const score = Math.round(existing.campaignScore || 0);
+    const cards = [];
+
+    if (!finished && existing.phase !== 'game-over') {
+      cards.push({
+        id: 'continue',
+        name: 'Continue Campaign',
+        description: `Battle ${battleNum} · Score ${score.toLocaleString()} · ${existing.difficulty || 'normal'}`,
+        imageHtml: '',
+        disabled: false
+      });
+    }
+
+    cards.push({
+      id: 'new',
+      name: 'New Campaign',
+      description: finished
+        ? `Previous run ended at battle ${battleNum} (score ${score.toLocaleString()}). Start fresh?`
+        : 'Abandon the current campaign and start over. Progress will be lost.',
+      imageHtml: '',
+      disabled: false
+    });
+
+    this.picker.show({
+      title: finished ? 'Campaign complete' : 'Campaign in progress',
+      subtitle: finished
+        ? 'Start a new campaign, or return to the menu.'
+        : 'Continue where you left off, or start a new campaign.',
+      cards,
+      mode: 'single',
+      onSelect: (id) => {
+        if (id === 'continue') {
+          this.resume(existing);
+          return;
+        }
+        if (id === 'new') {
+          if (!finished) this._finalizeAndSubmit(existing, { abandoned: true });
+          CampaignState.clear();
+          this._beginFreshCampaign();
+        }
+      },
+      onBack: () => {
+        this.mainMenu.show();
+      },
+      backLabel: '← Back'
+    });
+  }
+
+  _showProfileGate(onReady) {
+    const refresh = () => {
+      this.profilePicker.show({
+        profiles: ProfileStore.list(),
+        activeId: ProfileStore.getActiveId(),
+        required: true,
+        onSelect: (id) => {
+          ProfileStore.select(id);
+          this.profilePicker.close();
+          if (this.onProfileChange) this.onProfileChange();
+          if (onReady) onReady();
+        },
+        onCreate: (name) => {
+          const p = ProfileStore.create(name, { activate: true });
+          if (!p) return null;
+          this.profilePicker.close();
+          if (this.onProfileChange) this.onProfileChange();
+          if (onReady) onReady();
+          return p;
+        },
+        onDelete: (id) => {
+          CampaignState.clearForProfile(id);
+          ProfileStore.remove(id);
+          if (this.onProfileChange) this.onProfileChange();
+          refresh();
+        },
+        onLogout: () => {
+          ProfileStore.clearActive();
+          if (this.onProfileChange) this.onProfileChange();
+          refresh();
+        },
+        onCancel: () => {
+          this.profilePicker.close();
+          this.mainMenu.show();
+        }
+      });
+    };
+    refresh();
+  }
+
+  _finalizeAndSubmit(state, { abandoned = false } = {}) {
+    if (!state || state.highscoreSubmitted) return;
+    const score = Math.round(state.campaignScore || 0);
+    state.highscoreSubmitted = true;
+    CampaignState.save(state);
+    if (score <= 0) return;
+    const profile = ProfileStore.getActive();
+    const payload = buildScorePayload(state, profile && profile.name);
+    HighscoreApi.submit(payload).catch(() => {});
+  }
+
+  // Called by main.js when the player chooses "Abandon Run" from the
+  // exit dialog. Submits the current score (same as ending the campaign
+  // normally) so a voluntary surrender still contributes to the board.
+  // Does NOT clear CampaignState — main.js owns that and calls
+  // CampaignState.clear() right after this returns.
+  abandonCampaign(state) {
+    if (!state) return;
+    this._finalizeAndSubmit(state, { abandoned: true });
+  }
+
+  // Called by main.js on exit-to-main-menu from a campaign battle.
+  // Persists the current state so the next Campaign click shows a
+  // "Continue" option. For easy difficulty, also captures a mid-battle
+  // simulation snapshot; resuming then restores that snapshot instead
+  // of restarting the battle. Non-easy difficulties leave the state at
+  // start-of-battle (which _beginBattle already saved), so resuming
+  // restarts the battle from deployment.
+  saveOnExit(state, simulation) {
+    if (!state) return;
+    if (state.difficulty === 'easy' && simulation) {
+      const snap = this._captureBattleSnapshot(state, simulation);
+      if (snap) state.battleSnapshot = snap;
+    }
+    CampaignState.save(state);
+  }
+
+  // Capture a serializable snapshot of the current battle simulation.
+  // Only called for easy difficulty. Returns null when snapshotting is
+  // unavailable — in that case resuming falls back to start-of-battle,
+  // identical to non-easy behavior.
+  //
+  // TODO: wire src/net/SnapshotCodec.js (the MP serializer) once its
+  // interface is confirmed. Until then this stays a no-op so the safe
+  // "save the campaign slot" behavior ships without inventing a second
+  // serializer.
+  _captureBattleSnapshot(state, simulation) {
+    if (!simulation || !simulation.units) return null;
+    try {
+      // SnapshotCodec.encode takes (units, tick). simulation.tick is the
+      // current tick counter if present; we fall back to 0 which is fine
+      // — resume does not need the exact tick, only soldier state.
+      const tick = typeof simulation.tick === 'number' ? simulation.tick : 0;
+      return SnapshotCodec.encode(simulation.units, tick);
+    } catch (e) {
+      console.warn('[campaign] failed to capture battle snapshot', e);
+      return null;
+    }
+  }
+
+  // Shared Save & Exit / Abandon Run dialog for picker exits (initial
+  // recruitment, reward shop). Mirrors the battle-exit dialog from the
+  // pause menu: Save & Exit persists the campaign and shows the menu,
+  // Abandon Run submits the score and wipes the slot. Either option
+  // marks the campaignPaused flag so a reload lands on the menu, not
+  // back in the picker.
+  _promptPickerExit(state) {
+    if (!this.exitDialog) {
+      // Fallback: dialog not wired. Previous behavior was save & show
+      // menu; keep that to stay functional.
+      CampaignState.save(state);
+      this.mainMenu.show();
+      return;
+    }
+    this.exitDialog.show({
+      title: 'Leave campaign?',
+      subtitle: 'Save your progress to continue later, or end this run for good.',
+      onSaveExit: () => {
+        CampaignState.save(state);
+        CampaignSession.setPaused();
+        this.mainMenu.show();
+      },
+      onAbandon: () => {
+        this._finalizeAndSubmit(state, { abandoned: true });
+        CampaignState.clear();
+        CampaignSession.clearPaused();
+        this.mainMenu.show();
+      }
+    });
+  }
+
+  // First screen of a new campaign. Presents every champion in
   // ChampionConfig. Each card shows the champion's displayName, its
   // short description, and (in the description) the passive it brings.
   //
@@ -359,11 +577,16 @@ _showChampionPicker(state) {
 
 // Called at boot when a campaign exists but the phase is a picker phase.
   resume(state) {
+    // Player is actively continuing the campaign — the "paused at
+    // menu" flag has done its job. Clearing here means a subsequent
+    // reload (Ctrl+R mid-picker, mid-battle) correctly auto-resumes.
+    CampaignSession.clearPaused();
     switch (state.phase) {
       case 'pick-difficulty': this._showDifficultyPicker(state); break;
       case 'pick-initial': this._showInitialPicker(state); break;
       case 'pick-reward':  this._showRewardPicker(state); break;
       case 'pick-recover': this._showReinforcePicker(state); break;
+      case 'battle':       this.onStartBattle(state); break;
       case 'game-over':    this._showGameOver(state); break;
       default:             this.mainMenu.show(); break;
     }
@@ -371,6 +594,9 @@ _showChampionPicker(state) {
 
   // Called from main.js's battle-end callback.
   handleBattleEnded(state, simulation) {
+    // No mid-battle state can survive past this point — the battle has
+    // ended and the player is in a picker or game-over screen.
+    state.battleSnapshot = null;
     const redUnits = simulation.units.filter(u => u.teamId === 'red');
     const playerWon = redUnits.every(u => u.isDefeated());
 
@@ -496,6 +722,28 @@ _showChampionPicker(state) {
     // See CampaignBattleBuilder.processAISurvivors for the full rule.
     state.aiRoster = processAISurvivors(state.aiRoster, simulation);
 
+    // Campaign score for this battle.
+    // Win  → full AI start power. Loss → AI power destroyed this fight.
+    // Difficulty multiplies the result; accumulated into campaignScore.
+    {
+      const aiStart = state.battleAiStartPower || 0;
+      const aiRemaining = teamPowerFromSim(simulation.units, 'red');
+      const gained = battleScore({
+        playerWon,
+        aiStartPower: aiStart,
+        aiRemainingPower: aiRemaining,
+        difficulty: state.difficulty
+      });
+      state.campaignScore = (state.campaignScore || 0) + gained;
+      if (!Array.isArray(state.battleScores)) state.battleScores = [];
+      state.battleScores.push({
+        battleIndex: state.battleIndex,
+        score: gained,
+        won: !!playerWon
+      });
+      state.battleAiStartPower = null;
+    }
+
     // Champion death overrides every other consideration — the campaign
     // ends on the champion's fall regardless of whether the rest of the
     // army survived or won. Ordering matters: this check runs BEFORE the
@@ -503,6 +751,7 @@ _showChampionPicker(state) {
     if (championDead) {
       state.phase = 'game-over';
       state.lastBattleOutcome = 'lost';
+      this._finalizeAndSubmit(state);
       CampaignState.save(state);
       this._showGameOver(state, { reason: 'champion-dead' });
       return;
@@ -527,6 +776,7 @@ _showChampionPicker(state) {
     if (!playerWon || state.roster.length === 0) {
       state.phase = 'game-over';
       state.lastBattleOutcome = 'lost';
+      this._finalizeAndSubmit(state);
       CampaignState.save(state);
       this._showGameOver(state);
       return;
@@ -711,10 +961,7 @@ _showDifficultyPicker(state) {
         if (pickState.picksRemaining <= 0) this._finishInitialPicks(state);
         else this._showInitialPicker(state);
       },
-      onBack: () => {
-        CampaignState.clear();
-        this.mainMenu.show();
-      },
+      onBack: () => this._promptPickerExit(state),
       backLabel: 'Exit campaign'
     });
   }
@@ -875,10 +1122,7 @@ _showDifficultyPicker(state) {
         this._beginBattle(state, state.battleIndex + 1, { reload: true });
       },
       continueLabel: 'Continue to next battle →',
-      onBack: () => {
-        CampaignState.clear();
-        this.mainMenu.show();
-      },
+      onBack: () => this._promptPickerExit(state),
       backLabel: 'Exit campaign'
     });
   }
@@ -974,10 +1218,11 @@ _showDifficultyPicker(state) {
 
 _showGameOver(state, opts = {}) {
     const championDead = opts.reason === 'champion-dead';
+    const score = Math.round(state.campaignScore || 0);
     const title = championDead ? 'Champion Slain' : 'Campaign Over';
     const subtitle = championDead && state.champion
-      ? `${state.champion.displayName} fell in battle ${state.battleIndex + 1}. The campaign ends here.`
-      : `You reached battle ${state.battleIndex + 1}.`;
+      ? `${state.champion.displayName} fell in battle ${state.battleIndex + 1}. Score: ${score.toLocaleString()}.`
+      : `You reached battle ${state.battleIndex + 1}. Score: ${score.toLocaleString()}.`;
 
     this.picker.show({
       title,
@@ -1215,9 +1460,19 @@ _priceOfOffer(offer, costModifiers = null) {
     // normal and easy — replaces the first battle's roster with a fixed
     // 3-unit force (see CampaignBattleBuilder).
     state.aiRoster = generateAIRoster(battleIndex, state.aiRoster, state.difficulty);
+    state.battleAiStartPower = rosterPower(state.aiRoster);
     state.rewardOptions = null;
     state.lastBattleOutcome = null;
+    // A fresh battle has no mid-battle snapshot to restore — any that
+    // survived from a previous battle is stale and must not be applied
+    // to this one.
+    state.battleSnapshot = null;
     CampaignState.save(state);
+    // Battle is genuinely starting — main.js clears the "paused at
+    // menu" flag here so a subsequent reload auto-resumes instead of
+    // dropping back to the menu (needed because the reward-picker
+    // Continue path reloads the page to escape the previous battle).
+    if (this.onEnterBattle) this.onEnterBattle();
     if (reload) {
       window.location.reload();
     } else {

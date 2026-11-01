@@ -1,7 +1,7 @@
 import { CombatConfig, WeaponMatchup, SkeletonDamageModifiers, DefenderCategoryDamageModifiers } from '../config/CombatConfig.js';
 import { toSimSpeed } from '../config/SpeedScale.js';
 import { isCavalry } from '../config/UnitClasses.js';
-import { raceOf, raceHasProperty } from '../config/RaceConfig.js';
+import { raceOfSoldier, soldierHasProperty } from '../config/RaceConfig.js';
 import { Property } from '../config/Properties.js';
 import { ShieldBlockCalculator } from './ShieldBlockCalculator.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
@@ -168,6 +168,23 @@ _resolveAttack(attacker, defender, unitsById) {
     //       branch, and the `baseSpeedMult` selection above it).
     //     - sword flanking an undead defender: instant kill that bypasses
     //       shield block entirely (the `flankingSwordVsUndead` branch).
+    //     - the ×1.5 skeleton damage bonus on non-frontal-vs-spearman
+    //       hits (the `SkeletonDamageModifiers.sword` branch).
+    //
+    //     The last two are SKIPPED when attacker.unitTypeDef carries
+    //     noSwordSpecialistBonuses === true — the goblin slave's club
+    //     is a sword for damage/to-hit/cadence, but not for blade
+    //     bonuses. See the flag's doc at the top of _resolveAttack.
+    //     The club tooltip (UnitInfoPanel.WEAPON_TOOLTIPS.club) is
+    //     the player-facing mirror of that exception; keep the two in
+    //     sync if the flag's scope ever widens.
+    //
+    //   club tooltip:
+    //     - uses the sword's damage / to-hit / swing cadence, but
+    //       strips both sword specialist bonuses (flanking-kill on
+    //       undead, skeleton damage bonus).
+    //     - the frontal-vs-spearman × 1/3 penalty still applies (a
+    //       club is no better than a sword against a spear wall).
     //
     //   lance tooltip:
     //     - charge bonus damage scaling with attacker:defender mass ratio
@@ -198,6 +215,32 @@ _resolveAttack(attacker, defender, unitsById) {
     const angleOff = ShieldBlockCalculator.computeAngleOffShield(defender, attacker.pos);
 
     const isSword = attacker.unitTypeDef.weaponType === 'sword';
+    // Per-type flag: strips the sword's BLADE-specific specialist
+    // bonuses while leaving the sword's general combat tables in
+    // place. Used by the goblin slave, whose club uses weaponType
+    // 'sword' for the swing animation, damage, to-hit, and cadence,
+    // but does not benefit from the two abilities that come from a
+    // sharp blade:
+    //   - the flanking kill against an undead defender
+    //     (flankingSwordVsUndead below), and
+    //   - the ×1.5 skeleton damage bonus
+    //     (SkeletonDamageModifiers.sword).
+    //
+    // Everything else is unaffected by design — see the flag's doc on
+    // UnitTypes.goblinSlave. In particular:
+    //   - frontalVsSpearman STILL applies (a club is a bad answer to
+    //     a spear wall, exactly like a sword);
+    //   - the standard flank multipliers × 1.25 / × 1.5 still apply
+    //     (weapon-agnostic — stripping them here would be a different
+    //     rule from "remove sword-flavoured bonuses");
+    //   - DIRTY_FIGHTING bonuses/maluses still apply — the slave
+    //     CARRIES the property (its excludesProperties lists only
+    //     EXPENDABLE), so club strikes get the goblin ×1.5 flank
+    //     bonus and take the ×0.75 frontal penalty exactly as sword
+    //     strikes do. The flag strips blade abilities, not
+    //     dirty-fighting instincts.
+    const noSwordSpecialistBonuses =
+      attacker.unitTypeDef.noSwordSpecialistBonuses === true;
     const defenderIsSpearman = defender.unitTypeDef.weaponType === 'spear';
 
     // Spear wall cohesion is a FORMATION property, not a personal one.
@@ -315,7 +358,7 @@ _resolveAttack(attacker, defender, unitsById) {
     // unaffected — the frontal penalty / flank multiplier math runs
     // normally for them.
     const flankingSwordVsUndead =
-      isSword && defender.isUndead &&
+      isSword && !noSwordSpecialistBonuses && defender.isUndead &&
       angleOff >= CombatConfig.flank.sideArcDeg;
 
     if (flankingSwordVsUndead) {
@@ -377,7 +420,7 @@ _resolveAttack(attacker, defender, unitsById) {
     // BASE damage; the race scales it. Applied before the additive charge
     // bonus further down, so a charge's momentum bonus is added on top of
     // the race-scaled base (momentum is physics, not weapon damage).
-    const attackerRaceMult = raceOf(attacker.unitTypeDef).damageMultiplier;
+    const attackerRaceMult = raceOfSoldier(attacker).damageMultiplier;
     if (attackerRaceMult !== 1.0) damage *= attackerRaceMult;
 
     // Race: defender-side incoming damage multiplier, keyed by the
@@ -385,7 +428,7 @@ _resolveAttack(attacker, defender, unitsById) {
     // over the race-level table — used by hobgoblins to opt out of the
     // goblin spear resistance without changing the goblin race entry.
     const defenderTypeIncoming = defender.unitTypeDef.incomingDamageMultipliers;
-    const defenderRaceIncoming = raceOf(defender.unitTypeDef).incomingDamageMultipliers;
+    const defenderRaceIncoming = raceOfSoldier(defender).incomingDamageMultipliers;
     const incomingTable = (defenderTypeIncoming !== undefined)
       ? defenderTypeIncoming
       : defenderRaceIncoming;
@@ -394,7 +437,19 @@ _resolveAttack(attacker, defender, unitsById) {
       damage *= raceIncomingMult;
     }
 
-    if (defender.isUndead && !frontalVsSpearman) {
+    // Skeleton-vs-weapon-type damage modifier. The per-type flag
+    // noSwordSpecialistBonuses skips this branch entirely — a club
+    // does not shatter bone the way a sword blade does. See the
+    // flag's doc at the top of this method and on
+    // UnitTypes.goblinSlave.
+    //
+    // Note the frontalVsSpearman guard is INDEPENDENT of the new
+    // flag: even before this patch, a sword hitting a spearman from
+    // the front skipped the skeleton bonus (the "this is a frontal
+    // spear engagement, not a blade-on-bone kill" reading). The new
+    // flag suppresses the branch in EVERY non-frontal-vs-spearman
+    // case, not just the ones already suppressed.
+    if (defender.isUndead && !frontalVsSpearman && !noSwordSpecialistBonuses) {
       const mod = SkeletonDamageModifiers[attacker.unitTypeDef.weaponType];
       if (mod !== undefined) damage *= mod;
     }
@@ -429,8 +484,8 @@ _resolveAttack(attacker, defender, unitsById) {
     // above so a spear defender's unit-facing wall geometry
     // (wallBrokenArcDeg) is honoured identically for the property as for
     // the flank multiplier.
-    if (raceHasProperty(attacker.unitTypeDef, Property.DIRTY_FIGHTING)) {
-      const df = raceOf(attacker.unitTypeDef).dirtyFighting;
+    if (soldierHasProperty(attacker, Property.DIRTY_FIGHTING)) {
+      const df = raceOfSoldier(attacker).dirtyFighting;
       if (df) {
         if (angleForFlank >= sideThresholdDeg) {
           damage *= (df.flankDamageMult ?? 1.0);

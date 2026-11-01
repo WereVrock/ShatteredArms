@@ -144,6 +144,9 @@ export class BattleRenderer {
     // above), so the shadow must be refreshed this frame to stay in
     // sync. When paused or between ticks, no call is made and the
     // regular throttle continues to govern the update rate.
+    if (this._instancer.rebuiltLastUpdate) {
+      this.sceneSetup.markShadowsStale();
+    }
     if (deltaSeconds > 0) {
       this.sceneSetup.forceShadowUpdate();
     }
@@ -347,6 +350,40 @@ export class BattleRenderer {
 
   getInstancingStats() {
     return this._instancer.describe();
+  }
+
+  // TEMPORARY: material census. Groups every material attached to any
+  // mesh/sprite in the scene by (type + side + map + color), prints the
+  // top 20 groups by count. Used to find the combat-time material leak
+  // (mats went 113 -> 1122 during combat; need to know which group grew).
+  // Remove when done.
+  dumpMaterialCensus() {
+    const groups = new Map();
+    this.sceneSetup.scene.traverse((o) => {
+      if (!(o.isMesh || o.isSprite || o.isPoints || o.isLine)) return;
+      const m = o.material;
+      if (!m) return;
+      const arr = Array.isArray(m) ? m : [m];
+      for (const mm of arr) {
+        const key = [
+          mm.type,
+          'side=' + mm.side,
+          'map=' + (mm.map ? mm.map.uuid.slice(0, 6) : 'none'),
+          'col=' + mm.color.getHexString(),
+          'vtx=' + (mm.vertexColors ? 1 : 0),
+          'trans=' + (mm.transparent ? 1 : 0)
+        ].join('|');
+        let g = groups.get(key);
+        if (!g) { g = { key, count: 0, sample: mm }; groups.set(key, g); }
+        g.count++;
+      }
+    });
+    const rows = Array.from(groups.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20)
+      .map((g) => ({ count: g.count, key: g.key }));
+    console.log(`[mat-census] ${groups.size} unique material groups`);
+    console.table(rows);
   }
 
   getSoldierView(soldierId) {

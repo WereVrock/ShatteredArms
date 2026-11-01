@@ -23,11 +23,14 @@
 // here — they belong to the G+click debug flow, not the player UI.
 //
 // Name construction: [race or undead] + unit type's displayName. Race is
-// read from unitTypeDef.race ('human' / 'goblin'); undead overrides the
-// race label because an undead soldier's body is the defining trait, not
-// its species. displayName fields in UnitTypes.js are expected to be
+// resolved from the type's race record via raceOf() and its own
+// displayName is used as the prefix ("Human" / "Goblin" / "Hobgoblin" /
+// any future race — see RaceConfig.js). Undead overrides the race label
+// because a skeleton body is the defining trait, not the species it was
+// built from. displayName fields in UnitTypes.js are expected to be
 // race-agnostic (bare "Spearman", not "Human Spearman") so this prefix
-// is the only place the race is spelled out.
+// is the only place the race is spelled out. A unit with customName set
+// (champion retinues, at battle-build time) bypasses this entirely.
 //
 // Combat stats are derived from CombatConfig + WeaponMatchup + the race
 // record, so the panel always agrees with what the sim actually does. If
@@ -49,7 +52,7 @@
 // matches PauseMenuPanel / SettingsPanel / CommandBarView so all the in-
 // game chrome reads as one family.
 import { CombatConfig, WeaponMatchup } from '../config/CombatConfig.js';
-import { raceOf, raceHasProperty } from '../config/RaceConfig.js';
+import { raceOf, raceHasProperty, raceOfSoldier, soldierHasProperty } from '../config/RaceConfig.js';
 import { Property } from '../config/Properties.js';
 import { unitHasClass, UnitClass, getRangedRange, isCavalry } from '../config/UnitClasses.js';
 import { unitIconSvg } from './UnitIcon.js';
@@ -131,7 +134,16 @@ const WEAPON_TOOLTIPS = {
     'A cavalry charge weapon. Bonus damage scales with the '
     + 'attacker-to-defender mass ratio, and on a qualifying charge hit '
     + 'the defender is thrown and knocked down. Outside a charge a '
-    + 'lance is just a slow melee weapon.'
+    + 'lance is just a slow melee weapon.',
+  club:
+    'A crude wooden club. Uses the sword\'s base damage, to-hit, '
+    + 'and swing timing, but is NOT a bladed weapon: it does not '
+    + 'shatter skeletons the way a sword does (no ×1.5 skeleton '
+    + 'damage bonus) and a flanking strike on an undead defender '
+    + 'does not kill outright. The frontal-vs-spearman damage '
+    + 'penalty still applies — a club is no better than a sword '
+    + 'against a spear wall. A weapon for filling a gap, not for '
+    + 'winning a fight.'
 };
 
 // --- trait metadata --------------------------------------------------------
@@ -155,9 +167,51 @@ const PROPERTY_INFO = {
     label: 'Dirty Fighting',
     description: 'Extra damage from side and rear hits, less from the front.'
   },
+  // Accurate as of MoraleSystem's two-bucket ally-rout split:
+  //   non-expendable observer   → zero penalty (hardcoded, not a mult)
+  //   expendable observer       → allyRoutPenaltyPerTick ×
+  //                               expendableAllyRoutPenaltyMult (0.5)
+  // The previous text ("does not spread panic to nearby allies") claimed
+  // the first half of that contract and silently omitted the second,
+  // reading as if no ally ever panicked from an expendable rout. Two
+  // clauses make the split legible at card size.
+  //
+  // Deliberately scoped to rout panic, matching Properties.js: EXPENDABLE
+  // does NOT suppress the adjacent-unit-wipe shock (that is WORTHLESS's
+  // job), so mentioning only the rout keeps the description precise.
   [Property.EXPENDABLE]: {
     label: 'Expendable',
-    description: 'Its rout does not spread panic to nearby allies.'
+    description: 'Its rout spreads no panic to non-expendable allies, and half the usual panic to other expendables.'
+  },
+  // Stronger sibling of EXPENDABLE. Where an expendable rout half-panics
+  // other expendables and still triggers the adjacent-wipe shock on any
+  // ally, a worthless unit is completely silent to OTHER units on both
+  // paths. Intra-unit casualty shock still applies (its own survivors
+  // still feel it), so the description spells that scope out — the
+  // player-facing text must not read as "immortal".
+  // Two-way read. OUTGOING: worthless routs and wipes are silent to
+  // any other unit, including other worthless units — stronger than
+  // EXPENDABLE (which half-panics other expendables and still inflicts
+  // the wipe shock). Intra-unit casualty shock is unaffected: the
+  // unit's own survivors still feel its losses, which is what lets a
+  // slave formation actually break. INCOMING: a worthless observer
+  // takes the FULL ally-rout penalty from an expendable's rout — not
+  // the zero a normal non-expendable takes, and not the half an
+  // expendable takes. Worthlessness is silence outward, not numbness
+  // inward. Both clauses are in the description because the second is
+  // counter-intuitive enough to need stating.
+  [Property.WORTHLESS]: {
+    label: 'Worthless',
+    description: 'Routs and losses spread no panic to other units — its own unit still feels its losses. But it panics fully when an expendable routs.'
+  },
+  // Scoring-side trait: it does not change the sim directly, but a race
+  // that carries it already drains stamina faster (RaceConfig
+  // .fatigueDrainMultiplier), and the power score applies a further
+  // forward-looking penalty on top. The player-facing read is simply
+  // "tires fast", which is what the sim actually does.
+  [Property.FAST_TIRING]: {
+    label: 'Fast Tiring',
+    description: 'Drains stamina faster than a human on every swing, block, volley, and step.'
   }
 };
 
@@ -941,7 +995,17 @@ export class UnitInfoPanel {
     if (!matchup) return '';
 
     const isRanged = unitHasClass(typeDef, UnitClass.RANGED);
-    const raceDamageMult = raceOf(typeDef).damageMultiplier;
+    // Champion-aware race read. When the unit is champion-led, the panel
+    // shows the champion's own race modifiers — consistent with the
+    // "Champion" progression section above, which shows the champion's
+    // personal level/XP rather than the unit's. For the Warlord this is
+    // a no-op (his damage multiplier and his bodyguards' are both 0.6),
+    // but a future champion whose multipliers differ from the retinue's
+    // will display correctly without further changes here.
+    const raceSource = (unit && unit.championSoldier)
+      ? raceOfSoldier(unit.championSoldier)
+      : raceOf(typeDef);
+    const raceDamageMult = raceSource.damageMultiplier;
 
     // Damage per landed hit. Race multiplier applied so a goblin's
     // reduced per-soldier output is visible without needing to know the
@@ -964,12 +1028,24 @@ export class UnitInfoPanel {
       attackSeconds = cooldownTicks / CombatConfig.tickRateHz;
     }
 
-    const moveSpeed = this._effectiveMoveSpeed(typeDef, !!(unit && unit.isUndead));
+    const moveSpeed = this._effectiveMoveSpeed(typeDef, !!(unit && unit.isUndead), unit);
 
     const rows = [];
     const weaponKey = typeDef.weaponType;
-    const weaponLabel = WEAPON_NAMES[weaponKey] || weaponKey || '\u2014';
-    const weaponTooltip = WEAPON_TOOLTIPS[weaponKey] || '';
+    // Goblin slave: the SIM still classifies the club as a sword (sword
+    // combat tables, sword-arm swing animation), but the player sees a
+    // club in the icon and body model. Show "Club" here so the panel
+    // agrees with what the player is looking at; the tooltip makes
+    // explicit that the mechanics are still the sword's. Keyed on
+    // bodyVariant so any future club-carrying unit type gets the same
+    // treatment without a per-type id check.
+    const isSlaveClub = typeDef.bodyVariant === 'goblinSlave';
+    const weaponLabel = isSlaveClub
+      ? 'Club'
+      : (WEAPON_NAMES[weaponKey] || weaponKey || '\u2014');
+    const weaponTooltip = isSlaveClub
+      ? (WEAPON_TOOLTIPS.club || '')
+      : (WEAPON_TOOLTIPS[weaponKey] || '');
     rows.push(combatRow('Weapon', weaponLabel, weaponTooltip));
     rows.push(combatRow('Damage', fmtStat(damage)));
     rows.push(combatRow('Attack Speed', `${attackSeconds.toFixed(2)}<span class="unit">s</span>`));
@@ -1091,7 +1167,7 @@ export class UnitInfoPanel {
   // same helper serves both code paths. Undead cavalry are exempt from
   // the shambling penalty — the same carve-out Soldier.effectiveMoveSpeed
   // makes.
-  _effectiveMoveSpeed(typeDef, isUndead) {
+  _effectiveMoveSpeed(typeDef, isUndead, unit = null) {
     let speed = typeDef.hasShield
       ? typeDef.baseMoveSpeed * CombatConfig.shield.moveSpeedMult
       : typeDef.baseMoveSpeed;
@@ -1100,7 +1176,16 @@ export class UnitInfoPanel {
       speed *= CombatConfig.spearHandling.moveSpeedMult;
     }
 
-    const raceMult = raceOf(typeDef).moveSpeedMultiplier;
+    // Champion-aware race read, mirroring the Combat section above. For a
+    // champion-led unit the champion's own race multiplier wins, so a
+    // future champion whose race declares a slow/fast modifier displays
+    // correctly. For the Warlord today this is a no-op (both champion
+    // and hobgoblin race record carry moveSpeedMultiplier 1.0). Falls
+    // back to raceOf(typeDef) when the unit is null or has no champion.
+    const race = (unit && unit.championSoldier)
+      ? raceOfSoldier(unit.championSoldier)
+      : raceOf(typeDef);
+    const raceMult = race.moveSpeedMultiplier;
     if (raceMult !== 1.0) speed *= raceMult;
 
     // Skeleton shambling penalty — foot only; undead cavalry keep full
@@ -1135,14 +1220,19 @@ export class UnitInfoPanel {
     if (unit.customName) return unit.customName;
 
     const baseName = (typeDef && typeDef.displayName) || 'Unit';
-    let prefix;
-    if (unit.isUndead) {
-      prefix = 'Undead';
-    } else if (typeDef && typeDef.race === 'goblin') {
-      prefix = 'Goblin';
-    } else {
-      prefix = 'Human';
-    }
+    if (unit.isUndead) return `Undead ${baseName}`;
+
+    // Read the resolved race's displayName rather than testing hardcoded
+    // species ids. The previous `typeDef.race === 'goblin'` check would
+    // have mis-labelled a hobgoblin (race: 'hobgoblin' since RaceConfig
+    // split it out) as "Human". Going through race.displayName also
+    // covers the champion race and any future race without a per-race
+    // branch here. A champion-led unit's name comes from unit.customName
+    // (set at build time), so this prefix is only read for the retinue
+    // type — "Hobgoblin Retinue" for the Warlord's bodyguard unit, which
+    // is the correct reading since 6 of 7 soldiers are hobgoblins.
+    const race = raceOf(typeDef);
+    const prefix = (race && race.displayName) || 'Human';
     return `${prefix} ${baseName}`;
   }
 
@@ -1153,19 +1243,43 @@ export class UnitInfoPanel {
   _collectTraits(unit, typeDef) {
     const list = [];
     if (typeDef) {
-      // Route each property through raceHasProperty rather than reading
-      // raceOf(typeDef).properties directly, so a per-type exclusion
-      // (see UnitTypes.goblinArcher.excludesProperties) is honoured.
-      // A race declares its properties once; a specific unit type of
-      // that race may opt out of a property that has no meaning for
-      // it — the canonical case is a goblin archer, which inherits
-      // DIRTY_FIGHTING from the goblin race entry but has no melee
-      // flank to fight dirty from. Reading .properties directly would
-      // re-expose the excluded flag here regardless of what the helper
-      // returns.
+      // Bodyguard / type-level traits first. Route each property through
+      // raceHasProperty rather than reading raceOf(typeDef).properties
+      // directly, so a per-type exclusion (see
+      // UnitTypes.goblinArcher.excludesProperties) is honoured. A race
+      // declares its properties once; a specific unit type of that race
+      // may opt out of a property that has no meaning for it.
       const raceProps = raceOf(typeDef).properties || [];
       for (const p of raceProps) {
         if (raceHasProperty(typeDef, p)) list.push(p);
+      }
+      // Per-type ADDITIONS (see RaceConfig.raceHasProperty and the
+      // extraProperties doc in UnitTypes.js). Declared on the TYPE, not
+      // the race — the goblin slave's WORTHLESS is the canonical case —
+      // so they never appear in raceOf(typeDef).properties. Still
+      // routed through raceHasProperty so an exclusion wins over an
+      // addition on the same id, and deduped against `list`.
+      if (Array.isArray(typeDef.extraProperties)) {
+        for (const p of typeDef.extraProperties) {
+          if (!list.includes(p) && raceHasProperty(typeDef, p)) list.push(p);
+        }
+      }
+      // Champion traits UNIONed on top. The champion is one soldier in a
+      // mixed-race retinue; a champion-only property (no such property
+      // exists today, but future champion skills could add one) must be
+      // shown without dropping the bodyguard-only properties from the
+      // list above. For the Warlord this is a no-op: champion race and
+      // hobgoblin race both carry DIRTY_FIGHTING, so the dedupe leaves
+      // the trait listed exactly once.
+      if (unit.championSoldier) {
+        const champRace = raceOfSoldier(unit.championSoldier);
+        const champProps = champRace.properties || [];
+        for (const p of champProps) {
+          if (!list.includes(p)
+              && soldierHasProperty(unit.championSoldier, p)) {
+            list.push(p);
+          }
+        }
       }
     }
     if (unit.isUndead) list.push(Property.UNDEAD);

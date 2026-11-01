@@ -18,13 +18,14 @@ import { brandMarkSvg } from './BrandMark.js';
 import { createMenuCard, createMenuButton } from './MenuCard.js';
 
 export class MainMenu {
-  constructor(rootElement, { onScenarios, onCampaign, onCustomBattle, onSettings, onMultiplayer }) {
+  constructor(rootElement, { onScenarios, onCampaign, onCustomBattle, onSettings, onMultiplayer, onHighScores }) {
     this.root = rootElement;
     this.onScenarios = onScenarios;
     this.onCampaign = onCampaign;
     this.onCustomBattle = onCustomBattle || null;
     this.onSettings = onSettings || null;
     this.onMultiplayer = onMultiplayer || null;
+    this.onHighScores = onHighScores || null;
   }
 
   show() {
@@ -79,6 +80,13 @@ export class MainMenu {
         name: 'Multiplayer',
         description: 'Host or join a battle over the network. Host runs the simulation; guest mirrors it.',
         onClick: () => this.onMultiplayer()
+      }));
+    }
+    if (this.onHighScores) {
+      list.appendChild(createMenuCard({
+        name: 'High Scores',
+        description: 'Top campaign scores for the current balance version.',
+        onClick: () => this.onHighScores()
       }));
     }
     panel.appendChild(list);

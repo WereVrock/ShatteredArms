@@ -1,6 +1,6 @@
 // ===== MoraleSystem.js =====
 import { MoraleConfig } from '../config/MoraleConfig.js';
-import { raceHasProperty } from '../config/RaceConfig.js';
+import { soldierHasProperty } from '../config/RaceConfig.js';
 import { Property } from '../config/Properties.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
 
@@ -48,6 +48,12 @@ export class MoraleSystem {
     // the same sim tick.
     this._tick = 0;
 
+    // Reusable candidate buffer for the per-soldier nearby query. Morale
+    // runs once per soldier per tick; the previous version allocated a
+    // fresh array each time (2000 arrays/tick). The buffer is only read
+    // within one _updateSoldier call, so reuse is safe.
+    this._nearbyBuf = [];
+
     // Reusable scratch object for the per-source breakdown. Filled in place
     // for every soldier, but only ever READ when a transition is about to be
     // logged (or the soldier is on the watch list) — so it costs no
@@ -86,6 +92,18 @@ export class MoraleSystem {
     // is the intended cascade behaviour: a unit under sustained pressure
     // never gets a clear tick to recover morale. Runs BEFORE the
     // per-soldier loop so every soldier sees this tick's freeze state.
+    // Precompute the units wiped THIS tick (previous alive > 0, current
+    // alive == 0). The per-soldier loop otherwise walks every unit for
+    // every soldier (2000 × 60 = 120,000 iterations/tick) just to find
+    // the handful that died this tick. Usually 0-2 entries.
+    const wipedThisTick = [];
+    for (const [unitId, prevAlive] of this._previousAliveByUnit) {
+      if (prevAlive <= 0) continue;
+      if ((aliveByUnit.get(unitId) ?? 0) !== 0) continue;
+      const unit = unitsById.get(unitId);
+      if (unit) wipedThisTick.push(unit);
+    }
+
     const freezeTicks = MoraleConfig.casualtyRegenFreezeTicks;
     if (freezeTicks > 0) {
       for (const [unitId, alive] of aliveByUnit) {
@@ -140,7 +158,7 @@ export class MoraleSystem {
         continue;
       }
 
-      this._updateSoldier(soldier, unitsById, aliveByUnit, debugHistoryEnabled);
+      this._updateSoldier(soldier, unitsById, aliveByUnit, debugHistoryEnabled, wipedThisTick);
     }
 
     // Auto-shatter: if every living soldier on a team is routing at the
@@ -192,7 +210,7 @@ export class MoraleSystem {
     }
   }
 
-  _updateSoldier(soldier, unitsById, aliveByUnit, debugHistoryEnabled) {
+  _updateSoldier(soldier, unitsById, aliveByUnit, debugHistoryEnabled, wipedThisTick) {
     // Shattered soldiers skip all morale processing. No recovery, no
     // rally, no drains — they run to the map edge and extract.
     if (soldier.state === 'shattered') return;
@@ -321,32 +339,47 @@ export class MoraleSystem {
       }
     }
 
-    // Adjacent friendly unit wiped this tick — one-shot shock.
-    if (this._previousAliveByUnit && unitsById) {
-      for (const [otherId, prevAlive] of this._previousAliveByUnit) {
-        if (otherId === soldier.unitId) continue;
-        if (prevAlive <= 0) continue;
-        const nowAlive = aliveByUnit.get(otherId);
-        if (nowAlive !== 0) continue;
-
-        const wipedUnit = unitsById.get(otherId);
-        if (!wipedUnit || wipedUnit.teamId !== soldier.teamId) continue;
-        const radiusSq = cfg.routCheckRadius * cfg.routCheckRadius;
-        let near = false;
+    // Adjacent friendly unit wiped this tick — one-shot shock. Iterates
+    // only units wiped THIS tick (usually empty or a handful), not every
+    // unit on the field.
+    if (wipedThisTick.length > 0) {
+      const radiusSq = cfg.routCheckRadius * cfg.routCheckRadius;
+      for (const wipedUnit of wipedThisTick) {
+        if (wipedUnit.id === soldier.unitId) continue;
+        if (wipedUnit.teamId !== soldier.teamId) continue;
+        // A WORTHLESS unit being wiped generates NO shock in any
+        // observer — non-worthless, expendable, or another worthless
+        // unit alike. Matches the rout-panic silence above: the
+        // property's contract is that nothing about a worthless unit's
+        // collapse spreads to a DIFFERENT unit, whether that collapse
+        // is a rout or a wipe.
+        //
+        // All soldiers of a unit share one unitTypeDef (built by
+        // FormationFactory from the same roster entry), so reading any
+        // one of them names the unit's type. soldiers[] persists past
+        // death — a wiped unit's array still carries every corpse —
+        // so this resolves even though getAliveSoldiers() would be
+        // empty. Defensive null on an unexpectedly-empty array.
+        const wipedLead = wipedUnit.soldiers && wipedUnit.soldiers[0];
+        if (wipedLead &&
+            soldierHasProperty(wipedLead, Property.WORTHLESS)) {
+          continue;
+        }
         for (const s of wipedUnit.soldiers) {
           const dx = s.pos.x - soldier.pos.x;
           const dz = s.pos.z - soldier.pos.z;
-          if (dx * dx + dz * dz <= radiusSq) { near = true; break; }
-        }
-        if (near) {
-          delta -= cfg.adjacentUnitWipedShock;
-          b.adjacentWiped = (b.adjacentWiped || 0) - cfg.adjacentUnitWipedShock;
+          if (dx * dx + dz * dz <= radiusSq) {
+            delta -= cfg.adjacentUnitWipedShock;
+            b.adjacentWiped = (b.adjacentWiped || 0) - cfg.adjacentUnitWipedShock;
+            break;
+          }
         }
       }
     }
 
     // --- Single nearby pass: strength sums, nearest enemy, rout perception ---
-    const nearby = this.spatialGrid.queryNearby(soldier.pos.x, soldier.pos.z, 2);
+    const nearby = this.spatialGrid.queryNearbyInto(
+      this._nearbyBuf, soldier.pos.x, soldier.pos.z, 2);
 
     let allyStrength = soldier.effectiveMass;
     let enemyStrength = 0;
@@ -372,8 +405,20 @@ export class MoraleSystem {
 
       if (other.teamId === soldier.teamId) {
         allyStrength += other.effectiveMass;
-        if (other.isRouting && dSq <= routRadiusSq) {
-          if (raceHasProperty(other.unitTypeDef, Property.EXPENDABLE)) {
+        // A routing WORTHLESS ally contributes ZERO panic in any
+        // observer — non-worthless, expendable, or another worthless
+        // unit alike. That is the property's whole definition, and it
+        // SUPERSEDES EXPENDABLE: a goblin slave is both (it inherits
+        // EXPENDABLE from the goblin race and adds WORTHLESS on its
+        // type), and worthlessness must win, so a slave rout does not
+        // half-panic other expendables. The exclusion runs BEFORE the
+        // bucket split below so a routing worthless ally never enters
+        // either penalty bucket, and the observer-side penalty block
+        // further down needs no change — it already correctly handles
+        // the two remaining categories.
+        if (other.isRouting && dSq <= routRadiusSq &&
+            !soldierHasProperty(other, Property.WORTHLESS)) {
+          if (soldierHasProperty(other, Property.EXPENDABLE)) {
             expendableRoutNearby = true;
           } else {
             nonExpendableRoutNearby = true;
@@ -442,13 +487,42 @@ export class MoraleSystem {
         routPenalty += cfg.allyRoutPenaltyPerTick;
       }
       if (expendableRoutNearby) {
+        // Three-bucket observer split for an expendable rout:
+        //
+        //   worthless observer  → FULL penalty (× 1.0). Counter-
+        //                         intuitive at first glance, but
+        //                         worthlessness is silence OUTWARD
+        //                         only — it does not dull reactions
+        //                         INWARD. Chaff with no cohesion
+        //                         breaks HARDER, not softer, when
+        //                         the chaff next to it breaks.
+        //                         Checked FIRST so a unit that is
+        //                         both worthless and expendable (a
+        //                         hypothetical future type) takes
+        //                         the full penalty rather than the
+        //                         expendable half.
+        //
+        //   expendable observer → half (config
+        //                         .expendableAllyRoutPenaltyMult).
+        //                         Mutual expendables half-panic
+        //                         each other, unchanged.
+        //
+        //   everyone else       → zero. Hardcoded, not a mult —
+        //                         "a goblin broke, so the human line
+        //                         panics" is the exact behaviour the
+        //                         property exists to switch off.
+        const soldierIsWorthless =
+          soldierHasProperty(soldier, Property.WORTHLESS);
         const soldierIsExpendable =
-          raceHasProperty(soldier.unitTypeDef, Property.EXPENDABLE);
-        // Non-expendable observers take zero from an expendable rout;
-        // expendable observers take the config fraction.
-        const mult = soldierIsExpendable
-          ? cfg.expendableAllyRoutPenaltyMult
-          : 0;
+          soldierHasProperty(soldier, Property.EXPENDABLE);
+        let mult;
+        if (soldierIsWorthless) {
+          mult = 1.0;
+        } else if (soldierIsExpendable) {
+          mult = cfg.expendableAllyRoutPenaltyMult;
+        } else {
+          mult = 0;
+        }
         routPenalty += cfg.allyRoutPenaltyPerTick * mult;
       }
       if (routPenalty > 0) {
@@ -636,14 +710,18 @@ export class MoraleSystem {
     return 0;
   }
 
+  // Dot-product flank check instead of Math.atan2 — 8x cheaper per call.
+  // This runs once per soldier per tick that has a nearby enemy, so at
+  // 1000+ soldiers with a live enemy it is a meaningful chunk of the
+  // morale pass. Same numerical result.
   _isFlanked(soldier, enemy, angleDeg) {
-    const angleToEnemy = Math.atan2(
-      enemy.pos.x - soldier.pos.x,
-      enemy.pos.z - soldier.pos.z
-    );
-    let diff = Math.abs(angleToEnemy - soldier.facing);
-    diff = diff % (2 * Math.PI);
-    if (diff > Math.PI) diff = 2 * Math.PI - diff;
-    return diff * (180 / Math.PI) >= angleDeg;
+    const fx = Math.sin(soldier.facing);
+    const fz = Math.cos(soldier.facing);
+    const ex = enemy.pos.x - soldier.pos.x;
+    const ez = enemy.pos.z - soldier.pos.z;
+    const lenSq = ex * ex + ez * ez;
+    if (lenSq < 1e-6) return false;
+    const dot = (fx * ex + fz * ez) / Math.sqrt(lenSq);
+    return dot <= Math.cos(angleDeg * Math.PI / 180);
   }
 }
