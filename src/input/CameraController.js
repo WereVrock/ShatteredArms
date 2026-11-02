@@ -6,6 +6,8 @@
 // Vertical pan (mouse-drag Y and W/S) is inverted per user preference: dragging
 // up / pressing W moves the view forward into the screen (feels like pulling
 // the world toward you), matching the requested reversed convention.
+import { panScale } from '../render/ViewRange.js';
+
 export class CameraController {
   constructor(canvas, sceneSetup) {
     this.canvas = canvas;
@@ -88,7 +90,11 @@ export class CameraController {
     window.addEventListener('keyup', (e) => this.keysDown.delete(e.key.toLowerCase()));
   }
 
-  _panRelativeToCamera(rightAmount, forwardAmount) {
+_panRelativeToCamera(rightAmount, forwardAmount) {
+    // Zoomed far out, a fixed pan speed crawls across a 400-unit field.
+    // Scale it with the camera distance; at the default distance and
+    // closer the multiplier is exactly 1.
+    const scale = panScale(this.sceneSetup.cameraDistance);
     const yaw = this.sceneSetup.cameraYaw;
     const rightX = Math.cos(yaw);
     const rightZ = -Math.sin(yaw);
@@ -96,8 +102,8 @@ export class CameraController {
     const forwardZ = Math.cos(yaw);
 
     this.sceneSetup.panCamera(
-      rightX * rightAmount + forwardX * forwardAmount,
-      rightZ * rightAmount + forwardZ * forwardAmount
+      (rightX * rightAmount + forwardX * forwardAmount) * scale,
+      (rightZ * rightAmount + forwardZ * forwardAmount) * scale
     );
   }
 

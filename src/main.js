@@ -1703,6 +1703,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
     if (!effectivePaused && now - lastTickTime >= tickIntervalMs) {
       lastTickTime = now;
       const ticked = battleFlow.step();
+      if (ticked) battleRenderer.noteSimTick();
       if (ticked) {
         meleeEvents = simulation.combatResolutionSystem.drainEvents();
         rangedEvents = simulation.projectileSystem.drainEvents();

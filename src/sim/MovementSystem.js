@@ -415,6 +415,7 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     // to ramp each affected unit's lateral formation spread.
     const passingThroughUnits = new Set();
     const gate = this._makeWayGate;
+    if (this._centerCache) this._centerCache.clear();
     gate.build(allSoldiers);
 
     // Higher speed threshold for the unit-wide spread flag than for the
@@ -561,10 +562,10 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
 
         let unitCentersClose = true;
         if (yielderUnitCenter === undefined) {
-          yielderUnitCenter = yielderUnit ? yielderUnit.getCenter() : null;
+          yielderUnitCenter = yielderUnit ? this._unitCenterCached(yielderUnit) : null;
         }
         if (yielderUnitCenter && pusherUnit) {
-          const puCenter = pusherUnit.getCenter();
+          const puCenter = this._unitCenterCached(pusherUnit);
           const dxc = puCenter.x - yielderUnitCenter.x;
           const dzc = puCenter.z - yielderUnitCenter.z;
           unitCentersClose =
@@ -628,7 +629,22 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     this._updateUnitSpread(allSoldiers, unitsById, passingThroughUnits, deltaSeconds);
   }
 
-  // Unit-level formation spread while a friendly unit passes through.
+// Unit center, computed at most once per make-way pass. Unit.getCenter()
+  // walks every soldier of the unit, and the pass asked for it once per
+  // (yielder, pusher) pair. The 4-unit gate it feeds does not care about the
+  // sub-step drift of yielders moving during the pass.
+  _unitCenterCached(unit) {
+    let cache = this._centerCache;
+    if (!cache) cache = this._centerCache = new Map();
+    let c = cache.get(unit.id);
+    if (c === undefined) {
+      c = unit.getCenter();
+      cache.set(unit.id, c);
+    }
+    return c;
+  }
+
+// Unit-level formation spread while a friendly unit passes through.
   //
   // When _applyMakeWay detects that one of this unit's soldiers is being
   // walked through by a friendly soldier from a different unit, the

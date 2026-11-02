@@ -100,7 +100,7 @@ export class MoraleSystem {
     this._fastScanOk = true;
     const aliveByUnit = new Map();
     for (const [unitId, unit] of unitsById) {
-      aliveByUnit.set(unitId, unit.getAliveSoldiers().length);
+      aliveByUnit.set(unitId, unit.getAliveCount());
     }
 
     // Regen-freeze pass. Any unit that lost at least one soldier since

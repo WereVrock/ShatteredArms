@@ -21,6 +21,13 @@
 import { CombatConfig } from '../config/CombatConfig.js';
 import { SpearFriendlyContact } from './SpearFriendlyContact.js';
 
+// A lowered, non-turning spearman only re-checks for friendlies in front of
+// the shaft every Nth tick (staggered by soldier id). Raising the spear is a
+// visual/handling cue, so a reaction delay of up to N-1 ticks (~130 ms at
+// N=3) is invisible, and it removes two thirds of the grid queries for the
+// spear lines that are standing still.
+const SPEAR_IDLE_CHECK_PERIOD = 3;
+
 export class FacingSystem {
   constructor(deltaSeconds, spatialGrid) {
     this.deltaSeconds = deltaSeconds;
@@ -36,6 +43,7 @@ export class FacingSystem {
 
   update(allSoldiers, unitsById) {
     const byId = this.soldiersById || new Map(allSoldiers.map(s => [s.id, s]));
+    this._spearTick = ((this._spearTick | 0) + 1) | 0;
 
     for (const soldier of allSoldiers) {
       if (!soldier.isAlive()) continue;
@@ -128,6 +136,15 @@ _updateSpearHandling(soldier) {
     const diff = this._normalizeAngle(soldier.desiredFacing - soldier.facing);
     const diffDeg = Math.abs(diff) * 180 / Math.PI;
     const needsRotation = diffDeg >= cfg.minRotationDegForRaise;
+
+    // Idle throttle: a lowered spearman that is not turning only needs the
+    // contact query on every SPEAR_IDLE_CHECK_PERIOD-th tick. Turning,
+    // raising, raised and lowering soldiers still query every tick.
+    if (soldier.spearRaiseState === 'lowered' && !needsRotation &&
+        (((this._spearTick | 0) + soldier.id) % SPEAR_IDLE_CHECK_PERIOD) !== 0) {
+      soldier.spearRaiseAmount = 0;
+      return;
+    }
 
     // One grid query per soldier per tick, shared by the contact check and
     // the sweep check.

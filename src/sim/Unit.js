@@ -273,8 +273,23 @@ _layoutGrid(cols, spacing, soldiers = this.soldiers) {
     }
   }
 
-  isDefeated() {
-    return this.getAliveSoldiers().length === 0;
+isDefeated() {
+    const soldiers = this.soldiers;
+    for (let i = 0; i < soldiers.length; i++) {
+      if (soldiers[i].isAlive()) return false;
+    }
+    return true;
+  }
+
+  // Number of living soldiers without building an array. Use instead of
+  // getAliveSoldiers().length wherever only the count is needed.
+  getAliveCount() {
+    const soldiers = this.soldiers;
+    let n = 0;
+    for (let i = 0; i < soldiers.length; i++) {
+      if (soldiers[i].isAlive()) n++;
+    }
+    return n;
   }
 
   // Direct loop instead of filter + reduce: same result, no intermediate

@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { GrassField } from './GrassField.js';
 import { CombatConfig } from '../config/CombatConfig.js';
+import { viewRangeFor, clampZoom, zoomStepScale } from './ViewRange.js';
 
 // Fog / sky colour. Used for scene.background and scene.fog — one constant
 // so the two can never drift.
@@ -313,7 +314,7 @@ applySettings(settings) {
     // Segment count stays at 64x64: vertex-level Lambert shading on a
     // plane this size is imperceptibly different at higher counts, and
     // the texture masks any residual vertex gradient.
-    const GROUND_EXTENT = 600;
+    const GROUND_EXTENT = 3000;
     const geo = new THREE.PlaneGeometry(GROUND_EXTENT, GROUND_EXTENT, 64, 64);
     const mat = new THREE.MeshLambertMaterial({
       color: 0xffffff,
@@ -535,7 +536,7 @@ _createGroundTexture() {
     tex.wrapT = THREE.RepeatWrapping;
     // 8 tiles across the 600-unit ground plane → each tile is 75 world
     // units. The seam fix means tiling is not visible regardless.
-    tex.repeat.set(8, 8);
+    tex.repeat.set(40, 40);
     tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
     // Guarded because colorSpace was renamed in three.js r152. Older
     // builds simply leave the texture in the default space, which is fine
@@ -558,7 +559,7 @@ _createGroundTexture() {
     };
   }
 
-  _updateCameraTransform() {
+_updateCameraTransform() {
     const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
     const height = this.cameraDistance * Math.sin(this.cameraPitch);
 
@@ -571,8 +572,8 @@ _createGroundTexture() {
 
     // Keep the sun's shadow frustum centered on the camera target so a
     // scrolling battlefield stays lit and shadowed. Both the sun and its
-    // target move by the same delta, so the light direction — and therefore
-    // the shadow direction — is unchanged; only the frustum shifts.
+    // target move by the same delta, so the light direction - and therefore
+    // the shadow direction - is unchanged; only the frustum shifts.
     if (this.sun) {
       this.sun.position.set(
         this.cameraTarget.x + SUN_OFFSET.x,
@@ -582,6 +583,8 @@ _createGroundTexture() {
       this.sun.target.position.set(this.cameraTarget.x, 0, this.cameraTarget.z);
       this.sun.target.updateMatrixWorld();
     }
+
+    this._updateViewRange();
   }
 
   panCamera(dx, dz) {
@@ -617,12 +620,35 @@ _createGroundTexture() {
     this._updateCameraTransform();
   }
 
-  zoomCamera(amount) {
-    this.cameraDistance = Math.max(4, Math.min(120, this.cameraDistance + amount));
+zoomCamera(amount) {
+    this.cameraDistance = clampZoom(
+      this.cameraDistance + amount * zoomStepScale(this.cameraDistance)
+    );
     this._updateCameraTransform();
   }
 
-  // Called when the casters' world matrices may have changed. The next
+// Scales the camera's near/far planes and the fog range with the zoom
+  // distance (see ViewRange.js). Idempotent and cheap: the projection matrix
+  // is only rebuilt when near/far actually change, and fog.far is only
+  // rewritten while fog is ON - applySettings parks fog.far at FOG_FAR_OFF
+  // for "fog off", which is recognised here and left alone.
+  _updateViewRange() {
+    const r = viewRangeFor(this.cameraDistance);
+    const cam = this.camera;
+    if (cam.near !== r.near || cam.far !== r.far) {
+      cam.near = r.near;
+      cam.far = r.far;
+      cam.updateProjectionMatrix();
+    }
+
+    const fog = this.scene.fog;
+    if (fog) {
+      fog.near = r.fogNear;
+      if (fog.far < FOG_FAR_OFF * 0.5) fog.far = r.fogFar;
+    }
+  }
+
+// Called when the casters' world matrices may have changed. The next
   // throttled refresh in render() then re-renders the shadow map.
   markShadowsStale() {
     this._shadowStale = true;
@@ -661,8 +687,12 @@ _createGroundTexture() {
   }
 
 render() {
+    // applySettings resets fog.far; re-derive it from the zoom distance
+    // before drawing so a fog toggle never leaves a stale range behind.
+    this._updateViewRange();
+
     // Throttled shadow map refresh. autoUpdate is off (see constructor), so
-    // the map only re-renders on frames where needsUpdate is set — three.js
+    // the map only re-renders on frames where needsUpdate is set - three.js
     // clears the flag after that one render. Soldiers move a fraction of a
     // soldier-width per frame, so a 30 Hz map is visually identical to a
     // 60 Hz one while halving the shadow pass cost.

@@ -20,6 +20,15 @@ import * as THREE from 'three';
 // demand — the value is a starting allocation, not a hard cap.
 const SELECTION_RING_CAPACITY = 512;
 
+// Soldiers farther than this from the camera target never land inside the
+// sun's 90x90 shadow frustum (half-extent 45, corner ~64), so letting them
+// cast only adds shadow-pass draws. Caps the user's soldierShadowRange too.
+const SHADOW_CASTER_RANGE = 66;
+
+// If main.js has not reported a sim tick for this long, the renderer falls
+// back to refreshing shadows every moving frame (guest mirrors, other hosts).
+const SIM_TICK_INFO_TIMEOUT_MS = 250;
+
 // Reusable matrix + dummy object for InstancedMesh updates. Allocating
 // these per frame would churn GC during long battles.
 const _ringDummy = new THREE.Object3D();
@@ -71,7 +80,29 @@ export class BattleRenderer {
     this.debugPathLine.setUnit(unit);
   }
 
-  setPlayerTeamId(teamId) {
+// Called by main.js on every frame in which the simulation really ticked.
+  noteSimTick() {
+    this._simTickPending = true;
+    this._lastSimTickMs = performance.now();
+  }
+
+  // True when this frame must refresh the shadow map because soldier
+  // positions changed. Positions only change on sim ticks (15 Hz), so while
+  // tick information is flowing the refresh happens once per tick instead of
+  // every rendered frame. With no tick information (guest mirror, stale
+  // feed) it falls back to the old "refresh whenever unpaused" rule.
+  _shadowSyncDue(deltaSeconds) {
+    if (!(deltaSeconds > 0)) return false;
+    const last = this._lastSimTickMs;
+    const tickInfoFresh = last !== undefined &&
+      (performance.now() - last) < SIM_TICK_INFO_TIMEOUT_MS;
+    if (!tickInfoFresh) return true;
+    if (!this._simTickPending) return false;
+    this._simTickPending = false;
+    return true;
+  }
+
+setPlayerTeamId(teamId) {
     this.unitOverlayView.setPlayerTeamId(teamId);
   }
 
@@ -125,7 +156,7 @@ export class BattleRenderer {
       this.views.values(),
       this.sceneSetup.camera,
       this.sceneSetup.cameraTarget,
-      shadowRange > 0 ? shadowRange : Infinity
+      shadowRange > 0 ? Math.min(shadowRange, SHADOW_CASTER_RANGE) : SHADOW_CASTER_RANGE
     );
 
     // Force the shadow map to refresh whenever the sim has advanced.
@@ -144,10 +175,11 @@ export class BattleRenderer {
     // above), so the shadow must be refreshed this frame to stay in
     // sync. When paused or between ticks, no call is made and the
     // regular throttle continues to govern the update rate.
-    if (this._instancer.rebuiltLastUpdate) {
+    const shadowDue = this._shadowSyncDue(deltaSeconds);
+    if (this._instancer.rebuiltLastUpdate && (shadowDue || !(deltaSeconds > 0))) {
       this.sceneSetup.markShadowsStale();
     }
-    if (deltaSeconds > 0) {
+    if (shadowDue) {
       this.sceneSetup.forceShadowUpdate();
     }
 

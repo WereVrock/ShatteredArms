@@ -362,7 +362,7 @@ export class TeamAI {
     return this._orderToward(unit, targetUnit.getCenter(), worldCtx, enemyUnits);
   }
 
-  tick() {
+tick() {
     // Per-tier decision cadence. Resolved once per tick so a tier config
     // edit at runtime (devtools) takes effect on the next tick without
     // restarting the battle. Falls back to the global AIConfig value
@@ -377,14 +377,29 @@ export class TeamAI {
     const decisionInterval = this.tierCfg.decisionIntervalTicks
       ?? AIConfig.decisionIntervalTicks;
 
-    if (this.tickCounter % AIConfig.assessmentIntervalTicks === 0) {
-      this._updateAssessment();
+    // Cadence phase. Every team used to assess and decide on the very same
+    // ticks, so the whole AI cost of both teams landed in one tick (a
+    // visible frame spike). Half the teams now run half an interval later.
+    // The phase comes from a hash of the team id, so it is stable for the
+    // battle and needs no coordination between TeamAI instances.
+    if (this._cadencePhase === undefined) {
+      const id = String(this.teamId);
+      let sum = 0;
+      for (let i = 0; i < id.length; i++) sum += id.charCodeAt(i);
+      this._cadencePhase = (sum & 1) ? Math.floor(decisionInterval / 2) : 0;
     }
-    if (this.tickCounter % decisionInterval === 0) {
-      this._decide();
-    }
-    if (this.tickCounter % AIConfig.focusFireReassessTicks === 0) {
-      this._updateFocusFire();
+
+    const t = this.tickCounter - this._cadencePhase;
+    if (t >= 0) {
+      if (t % AIConfig.assessmentIntervalTicks === 0) {
+        this._updateAssessment();
+      }
+      if (t % decisionInterval === 0) {
+        this._decide();
+      }
+      if (t % AIConfig.focusFireReassessTicks === 0) {
+        this._updateFocusFire();
+      }
     }
     this.tickCounter++;
   }
