@@ -185,7 +185,7 @@ export class SettingsPanel {
   // section header is a light text label, not a clickable nav row, so
   // the Graphics page keeps working as a single scrollable page while
   // still reading as grouped. See _buildSectionHeader.
-  _showGraphics() {
+_showGraphics() {
     this._clearToggleRefs();
     this._panel.innerHTML = '';
     this._panel.appendChild(this._buildTitleRow('Graphics'));
@@ -198,9 +198,6 @@ export class SettingsPanel {
     this._panel.appendChild(this._presetSelect);
 
     // --- Scene -------------------------------------------------------
-    // Things that change what the battlefield looks like rather than how
-    // fast it renders. None of these cost a shadow pass or a resolution
-    // multiplier, so they cluster together on their own.
     this._panel.appendChild(this._buildSectionHeader('Scene'));
     this._groundToggle = this._buildToggleRow('Ground texture', 'groundTexture');
     this._panel.appendChild(this._groundToggle);
@@ -222,10 +219,6 @@ export class SettingsPanel {
     this._shadowRow = this._buildShadowRow();
     this._panel.appendChild(this._shadowRow);
 
-    // Resolution scale. Percentage of the (DPR-capped) native backing
-    // store: lower renders fewer pixels and the browser upscales, higher
-    // supersamples for sharper edges. 100% is native; 50% is roughly a
-    // 4× fill-rate saving, the single most effective lever on weak GPUs.
     this._renderScaleSelect = this._buildSelectRow(
       'Resolution',
       'renderScale',
@@ -239,8 +232,6 @@ export class SettingsPanel {
     );
     this._panel.appendChild(this._renderScaleSelect);
 
-    // Optional MSAA. Smooths shimmer on small bright parts (helmets,
-    // weapon tips) while units move. Applies on the next battle start.
     this._antialiasToggle = this._buildToggleRow(
       'Anti-aliasing (restart to apply)',
       'antialias'
@@ -251,12 +242,45 @@ export class SettingsPanel {
     this._panel.appendChild(this._antialiasToggle);
 
     // --- Soldiers ----------------------------------------------------
-    // Per-unit LOD and rendering path. The LOD block bundles the master
-    // toggle, the detail-distance select, and the two model-tier
-    // dropdowns — see _buildLodBlock for why it is one block rather than
-    // five sibling rows.
+    // Only the LOD block stays on the everyday page. Instanced rendering
+    // and the three "reduced*" performance shortcuts are fine-grained
+    // perf knobs and bug-escape hatches, not everyday quality settings —
+    // they live behind the Advanced button below so the default Graphics
+    // page stays readable.
     this._panel.appendChild(this._buildSectionHeader('Soldiers'));
     this._panel.appendChild(this._buildLodBlock());
+
+    // --- Advanced (nav) ----------------------------------------------
+    // Opens the Advanced sub-page (see _showAdvanced). Reached only by
+    // this nav button; the sub-page has its own "← Simple" button back.
+    this._panel.appendChild(this._buildNavRow('Advanced', () => this._showAdvanced()));
+
+    this._panel.appendChild(this._buildBackRow(() => this._showMain()));
+
+    this._syncFromStore();
+    this._notifyPage('graphics');
+  }
+
+// Advanced sub-page of Graphics. Holds the four fine-grained controls
+  // that the everyday Graphics page deliberately does not surface:
+  //   - instanced soldier rendering (a bug-escape hatch, not a quality
+  //     tier — see the note on SettingsStore.DEFAULTS.instancedRendering)
+  //   - the three "reduced*" performance shortcuts, each of which trades
+  //     a sliver of fidelity for measurable speed.
+  //
+  // Reached only via the "Advanced" nav row on the Graphics page. Returns
+  // via this page's own "← Simple" button (see _buildBackRow's optional
+  // label argument), which re-enters _showGraphics — so the player lands
+  // back exactly where they were.
+  //
+  // Every control here is a live SettingsStore write; the running scene
+  // reacts through the same subscription wiring the main Graphics page
+  // uses. No behavior change from the old placement other than the extra
+  // navigation step.
+  _showAdvanced() {
+    this._clearToggleRefs();
+    this._panel.innerHTML = '';
+    this._panel.appendChild(this._buildTitleRow('Advanced'));
 
     // Instanced soldier rendering. Same visuals, far fewer draw calls.
     // Only worth turning off if something looks wrong.
@@ -269,22 +293,56 @@ export class SettingsPanel {
       'much faster in large battles. Turn off only if you see rendering problems.';
     this._panel.appendChild(this._instancedToggle);
 
-    // Animation freeze. Takes effect immediately — SoldierView reads the
-    // setting every frame. Does not affect death topples or airborne
-    // tumbles, which are state transitions rather than animations.
-    this._disableAnimationsToggle = this._buildToggleRow(
-      'Disable animations',
-      'disableAnimations'
-    );
-    this._panel.appendChild(this._disableAnimationsToggle);
+    // --- Performance shortcuts ---------------------------------------
+    // Each one trades a sliver of fidelity for speed. On by default;
+    // turn off for exact visuals at some cost in large battles.
+    this._panel.appendChild(this._buildSectionHeader('Performance shortcuts'));
 
-    this._panel.appendChild(this._buildBackRow(() => this._showMain()));
+    this._shadowRefreshToggle = this._buildToggleRow(
+      'Shadows refresh once per sim tick',
+      'reducedShadowRefresh'
+    );
+    this._shadowRefreshToggle.title =
+      'Off: the shadow map refreshes every frame, so shadows follow ' +
+      'animations exactly. On: once per simulation tick (faster).';
+    this._panel.appendChild(this._shadowRefreshToggle);
+
+    this._spearChecksToggle = this._buildToggleRow(
+      'Reduced spear contact checks',
+      'reducedSpearChecks'
+    );
+    this._spearChecksToggle.title =
+      'Off: idle spearmen check for a friendly in front of the shaft every ' +
+      'tick. On: every 3rd tick, so a spear may rise slightly late.';
+    this._panel.appendChild(this._spearChecksToggle);
+
+    this._hudRefreshToggle = this._buildToggleRow(
+      'Army bar at 10 Hz',
+      'reducedHudRefresh'
+    );
+    this._hudRefreshToggle.title =
+      'Off: the army bar updates every frame. On: 10 times a second ' +
+      '(faster, highlights may lag up to 0.1 s).';
+    this._panel.appendChild(this._hudRefreshToggle);
+
+    this._panel.appendChild(this._buildBackRow(
+      () => this._showGraphics(),
+      '\u2190 Simple'
+    ));
 
     this._syncFromStore();
+    // Notify as 'graphics' rather than a new 'advanced' name so that
+    // PauseMenuPanel's page-change handler — which steps the pause-menu
+    // backdrop aside for 'graphics' so the running scene is visible
+    // while the player is tuning graphics — treats the Advanced sub-page
+    // exactly like the Graphics page. Both pages are "graphics tuning"
+    // from the player's point of view and want identical backdrop
+    // behaviour. If the two pages ever need to be distinguished, this
+    // becomes 'advanced' and PauseMenuPanel gains a matching case.
     this._notifyPage('graphics');
   }
 
-  _showGameplay() {
+_showGameplay() {
     this._clearToggleRefs();
     this._panel.innerHTML = '';
     this._panel.appendChild(this._buildTitleRow('Gameplay'));
@@ -426,6 +484,9 @@ export class SettingsPanel {
     this._instancedToggle = null;
     this._lodScaleSelect = null;
     this._antialiasToggle = null;
+    this._shadowRefreshToggle = null;
+    this._spearChecksToggle = null;
+    this._hudRefreshToggle = null;
   }
 
   // --- builders -------------------------------------------------------------
@@ -933,7 +994,13 @@ export class SettingsPanel {
     }
   }
 
-  _buildBackRow(onClick) {
+// Back button used at the bottom of every sub-page. Defaults to the
+  // standard "← Back" label; pass a label to override it (the Advanced
+  // sub-page uses "← Simple" to make it read as the counterpart of the
+  // "Advanced" nav button it came from). Placement and styling are
+  // identical between pages so the button always reads as the same
+  // affordance.
+  _buildBackRow(onClick, label) {
     const row = document.createElement('button');
     row.type = 'button';
     Object.assign(row.style, {
@@ -952,7 +1019,7 @@ export class SettingsPanel {
     });
     row.addEventListener('mouseenter', () => { row.style.background = '#343a48'; });
     row.addEventListener('mouseleave', () => { row.style.background = '#2a2f3a'; });
-    row.textContent = '\u2190 Back';
+    row.textContent = label || '\u2190 Back';
     row.addEventListener('click', onClick);
     return row;
   }
@@ -1018,5 +1085,8 @@ export class SettingsPanel {
     if (this._fatigueBarToggle) this._fatigueBarToggle._checkbox.checked = s.showFatigueBar !== false;
     if (this._instancedToggle) this._instancedToggle._checkbox.checked = s.instancedRendering !== false;
     if (this._antialiasToggle) this._antialiasToggle._checkbox.checked = !!s.antialias;
+    if (this._shadowRefreshToggle) this._shadowRefreshToggle._checkbox.checked = s.reducedShadowRefresh !== false;
+    if (this._spearChecksToggle) this._spearChecksToggle._checkbox.checked = s.reducedSpearChecks !== false;
+    if (this._hudRefreshToggle) this._hudRefreshToggle._checkbox.checked = s.reducedHudRefresh !== false;
   }
 }
