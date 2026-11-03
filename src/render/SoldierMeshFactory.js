@@ -32,6 +32,7 @@
 // three (arrow) will degrade exactly one step.
 import { createBlobBody } from './mesh/BlobBodyBuilder.js';
 import { createGoblinBody } from './mesh/GoblinBodyBuilder.js';
+import { createGoblinEliteBody } from './mesh/GoblinEliteBodyBuilder.js';
 import { createGoblinSlaveBody } from './mesh/GoblinSlaveBodyBuilder.js';
 import { createHobgoblinBody } from './mesh/HobgoblinBodyBuilder.js';
 import { createGoblinWarlordBody } from './mesh/GoblinWarlordBuilder.js';
@@ -147,6 +148,7 @@ export const SoldierMeshFactory = {
 
   createBlobBody: pick(createBlobBody, createMediumBlobBody, createSimpleBlobBody, createUltraSimpleBlobBody),
   createGoblinBody: pick(createGoblinBody, createMediumGoblinBody, createSimpleGoblinBody, createUltraSimpleGoblinBody),
+  createGoblinEliteBody: pick(createGoblinEliteBody, createGoblinEliteBody, createGoblinEliteBody, createGoblinEliteBody),
   // Goblin slave: unique silhouette (collar, loincloth-only) with no
   // simplified variants. Falls through to detailed at every tier — the
   // collar and the missing waist wrap are the whole read, so shrinking

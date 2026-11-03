@@ -12,13 +12,17 @@ import { SoldierMeshFactory } from './SoldierMeshFactory.js';
 // Callers that don't know the body variant (e.g. any tool that wants a
 // neutral icon) can omit it and get the standard weapon.
 export class WeaponViewFactory {
-  static createForWeaponType(weaponType, bodyVariant) {
+static createForWeaponType(weaponType, bodyVariant) {
+    // The goblin family (goblin / goblinElite) shares the small-kit
+    // weapon meshes. Elite is a cosmetic rank-up on the same frame, so
+    // the same goblin spear / shortbow / crude sword apply.
+    const isGoblinFamily = bodyVariant === 'goblin' || bodyVariant === 'goblinElite';
     if (weaponType === 'spear') {
-      if (bodyVariant === 'goblin') return SoldierMeshFactory.createGoblinSpear();
+      if (isGoblinFamily) return SoldierMeshFactory.createGoblinSpear();
       return SoldierMeshFactory.createSpear();
     }
     if (weaponType === 'bow') {
-      if (bodyVariant === 'goblin') return SoldierMeshFactory.createGoblinShortbow();
+      if (isGoblinFamily) return SoldierMeshFactory.createGoblinShortbow();
       return SoldierMeshFactory.createBow();
     }
     if (weaponType === 'lance') return SoldierMeshFactory.createLance();
@@ -30,7 +34,7 @@ export class WeaponViewFactory {
       // mesh differs. This is the exact pattern the crude goblin sword
       // uses — a visual variant on a shared combat type.
       if (bodyVariant === 'goblinSlave') return SoldierMeshFactory.createClub();
-      if (bodyVariant === 'goblin') return SoldierMeshFactory.createCrudeSword();
+      if (isGoblinFamily) return SoldierMeshFactory.createCrudeSword();
       return SoldierMeshFactory.createSword();
     }
     return SoldierMeshFactory.createSpear();

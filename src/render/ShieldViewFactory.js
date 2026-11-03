@@ -15,8 +15,12 @@ export class ShieldViewFactory {
   // only by shields whose face carries team-coloured heraldry — today,
   // the Warlord shield's crest. Optional: the icon path omits it and
   // the Warlord shield's builder falls back to a neutral crest colour.
-  static createForBodyVariant(bodyVariant, teamColorHex) {
-    if (bodyVariant === 'goblin') return SoldierMeshFactory.createGoblinShield();
+static createForBodyVariant(bodyVariant, teamColorHex) {
+    // The goblin family (goblin / goblinElite) shares the small round
+    // crude shield — elite is the same body frame at a higher rank.
+    if (bodyVariant === 'goblin' || bodyVariant === 'goblinElite') {
+      return SoldierMeshFactory.createGoblinShield();
+    }
     if (bodyVariant === 'hobgoblin') return SoldierMeshFactory.createHobgoblinShield();
     if (bodyVariant === 'goblinWarlord') {
       return SoldierMeshFactory.createWarlordShield(teamColorHex);

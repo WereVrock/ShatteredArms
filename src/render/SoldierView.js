@@ -98,7 +98,8 @@ export class SoldierView {
     // Flag position varies by body variant — a goblin's head is well
     // below a human's, so the flag height has to match.
     const flagY = (soldier.bodyVariant === 'goblin'
-      || soldier.bodyVariant === 'goblinSlave') ? 0.85 : 1.15;
+      || soldier.bodyVariant === 'goblinSlave'
+      || soldier.bodyVariant === 'goblinElite') ? 0.85 : 1.15;
     this.flag = SoldierMeshFactory.createWhiteFlag();
     this.flag.position.set(-0.18, flagY, -0.1);
     this.flag.visible = false;

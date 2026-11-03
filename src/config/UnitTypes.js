@@ -227,6 +227,21 @@ const goblinSwordsmanNoShield = withoutShield(
   'bandedHelm'
 );
 
+// Elite goblin swordsman. Same mechanics as the common goblin swordsman
+// — a purely VISUAL variant. bodyVariant 'goblinElite' selects the
+// team-coloured livery body in SoldierModelComposer (currently aliased
+// to the common goblin body, since no distinct elite mesh builder
+// exists in SoldierMeshFactory). The description's "clean kit" refers
+// to that team-colour livery; swapping in a dedicated elite body later
+// is a one-line change in the composer's body-selection branch.
+const eliteGoblinSwordsman = {
+  ...goblinSwordsman,
+  id: 'eliteGoblinSwordsman',
+  displayName: 'Elite Swordsman',
+  bodyVariant: 'goblinElite',
+  description: 'A goblin swordsman in clean kit — team-colour crest and tunic. Visual variant of the common goblin swordsman — same mechanics.'
+};
+
 // Goblin spearman. Same weapon mechanics as the human spearman — the race
 // layer supplies the fragility (hpMultiplier 0.7), swarm size
 // (unitSizeMultiplier 2.0), morale ceiling (0.7), and fatigue drain
@@ -499,6 +514,7 @@ export const UnitTypes = {
   swordsmanNoShield: withoutShield(swordsman, 'swordsmanNoShield', 'Swordsman (No Shield)', 'bandedHelm'),
   goblinSwordsman,
   goblinSwordsmanNoShield,
+  eliteGoblinSwordsman,
   goblinSlave,
 
   goblinSpearman,

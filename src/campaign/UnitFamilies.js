@@ -41,6 +41,7 @@ for (const family of Object.keys(FAMILIES)) {
 const GOBLIN_TYPE_IDS = [
   'goblinSwordsman',
   'goblinSwordsmanNoShield',
+  'eliteGoblinSwordsman',
   // Slave sits with the swordsman family — it is a goblin swordsman
   // stripped to half HP, no shield, no attack-speed bonus, and the
   // WORTHLESS property instead of DIRTY_FIGHTING. Placed here rather

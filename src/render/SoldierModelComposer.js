@@ -50,6 +50,7 @@ const SWORD_ARM_ANCHORS = {
   blob:          { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.22, handY: 0.65, handZ: 0    },
   skeleton:      { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.22, handY: 0.65, handZ: 0    },
   goblin:        { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.38, handZ: 0.05 },
+  goblinElite:   { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.38, handZ: 0.05 },
   goblinSlave:   { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.38, handZ: 0.05 },
   hobgoblin:     { shoulderX: 0.16, shoulderY: 0.72, shoulderZ: 0.02, handX: 0.22, handY: 0.55, handZ: 0.02 },
   goblinWarlord: { shoulderX: 0.13, shoulderY: 0.62, shoulderZ: 0.04, handX: 0.18, handY: 0.47, handZ: 0.04 }
@@ -59,6 +60,7 @@ const BOW_ARM_ANCHORS = {
   blob:          { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.20, handY: 0.68, handZ: 0.28 },
   skeleton:      { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.20, handY: 0.68, handZ: 0.28 },
   goblin:        { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.42, handZ: 0.22 },
+  goblinElite:   { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.42, handZ: 0.22 },
   hobgoblin:     { shoulderX: 0.16, shoulderY: 0.72, shoulderZ: 0.02, handX: 0.20, handY: 0.60, handZ: 0.30 },
   goblinWarlord: { shoulderX: 0.13, shoulderY: 0.62, shoulderZ: 0.04, handX: 0.18, handY: 0.52, handZ: 0.26 }
 };
@@ -67,6 +69,7 @@ const QUIVER_ANCHORS = {
   blob:          { x: -0.10, y: 0.55, z: -0.16, tiltZ: -0.45 },
   skeleton:      { x: -0.10, y: 0.55, z: -0.16, tiltZ: -0.45 },
   goblin:        { x: -0.07, y: 0.36, z: -0.10, tiltZ: -0.45 },
+  goblinElite:   { x: -0.07, y: 0.36, z: -0.10, tiltZ: -0.45 },
   hobgoblin:     { x: -0.11, y: 0.50, z: -0.17, tiltZ: -0.45 },
   goblinWarlord: { x: -0.09, y: 0.44, z: -0.14, tiltZ: -0.45 }
 };
@@ -299,7 +302,13 @@ static compose(unitTypeDef, teamId, bodyVariant) {
     group.add(rider);
 
     const color = getTeamColor(teamId);
-    const isGoblin = bodyVariant === 'goblin';
+    const isGoblinElite = bodyVariant === 'goblinElite';
+    // Elite shares the common goblin body today — see eliteGoblinSwordsman
+    // in UnitTypes.js. Included in isGoblin so body selection AND the
+    // small-scale weapon kit (usesSmallScaleKit) both fire for the elite
+    // without a second branch. If a dedicated elite body builder lands
+    // later, only the body-selection chain needs a new case.
+    const isGoblin = bodyVariant === 'goblin' || isGoblinElite;
     const isGoblinSlave = bodyVariant === 'goblinSlave';
     const isHobgoblin = bodyVariant === 'hobgoblin';
     const isGoblinWarlord = bodyVariant === 'goblinWarlord';
@@ -322,6 +331,8 @@ static compose(unitTypeDef, teamId, bodyVariant) {
       body.userData.baseMaterial = new THREE.MeshBasicMaterial({ color });
     } else if (isSkeleton) {
       body = SoldierMeshFactory.createSkeletonBody(color, color);
+    } else if (isGoblinElite) {
+      body = SoldierMeshFactory.createGoblinEliteBody(color);
     } else if (isGoblin) {
       body = SoldierMeshFactory.createGoblinBody(color);
     } else if (isGoblinSlave) {
