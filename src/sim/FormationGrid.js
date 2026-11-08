@@ -88,15 +88,45 @@ export class FormationGrid {
       // counts as a stub. A last row of exactly minCols would otherwise
       // slip through (3 is not less than minCols 3), leaving low-
       // discipline units with a visibly stubby back row.
-      const rowsNow = Math.ceil(n / cols);
-      const remainder = n % cols;
-      const hasStub = remainder > 0 && remainder * 2 < cols;
-      if (rowsNow < minRows || hasStub) {
-        cols = Math.min(n, Math.ceil(n / minRows));
-        if (cols < minCols) cols = Math.min(n, minCols);
+      // maxCols is the widest shape that still has exactly minRows
+      // balanced rows. A request at or beyond it (including one that would
+      // have fewer than minRows rows) gets exactly that shape, so widening
+      // a drag ends at maxCols instead of bouncing back narrower.
+      //
+      // A narrower request that would leave a stub back row moves to the
+      // NEAREST stub-free column count. It used to jump to maxCols, the
+      // widest shape, which made the drag ghost flash to maximum width and
+      // back as the cursor crossed each stub width.
+      const maxCols = Math.min(n, Math.ceil(n / minRows));
+      if (cols >= maxCols) {
+        cols = maxCols;
+      } else if (FormationGrid._hasStubRow(n, cols)) {
+        cols = FormationGrid._nearestStubFreeCols(n, cols, minCols, maxCols);
       }
+      if (cols < minCols) cols = Math.min(n, minCols);
     }
 
     return Math.max(1, Math.min(cols, n));
+  }
+
+  // True when `count` soldiers in `cols` columns end in a non-empty row
+  // smaller than half a full row.
+  static _hasStubRow(count, cols) {
+    const remainder = count % cols;
+    return remainder > 0 && remainder * 2 < cols;
+  }
+
+  // Column count closest to `desired` inside [minCols, maxCols] that has no
+  // stub row. Ties go to the wider shape. maxCols itself is always
+  // stub-free, so the search always finds something; the final clamp is
+  // only a guard.
+  static _nearestStubFreeCols(count, desired, minCols, maxCols) {
+    for (let d = 1; d <= maxCols; d++) {
+      const up = desired + d;
+      if (up <= maxCols && !FormationGrid._hasStubRow(count, up)) return up;
+      const down = desired - d;
+      if (down >= minCols && !FormationGrid._hasStubRow(count, down)) return down;
+    }
+    return Math.max(minCols, Math.min(desired, maxCols));
   }
 }

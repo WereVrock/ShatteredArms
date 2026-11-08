@@ -7,13 +7,16 @@ import { HighscoreApi } from '../net/HighscoreApi.js';
 // averages the results. Pure logic: progress goes out through callbacks,
 // abort comes in through a mutable { aborted } signal.
 
-// Board names used for the two derived "extreme" rows: the worst single
-// run of the weakened AI and the best single run of the best-possible AI.
+// Board names used for the derived "extreme" rows:
+//   - Deli ibo    — lowest single-run score of the weakened AI
+//   - J Cezar     — highest single-run score of the best-possible AI
+//   - İskender 1.5 — J Cezar × 1.5 (derived from J Cezar, not run)
 // These are only ever written to the board when the user opts in from the
 // admin panel; they are never run as separate profiles.
 export const EXTREME_PLAYER_NAMES = {
-  weakenedLow: 'iskelet ibo',
-  bestPossibleHigh: 'J Cezar'
+  weakenedLow: 'Deli ibo',
+  bestPossibleHigh: 'J Cezar',
+  iskender: '\u0130skender 1.5'
 };
 
 function average(list) {
@@ -101,9 +104,10 @@ export const AutoCampaignBatch = {
     );
   },
 
-  // Derives at most two extra board entries from a batch's raw runs:
-  //   - weakened AI,    lowest  single-run score -> "iskelet ibo"
+  // Derives the extra board entries from a batch's raw runs:
+  //   - weakened AI,      lowest  single-run score -> "Deli ibo"
   //   - best_possible AI, highest single-run score -> "J Cezar"
+  //   - best_possible AI, highest single-run score × 1.5 -> "İskender 1.5"
   // A profile that was not run yields no entry. Each entry carries the
   // score and battle count of that specific extreme run, not an average.
   buildExtremeEntries(results, difficulty) {
@@ -128,10 +132,23 @@ export const AutoCampaignBatch = {
     );
     if (best) {
       const idx = best.scores.indexOf(Math.max(...best.scores));
+      const bestScore = best.scores[idx];
+      const bestBattles = best.battles[idx];
+
       entries.push(boardEntry(
         EXTREME_PLAYER_NAMES.bestPossibleHigh,
-        best.scores[idx],
-        best.battles[idx],
+        bestScore,
+        bestBattles,
+        difficulty
+      ));
+
+      // İskender 1.5 — derived from J Cezar's run, not run itself.
+      // Score is J Cezar × 1.5; battles are copied from the same
+      // underlying run (the raw run did not change, only the score).
+      entries.push(boardEntry(
+        EXTREME_PLAYER_NAMES.iskender,
+        bestScore * 1.5,
+        bestBattles,
         difficulty
       ));
     }

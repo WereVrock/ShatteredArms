@@ -18,6 +18,7 @@
 // stylesheet. Palette matches the pause menu (dark slate with a light
 // accent) so the two panels read as one family.
 import { SettingsStore } from './SettingsStore.js';
+import { UiFontScale } from './UiFontScale.js';
 
 export class SettingsPanel {
   constructor() {
@@ -44,9 +45,10 @@ export class SettingsPanel {
     this._minModelDetailSelect = null;
     this._minModelDetailRow = null;
     this._disableAnimationsToggle = null;
-    this._virtualCursorDragToggle = null;
     this._powerScaleToggle = null;
     this._powerSwordsToggle = null;
+    this._bannerSizeSelect = null;
+    this._legacyBannersToggle = null;
 
     // Page listeners. Fired with the page name on every page transition:
     //   'root'      — top-level category list
@@ -121,6 +123,7 @@ export class SettingsPanel {
 
   _buildShell() {
     const root = document.createElement('div');
+    root.className = 'mt-root';
     Object.assign(root.style, {
       position: 'fixed',
       inset: '0',
@@ -161,8 +164,16 @@ export class SettingsPanel {
       // above the widest intrinsic content any page has today, so
       // nothing clips; it only stops runaway growth. Text wraps inside.
       maxWidth: '420px',
-      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)'
+      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+      // Zoom multiplies lengths, so the viewport limit is divided by the
+      // font scale to keep a scaled dialog on screen.
+      maxHeight: 'calc((100vh - 32px) / var(--ui-font-scale, 1))',
+      overflowY: 'auto',
+      boxSizing: 'border-box'
     });
+    // The dialog is appended to body, outside #mainMenu, so it scales
+    // itself from the same variable UiFontScale writes.
+    this._panel.style.zoom = 'var(--ui-font-scale, 1)';
     root.appendChild(this._panel);
 
     return root;
@@ -353,11 +364,14 @@ _showGameplay() {
     );
     this._panel.appendChild(this._doubleClickToggle);
 
-    this._virtualCursorDragToggle = this._buildToggleRow(
-      'Formation drag: start from current shape',
-      'virtualCursorDragEnabled'
-    );
-    this._panel.appendChild(this._virtualCursorDragToggle);
+    // "Formation drag: start from current shape" (the virtual-cursor
+    // drag setting) was removed because the feature was buggy in
+    // practice — the drag preview could drift from the actual footprint
+    // and the hidden OS cursor caused usability problems. The setting
+    // is force-disabled at SettingsStore load (see the migration in
+    // SettingsStore._load), and the toggle no longer surfaces here.
+    // When the bug is fixed, restore both this row and the migration,
+    // and flip DEFAULTS.virtualCursorDragEnabled back to true.
 
     this._panel.appendChild(this._buildBackRow(() => this._showMain()));
 
@@ -382,6 +396,17 @@ _showGameplay() {
     // SettingsStore on its own, so this row only has to flip the value.
     // Lives on the UI page rather than Graphics: it is an on-screen
     // readout, not a rendering-quality knob.
+    // Font size. UiFontScale subscribes to the store itself, so this row
+    // only writes the value.
+    this._fontScaleSelect = this._buildSelectRow(
+      'Font size',
+      'uiFontScale',
+      UiFontScale.OPTIONS
+    );
+    this._fontScaleSelect._select.value =
+      String(SettingsStore.get().uiFontScale || '1');
+    this._panel.appendChild(this._fontScaleSelect);
+
     this._fpsToggle = this._buildToggleRow('FPS counter', 'showFps');
     this._panel.appendChild(this._fpsToggle);
 
@@ -422,6 +447,39 @@ _showGameplay() {
       'showUnitBars'
     );
     this._panel.appendChild(this._unitBarsToggle);
+
+    // Banner world-space size. Three discrete tiers rather than a
+    // continuous slider — the distance scaling already holds banners at
+    // constant SCREEN size across zoom, so this selects what that
+    // constant is. Banners are a HUD readability element, so this sits
+    // with the other banner toggles rather than on the Graphics page.
+    this._bannerSizeSelect = this._buildSelectRow(
+      'Banner size',
+      'bannerSize',
+      [
+        { value: 'tiny',   label: 'Tiny' },
+        { value: 'small',  label: 'Small' },
+        { value: 'medium', label: 'Medium' },
+        { value: 'large',  label: 'Large' },
+        { value: 'huge',   label: 'Huge' }
+      ]
+    );
+    this._panel.appendChild(this._bannerSizeSelect);
+
+    // Legacy banner style toggle — swaps between the current
+    // silhouette-on-race-shape look and the pre-refactor heater-shield
+    // with the detailed composite icon. Placed directly below banner
+    // size because it is the visual companion setting (same widget,
+    // same "how the banner looks" concern). Default off (new banners).
+    this._legacyBannersToggle = this._buildToggleRow(
+      'Legacy banner style',
+      'legacyBanners'
+    );
+    this._legacyBannersToggle.title =
+      'Uses the original heater-shield banner with the detailed multi-' +
+      'element unit icon. Off by default — current banners use race-' +
+      'shaped outlines and white silhouettes.';
+    this._panel.appendChild(this._legacyBannersToggle);
 
     // Two independent gauges. Either, both or neither can be pinned on
     // screen. With only one pinned, clicking the widget in battle reveals
@@ -474,9 +532,10 @@ _showGameplay() {
     this._minModelDetailSelect = null;
     this._minModelDetailRow = null;
     this._disableAnimationsToggle = null;
-    this._virtualCursorDragToggle = null;
     this._powerScaleToggle = null;
     this._powerSwordsToggle = null;
+    this._bannerSizeSelect = null;
+    this._legacyBannersToggle = null;
     this._moraleBarToggle = null;
     this._fatigueBarToggle = null;
     this._unitFlagsToggle = null;
@@ -511,6 +570,7 @@ _showGameplay() {
 
     const closeBtn = document.createElement('button');
     closeBtn.textContent = '\u00d7'; // multiplication sign, reads as an X
+    closeBtn.className = 'mt-close';
     Object.assign(closeBtn.style, {
       background: 'transparent',
       border: 'none',
@@ -1071,12 +1131,10 @@ _showGameplay() {
     }
     if (this._disableAnimationsToggle) this._disableAnimationsToggle._checkbox.checked = !!s.disableAnimations;
     if (this._doubleClickToggle)   this._doubleClickToggle._checkbox.checked   = !!s.doubleClickDirectMarch;
-    // Explicit !== false so a save written before this key existed (where
-    // the merged value is already the DEFAULTS true) reads as on, and a
-    // save that flipped it off reads as off.
-    if (this._virtualCursorDragToggle) this._virtualCursorDragToggle._checkbox.checked = s.virtualCursorDragEnabled !== false;
     if (this._powerScaleToggle)    this._powerScaleToggle._checkbox.checked    = !!s.showPowerScale;
     if (this._powerSwordsToggle)   this._powerSwordsToggle._checkbox.checked   = !!s.showPowerSwords;
+    if (this._bannerSizeSelect)    this._bannerSizeSelect._select.value        = s.bannerSize || 'small';
+    if (this._legacyBannersToggle) this._legacyBannersToggle._checkbox.checked = s.legacyBanners === true;
     // Explicit !== false so a save written before this key existed (where
     // the merged value is already the DEFAULTS true) reads as on, and a
     // save that flipped it off reads as off. Mirrors the

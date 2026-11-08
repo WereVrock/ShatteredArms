@@ -9,7 +9,7 @@
 export const ZOOM_MIN = 4;
 // Large enough to frame the whole 400x400 field (CombatConfig.mapBounds)
 // from the usual pitch range on a widescreen display.
-export const ZOOM_MAX = 400;
+export const ZOOM_MAX = 800;
 
 // The default battle camera distance. Pan speed and zoom step are authored
 // for this distance and only grow beyond it.

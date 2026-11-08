@@ -152,21 +152,30 @@ const DEFAULTS = Object.freeze({
   // applying a preset never flips it.
   rushMode: false,
   // Right-click formation drag behaviour.
-  //   true  (default) — a drag opens the preview already shaped as the
-  //                     selection's existing formation. Implemented in
-  //                     OrderDragController by measuring the drag from a
-  //                     virtual cursor offset so the preview starts at
-  //                     the selection's current total width instead of
-  //                     collapsing to a minimum. The OS mouse cursor is
-  //                     hidden for the duration of the drag (the ghost
-  //                     formation is the visual indicator) and restored
-  //                     on release.
-  //   false           — pre-existing behaviour: the preview starts at
-  //                     the minimum width and widens as the cursor is
-  //                     dragged outward. Cursor is not hidden.
+  //   true  — a drag opens the preview already shaped as the
+  //           selection's existing formation. Implemented in
+  //           OrderDragController by measuring the drag from a
+  //           virtual cursor offset so the preview starts at
+  //           the selection's current total width instead of
+  //           collapsing to a minimum. The OS mouse cursor is
+  //           hidden for the duration of the drag (the ghost
+  //           formation is the visual indicator) and restored
+  //           on release.
+  //   false (default) — pre-existing behaviour: the preview starts at
+  //           the minimum width and widens as the cursor is
+  //           dragged outward. Cursor is not hidden.
   // Read by OrderDragController on each right-mousedown. Orthogonal to
   // the graphics presets — no preset lists this key.
-  virtualCursorDragEnabled: true,
+  //
+  // DISABLED by default and force-migrated to false on load (see the
+  // migration in _load below). The virtual-cursor path turned out to
+  // be buggy in practice — the drag preview could drift from the
+  // actual footprint, and the hidden OS cursor caused usability
+  // problems. The toggle has also been removed from SettingsPanel, so
+  // the player has no way to re-enable it from the UI. When the bug is
+  // fixed, restore the toggle, remove the migration, and set the
+  // default back to true.
+  virtualCursorDragEnabled: false,
   // Corner FPS readout. Default off — the user-facing toggle lives in
   // Settings → UI. Debug mode (G+click unit inspection) forces the
   // counter on regardless of this value; see FpsCounter.setDebugOverride.
@@ -232,6 +241,35 @@ const DEFAULTS = Object.freeze({
   // each render frame by the world-overlay renderer.
   showUnitFlags: true,
   showUnitBars: true,
+  // World-space banner size. 'small' | 'medium' | 'large'. The
+  // distance scale formula (see ShieldBillboard.worldScaleForDistance)
+  // already keeps banners at a constant SCREEN size across zoom — this
+  // setting picks what that constant size is. Read every render frame
+  // by UnitOverlayView and applied via ShieldBillboard.setSizeMultiplier.
+  // UI-only (HUD density), so no graphics preset lists it.
+  // World-space banner size, five tiers. Renamed and expanded from the
+  // original three-tier scheme (small/medium/large at 0.7/1.0/1.4) to
+  // tiny/small/medium/large/huge at 0.7/1.0/1.4/1.9/2.5. Old names
+  // map one tier forward, so an existing save's visual size is
+  // preserved — see the bannerSizeVersion migration in _load.
+  //
+  // The DEFAULT is 'small' (= 1.0 multiplier = old 'medium' = the
+  // canonical visual size players have been seeing). Choosing 'medium'
+  // as the default now would mean a fresh install gets 40% larger
+  // banners than before, which is a visual regression rather than a
+  // feature.
+  bannerSize: 'small',
+  // Legacy banner style. false (default) = current look: race-shaped
+  // outlines (BannerShape.js), white silhouettes (UnitBannerIcon.js),
+  // darkened team colour, race-coloured border. true = the pre-refactor
+  // look: fixed heater-shield outline, the detailed multi-element
+  // composite icon from UnitIcon.js, raw team colour, plain black
+  // stroke. Read by ShieldIconBuilder.getShieldEntry to pick which
+  // pipeline builds the piece textures, and by UnitOverlayView to
+  // rebuild existing billboards when the setting flips.
+  //
+  // Orthogonal to the graphics presets — no preset writes this key.
+  legacyBanners: false,
   // Level of Detail. When true, every soldier picks its model tier each
   // frame based on its XZ distance from the camera, between modelDetail
   // (the most detailed tier shown) and minModelDetail (the most simplified
@@ -298,7 +336,14 @@ const DEFAULTS = Object.freeze({
   // feature has somewhere to hang; unused today.
   //
   // Orthogonal to the graphics presets — no preset lists this key.
-  enableTestFeatures: false
+  enableTestFeatures: false,
+  // UI font size multiplier, stored as a string like the other select
+  // settings. Applied by UiFontScale.js. Not part of any graphics preset.
+  uiFontScale: '1',
+  // Campaign camp backdrop. true = animated 3D camp (about 30 fps);
+  // false = a still snapshot of the camp. Toggled by the tick shown on
+  // every campaign screen that has the camp backdrop.
+  campView3d: true
 });
 
 export class SettingsStore {
@@ -428,6 +473,18 @@ export class SettingsStore {
         }
       }
       delete merged.simpleModels;
+
+      // Migration: virtual-cursor formation drag is now force-disabled
+      // — see the note on DEFAULTS.virtualCursorDragEnabled. Applied
+      // unconditionally rather than "only when the save predates the
+      // change" because the feature is buggy enough that leaving ANY
+      // save with it on would keep the bug live. The setting's UI
+      // toggle has been removed, so a save that stays on would be
+      // permanently stuck with the buggy behaviour and no way to turn
+      // it off. Idempotent: a save that already has it false is
+      // unaffected. When the feature is fixed, remove this block and
+      // restore the toggle row in SettingsPanel._showGameplay.
+      merged.virtualCursorDragEnabled = false;
 
       return merged;
     } catch (e) {

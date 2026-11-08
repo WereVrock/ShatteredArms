@@ -100,6 +100,7 @@ export class AITierPicker {
     for (const opt of OPTIONS) {
       const btn = document.createElement('button');
       btn.type = 'button';
+      btn.className = 'ai-tier-btn';
       btn.textContent = opt.label;
       btn.title = opt.title;
       btn.style.cssText = [
@@ -171,8 +172,10 @@ export class AITierPicker {
   _apply() {
     const active = this._activeId();
     for (const [id, btn] of this._buttons) {
-      const isActive = id === active;
-      btn.style.background  = isActive ? BTN_ACTIVE_BG     : BTN_REST_BG;
+const isActive = id === active;
+btn.classList.toggle('active', isActive);
+btn.setAttribute('aria-pressed', String(isActive));
+btn.style.background = isActive ? BTN_ACTIVE_BG : BTN_REST_BG;
       btn.style.borderColor = isActive ? BTN_ACTIVE_BORDER : BTN_REST_BORDER;
       btn.style.color       = isActive ? BTN_ACTIVE_TEXT   : BTN_REST_TEXT;
     }

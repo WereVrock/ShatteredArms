@@ -93,27 +93,10 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
       return unit;
     }
 
-    // Column count. A unit type may declare a preferred row count
-    // (e.g. archers fight better in a wide, shallow line), in which case
-    // cols = ceil(count / preferredRows) and the generic 5-wide cap is
-    // lifted. Otherwise the square-ish default applies.
-    let baseCols;
-    if (unitTypeDef.preferredRows && unitTypeDef.preferredRows > 0) {
-      baseCols = Math.max(1, Math.ceil(count / unitTypeDef.preferredRows));
-    } else {
-      baseCols = Math.max(1, Math.min(5, Math.ceil(Math.sqrt(count * 1.6))));
-    }
-
-    // Discipline clamp. Low-discipline units cannot be narrower than
-    // minFormationCols or shallower than minFormationRows; when the row
-    // floor applies, rows are rebalanced so there is no stub back row.
-    // This overrides preferredRows — a low-discipline archer that
-    // declares preferredRows: 2 is still widened to satisfy the row
-    // floor. Same rule as the deployment path and the reshape path, so
-    // scenario and campaign units deploy identically.
-    const cols = FormationGrid.constrainColsForDiscipline(
-      baseCols, count, unitTypeDef, CombatConfig
-    );
+    // Column count (preferredRows / square-ish default, then the
+    // discipline clamp) is resolved by columnsForCount, which depthForCount
+    // shares so layout code can predict this unit's footprint.
+    const cols = FormationFactory.columnsForCount(count, unitTypeDef);
 
     const cos = Math.cos(facing);
     const sin = Math.sin(facing);
@@ -149,5 +132,53 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
     // same code path.
     unit.finalizeFormationOffsets(cols);
     return unit;
+  }
+
+  // Column count createUnitWithCount uses for `count` soldiers.
+  //
+  // A unit type may declare a preferred row count (e.g. archers fight
+  // better in a wide, shallow line), in which case
+  // cols = ceil(count / preferredRows). Otherwise the square-ish default
+  // applies: cols = ceil(sqrt(1.6 x count)), with no upper limit.
+  //
+  // Discipline clamp: low-discipline units cannot be narrower than
+  // minFormationCols or shallower than minFormationRows; when the row
+  // floor applies, rows are rebalanced so there is no stub back row.
+  // This overrides preferredRows — a low-discipline archer that
+  // declares preferredRows: 2 is still widened to satisfy the row
+  // floor. Same rule as the deployment path and the reshape path, so
+  // scenario and campaign units deploy identically.
+  static columnsForCount(count, unitTypeDef) {
+    let baseCols;
+    if (unitTypeDef.preferredRows && unitTypeDef.preferredRows > 0) {
+      baseCols = Math.max(1, Math.ceil(count / unitTypeDef.preferredRows));
+    } else {
+      baseCols = Math.max(1, Math.ceil(Math.sqrt(count * 1.6)));
+    }
+    return FormationGrid.constrainColsForDiscipline(
+      baseCols, count, unitTypeDef, CombatConfig
+    );
+  }
+
+  // Front-row to back-row distance of a unit of `count` soldiers built by
+  // createUnitWithCount. Lets a layout planner space ranks before any
+  // unit exists. 0 for a single row (or fewer than two soldiers).
+  static depthForCount(count, unitTypeDef, requestedSpacing) {
+    if (count <= 1) return 0;
+    const spacing = unitTypeDef.formationSpacing ?? requestedSpacing;
+    const cols = FormationFactory.columnsForCount(count, unitTypeDef);
+    const rows = Math.ceil(count / cols);
+    return (rows - 1) * spacing;
+  }
+
+  // Side-to-side width of the widest row of a unit of `count` soldiers
+  // built by createUnitWithCount. Lets a layout planner keep neighbouring
+  // units from overlapping before any unit exists. 0 for fewer than two
+  // soldiers.
+  static widthForCount(count, unitTypeDef, requestedSpacing) {
+    if (count <= 1) return 0;
+    const spacing = unitTypeDef.formationSpacing ?? requestedSpacing;
+    const cols = FormationFactory.columnsForCount(count, unitTypeDef);
+    return (Math.min(cols, count) - 1) * spacing;
   }
 }

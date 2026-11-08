@@ -78,6 +78,7 @@ dispose() {
 
   _build() {
     const root = document.createElement('div');
+    root.className = 'mt-root';
     Object.assign(root.style, {
       position: 'fixed',
       inset: '0',

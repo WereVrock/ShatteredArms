@@ -3,7 +3,7 @@ import { CampaignState } from './CampaignState.js';
 import { CampaignRoster } from './CampaignRoster.js';
 import { Champion } from './Champion.js';
 import { ChampionConfig, CHAMPION_IDS, areChampionsEnabled, previewStartingStats } from './ChampionConfig.js';
-import { effectiveUnitXp, unitLevelForXp } from './UnitXp.js';
+import { effectiveUnitXp, unitLevelForXp, unitXpProgress, UNIT_LEVEL_THRESHOLDS } from './UnitXp.js';
 import { generateRewards } from './CampaignRewards.js';
 import { generateAIRoster, processAISurvivors } from './CampaignBattleBuilder.js';
 import { CampaignConfig } from './CampaignConfig.js';
@@ -12,7 +12,11 @@ import { UnitFamilies } from './UnitFamilies.js';
 import { unitIconSvg } from '../ui/UnitIcon.js';
 import { attachRankBadge } from '../ui/UnitRank.js';
 import { CardPickerView } from '../ui/CardPickerView.js';
+import { MenuAutoFit } from '../ui/MenuAutoFit.js';
 import { ChampionPanelView } from '../ui/ChampionPanelView.js';
+import { ArmyManagerController } from './ArmyManagerController.js';
+import { CampaignArmy } from './CampaignArmy.js';
+import { unmergedSize, reinforceAmount, reinforce } from './UnitMerge.js';
 import { computeUnitPrice, buildPreviewUnit } from './UnitPreview.js';
 import { AITierPreference } from '../config/AITierPreference.js';
 import { installCampaignCheats } from './CampaignCheats.js';
@@ -27,6 +31,10 @@ import {
 import { HighscoreApi } from '../net/HighscoreApi.js';
 import { SnapshotCodec } from '../net/SnapshotCodec.js';
 import { CampaignSession } from './CampaignSession.js';
+import { CampaignCampView } from '../ui/CampaignCampView.js';
+import { CampaignFaction } from './CampaignFaction.js';
+import { CampViewToggle } from '../ui/CampViewToggle.js';
+import { SettingsStore } from '../ui/settings/SettingsStore.js';
 
 // Orchestrates the campaign. All UI rendering is delegated to
 // CardPickerView; this class only builds view-model data and mutates
@@ -148,6 +156,32 @@ const STYLE_TEXT = `
     color: #8a9ab0;
     font-variant-numeric: tabular-nums;
   }
+  .campaign-info-army {
+    font-size: 13px;
+    font-weight: 600;
+    color: #c8d4e2;
+    text-align: center;
+    letter-spacing: 0.4px;
+    margin-bottom: 8px;
+  }
+  .campaign-info-army-reserve {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: #d08a6a;
+    margin-top: 2px;
+  }
+  .campaign-info-section {
+    font-size: 10px;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    color: #7a8a9e;
+    margin: 6px 0 2px;
+  }
+  .campaign-info-card.reserve {
+    opacity: 0.6;
+    border-style: dashed;
+  }
   .campaign-info-card-count.depleted {
     color: #d08a6a;
   }
@@ -189,8 +223,24 @@ export class CampaignFlow {
     this.showPower = false;
 
     this.picker = new CardPickerView(menuElement);
+    // Campaign pickers can be taller than the viewport (the shop) or sit
+    // next to the roster sidebar. Refit after every render so the player
+    // never has to change browser zoom by hand.
+    this._autoFit = new MenuAutoFit(menuElement);
+    const pickerShow = this.picker.show.bind(this.picker);
+    this.picker.show = (config) => {
+      const result = pickerShow(config);
+      this._autoFit.refit();
+      // CardPickerView.show() clears menuElement.innerHTML, which
+      // destroys the camp canvas if one is attached. Re-insert it and
+      // re-raise the panel above it.
+      this._attachCampToMenu();
+      return result;
+    };
     // Modal champion sheet. Built once per flow; show()/close() drive it.
     this.championPanel = new ChampionPanelView();
+    // Modal for merging units and choosing who is fielded.
+    this.armyManager = new ArmyManagerController();
     // Local profile select / create / delete. Same WC3-style wording as
     // the top-left badge; required when gating Campaign entry.
     this.profilePicker = new ProfilePickerView();
@@ -209,6 +259,24 @@ export class CampaignFlow {
         if (this._cheatRedraw) this._cheatRedraw();
       }
     });
+
+    // Background 3D battle camp. Created lazily on the first campaign
+    // picker that shows — a session that never opens the campaign never
+    // pays for a WebGL context.
+    this.campView = null;
+// “Animated 3D camp” tick. Created lazily with the camp view.
+this.campToggle = null;
+
+    // Hide the camp whenever the shared main menu is shown. Every
+    // CampaignFlow "back" path calls this.mainMenu.show(); a future
+    // caller (main.js, or another flow) also does. Wiring the hide into
+    // the instance's show() means one place decides "the campaign is no
+    // longer on screen" — no per-call-site hide to forget.
+    const originalMainMenuShow = this.mainMenu.show.bind(this.mainMenu);
+    this.mainMenu.show = () => {
+      this._hideCamp();
+      originalMainMenuShow();
+    };
   }
 
   // Main menu -> Campaign click.
@@ -257,7 +325,64 @@ startNewCampaign() {
     }
   }
 
+  // ---- Background camp --------------------------------------------------
+  //
+  // Every campaign picker sits on top of a 3D battle-camp backdrop whose
+  // look derives from the player's faction (see CampaignFaction).
+  //
+  // The camp canvas is parented to #mainMenu at z-index 0. The .menu-
+  // panel inside #mainMenu is raised to position:relative; z-index:1 so
+  // it paints over the camp. CardPickerView.show() clears menuElement's
+  // innerHTML, so _attachCampToMenu re-inserts the canvas on every
+  // picker render (see the picker.show wrapper in the constructor).
+  //
+  // Show is called from every picker that displays the army or the shop
+  // between battles. Hide is called from _beginBattle and — via the
+  // mainMenu.show shadow installed in the constructor — from every
+  // return-to-menu path.
+
+  _showCamp(state) {
+    if (!this.campView) this.campView = new CampaignCampView();
+    this.campView.setFaction(CampaignFaction.forState(state));
+// Animated 3D vs still snapshot. Must be applied before show().
+this.campView.setAnimated(SettingsStore.get().campView3d !== false);
+if (!this.campToggle) {
+this.campToggle = new CampViewToggle({
+onChange: (on) => { if (this.campView) this.campView.setAnimated(on); }
+});
+}
+this.campToggle.show();
+    // Call show() first to make the view visible, then attach. The
+    // _attachCampToMenu guard checks isVisible(), so if we attach first,
+    // it will just return early and the canvas will never enter the DOM.
+    this.campView.show();
+    this._attachCampToMenu();
+    console.info('[camp] shown', this.campView.getDiagnostics());
+  }
+
+  _hideCamp() {
+    if (!this.campView) return;
+    this.campView.hide();
+    this.campView.detach();
+if (this.campToggle) this.campToggle.hide();
+  }
+
+  // Inserts the camp canvas as the first child of #mainMenu and raises
+  // any .menu-panel inside it above the canvas. No-op while the camp is
+  // not visible, so the same call is safe from the picker.show wrapper
+  // even on non-campaign pickers (ScenarioMenu etc.).
+  _attachCampToMenu() {
+    if (!this.campView || !this.campView.isVisible()) return;
+    this.campView.attachTo(this.menuElement);
+    const panel = this.menuElement.querySelector('.menu-panel');
+    if (panel) {
+      panel.style.position = 'relative';
+      panel.style.zIndex = '1';
+    }
+  }
+
   _showContinueOrNew(existing, { finished = false } = {}) {
+    this._showCamp(existing);
     const battleNum = (existing.battleIndex | 0) + 1;
     const score = Math.round(existing.campaignScore || 0);
     const cards = [];
@@ -348,7 +473,7 @@ startNewCampaign() {
   }
 
   _finalizeAndSubmit(state, { abandoned = false } = {}) {
-    if (!state || state.highscoreSubmitted) return;
+    if (!state || state.highscoreSubmitted || state.cheatsUsed) return;
     const score = Math.round(state.campaignScore || 0);
     state.highscoreSubmitted = true;
     CampaignState.save(state);
@@ -455,6 +580,7 @@ startNewCampaign() {
   // button that performs the commit. Backing out of the picker returns to
   // the main menu and clears the (still champion-less) campaign state.
 _showChampionPicker(state) {
+    this._showCamp(state);
     const ids = this._eligibleCommanderIds();
     const hasRealChampion = ids.some(id => !ChampionConfig[id].pseudoCommander);
 
@@ -581,6 +707,7 @@ _showChampionPicker(state) {
     // menu" flag has done its job. Clearing here means a subsequent
     // reload (Ctrl+R mid-picker, mid-battle) correctly auto-resumes.
     CampaignSession.clearPaused();
+    CampaignArmy.normalize(state.roster, CampaignArmy.capFor(state.champion));
     switch (state.phase) {
       case 'pick-difficulty': this._showDifficultyPicker(state); break;
       case 'pick-initial': this._showInitialPicker(state); break;
@@ -630,7 +757,17 @@ _showChampionPicker(state) {
       }
       result[unit.id] = count;
     }
+    // Reserve units never entered the simulation, so the result map has no
+    // entry for them. Keep their soldiers exactly as they were instead of
+    // trusting applyBattleResult to ignore a missing id.
+    const reserveAlive = new Map();
+    for (const e of CampaignArmy.reserveEntries(state.roster)) {
+      reserveAlive.set(e.id, e.aliveCount);
+    }
     CampaignRoster.applyBattleResult(state.roster, result);
+    for (const e of state.roster) {
+      if (reserveAlive.has(e.id)) e.aliveCount = reserveAlive.get(e.id);
+    }
 
     // Routing survival rule. Every routing (escaped) player soldier
     // rejoins its unit next battle — routing is a setback, not a death
@@ -728,7 +865,7 @@ _showChampionPicker(state) {
     {
       const aiStart = state.battleAiStartPower || 0;
       const aiRemaining = teamPowerFromSim(simulation.units, 'red');
-      const gained = battleScore({
+      const gained = state.cheatsUsed ? 0 : battleScore({
         playerWon,
         aiStartPower: aiStart,
         aiRemainingPower: aiRemaining,
@@ -786,6 +923,11 @@ _showChampionPicker(state) {
     // passives can shift the offer pool (guaranteed goblin, halved
     // skeleton chance) — passed through as a modifiers object.
     state.gold += CampaignConfig.battleReward;
+    // Champion retinue growth (Goblin Warlord: +1 current, +1 max).
+    CampaignRoster.growChampionRetinue(
+      state.roster,
+      state.champion?.def?.retinueGrowthPerBattle || 0
+    );
     // Mercenary Captains pseudo-commander: an extra payment per victory.
     // The def may not exist in a build with the feature disabled, so the
     // bonus is looked up defensively.
@@ -856,6 +998,7 @@ _showChampionPicker(state) {
   // its starting value — so the state is safe to abandon if the player
   // backs out.
 _showDifficultyPicker(state) {
+    this._showCamp(state);
     const presets = CampaignConfig.difficulties;
     const order = ['easy', 'normal', 'hard'];
 
@@ -900,6 +1043,7 @@ _showDifficultyPicker(state) {
   // Safety valve: if neither offer in a round is affordable (rare with a
   // sensible economy), the round auto-skips rather than locking the UI.
   _showInitialPicker(state) {
+    this._showCamp(state);
     this._setActivePicker(state, () => this._showInitialPicker(state));
     if (!state.initialPickState) {
       state.initialPickState = {
@@ -1023,6 +1167,7 @@ _showDifficultyPicker(state) {
   // ready. Each purchase re-renders this screen so gold and roster stay
   // current.
   _showRewardPicker(state) {
+    this._showCamp(state);
     this._setActivePicker(state, () => this._showRewardPicker(state));
     const opts = state.rewardOptions || [];
 
@@ -1044,11 +1189,16 @@ _showDifficultyPicker(state) {
       cards.push({
         id: 'reinforce',
         name: 'Reinforce a unit',
-        description: 'Restore one depleted unit to full strength. Costs the unit\'s full price.',
+        description: 'Restore soldiers to one depleted unit, up to one base unit\'s worth. Costs one base unit\'s full price.',
         imageHtml: '',
         disabled: false
       });
     }
+
+    // Army management. Always offered: merging units and choosing who is
+    // fielded are free actions, and the card doubles as the "open slots"
+    // reminder before the player continues.
+    cards.push(this._buildArmyCard(state));
 
     // Champion sheet. Always shown when a champion exists so the player
     // can inspect the tree even with no unspent points; the description
@@ -1097,6 +1247,17 @@ _showDifficultyPicker(state) {
           this._showReinforcePicker(state);
           return;
         }
+        if (cardDef.id === 'army') {
+          this.armyManager.open(state, {
+            onChange: () => CampaignState.save(state),
+            onCardInfo: (entry, el) => this._openCardInfo(entry, el),
+            onClose: () => {
+              CampaignState.save(state);
+              this._showRewardPicker(state);
+            }
+          });
+          return;
+        }
         if (cardDef.id === 'champion') {
           // The panel is modal and closes on its own; re-render the
           // reward picker afterwards so a spent point is reflected in
@@ -1113,12 +1274,20 @@ _showDifficultyPicker(state) {
         const price = this._priceOfOffer(offer, state.champion?.costMultipliers || null);
         if (price > state.gold) return;
         state.gold -= price;
-        CampaignRoster.addUnit(state.roster, offer.typeId, offer.isUndead);
+        const bought = CampaignRoster.addUnit(state.roster, offer.typeId, offer.isUndead);
+        CampaignArmy.placeNew(state.roster, bought, CampaignArmy.capFor(state.champion));
         state.rewardOptions.splice(idx, 1);
         CampaignState.save(state);
         this._showRewardPicker(state);
       },
       onContinue: () => {
+        // A roster moved entirely to reserve would enter the battle with no
+        // units and lose instantly. Field the healthiest ones instead.
+        if (CampaignArmy.fieldedForBattle(state.roster).length === 0) {
+          CampaignArmy.fillOpenSlots(
+            state.roster, CampaignArmy.capFor(state.champion)
+          );
+        }
         this._beginBattle(state, state.battleIndex + 1, { reload: true });
       },
       continueLabel: 'Continue to next battle →',
@@ -1148,29 +1317,35 @@ _showDifficultyPicker(state) {
   // the price shown is computed against maxCount rather than the current
   // aliveCount. Champion cost multipliers apply here too, so a Warlord's
   // goblin units are cheap to heal while their skeletons cost double.
-  _showReinforcePicker(state) {
+_showReinforcePicker(state) {
+    this._showCamp(state);
     this._setActivePicker(state, () => this._showReinforcePicker(state));
     const depleted = state.roster.filter(e => e.aliveCount < e.maxCount);
     const costModifiers = state.champion?.costMultipliers || null;
 
+    // A reinforce always costs ONE unmerged unit's full price and restores
+    // at most one unmerged unit's worth of soldiers (see UnitMerge).
+    const priceOf = (entry) => computeUnitPrice({
+      typeDef: UnitTypes[entry.typeId],
+      isUndead: entry.isUndead,
+      aliveCount: unmergedSize(entry),
+      championCostMultipliers: costModifiers
+    });
+
     const cards = depleted.map(entry => {
       const typeDef = UnitTypes[entry.typeId];
-      const fullPrice = computeUnitPrice({
-        typeDef,
-        isUndead: entry.isUndead,
-        aliveCount: entry.maxCount,
-        championCostMultipliers: costModifiers
-      });
-      const affordable = fullPrice <= state.gold;
-      const name = entry.customName
+      const price = priceOf(entry);
+      const gain = reinforceAmount(entry);
+      const baseName = entry.customName
         || (entry.isUndead ? `Skeleton ${typeDef.displayName}` : typeDef.displayName);
+      const name = CampaignArmy.isFielded(entry) ? baseName : `${baseName} (reserve)`;
 
       return {
         id: entry.id,
         name,
-        description: `${entry.aliveCount} / ${entry.maxCount} — ${fullPrice} gold`,
+        description: `${entry.aliveCount} / ${entry.maxCount} (+${gain}) \u2014 ${price} gold`,
         imageHtml: unitIconSvg(typeDef, entry.isUndead),
-        disabled: !affordable,
+        disabled: price > state.gold,
         ...this._optionalPower(typeDef, entry.isUndead, entry.aliveCount),
         typeId: entry.typeId,
         isUndead: entry.isUndead,
@@ -1182,7 +1357,7 @@ _showDifficultyPicker(state) {
 
     this.picker.show({
       title: 'Reinforce a unit',
-      subtitle: 'Choose a depleted unit to restore to full strength.',
+      subtitle: 'Choose a depleted unit. A merged unit regains at most one unit\'s worth of soldiers.',
       infoElement: this._buildInfoElement(state),
       cards,
       mode: 'single',
@@ -1191,18 +1366,12 @@ _showDifficultyPicker(state) {
       onSelect: (entryId) => {
         const entry = state.roster.find(e => e.id === entryId);
         if (!entry) return;
-        const typeDef = UnitTypes[entry.typeId];
-        const fullPrice = computeUnitPrice({
-          typeDef,
-          isUndead: entry.isUndead,
-          aliveCount: entry.maxCount,
-          championCostMultipliers: costModifiers
-        });
-        if (fullPrice > state.gold) return;
+        const price = priceOf(entry);
+        if (price > state.gold) return;
         if (entry.aliveCount >= entry.maxCount) return;
 
-        state.gold -= fullPrice;
-        CampaignRoster.recoverUnit(state.roster, entryId);
+        state.gold -= price;
+        reinforce(entry);
         state.recoveredThisReward = true;
         state.phase = 'pick-reward';
         CampaignState.save(state);
@@ -1217,6 +1386,7 @@ _showDifficultyPicker(state) {
   }
 
 _showGameOver(state, opts = {}) {
+    this._showCamp(state);
     const championDead = opts.reason === 'champion-dead';
     const score = Math.round(state.campaignScore || 0);
     const title = championDead ? 'Champion Slain' : 'Campaign Over';
@@ -1301,13 +1471,38 @@ _priceOfOffer(offer, costModifiers = null) {
     });
   }
 
-  // Gold + roster summary shown on every campaign picker. Built as DOM
+// Shop card that opens the army manager. Shows fielded/cap and, when
+  // relevant, a nudge about open slots or units waiting in reserve.
+  _buildArmyCard(state) {
+    const cap = CampaignArmy.capFor(state.champion);
+    const fielded = CampaignArmy.fieldedCount(state.roster);
+    const reserve = state.roster.length - fielded;
+    const open = Math.max(0, cap - fielded);
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+    let description = 'Merge units of the same type and choose who fights.';
+    if (reserve > 0 && open > 0) {
+      description = `${plural(open, 'open slot')} while ${plural(reserve, 'unit')} wait in reserve.`;
+    } else if (reserve > 0) {
+      description = `${plural(reserve, 'unit')} in reserve will not join the next battle.`;
+    }
+
+    return {
+      id: 'army',
+      name: `Manage army \u2014 ${fielded}/${cap}`,
+      description,
+      imageHtml: '',
+      disabled: false
+    };
+  }
+
+// Gold + roster summary shown on every campaign picker. Built as DOM
   // nodes (not an HTML string) so type defs with unusual display names
   // cannot inject markup. Positioned as a fixed left-side panel by CSS
   // (see STYLE_TEXT); each roster entry renders as a compact card with
   // the same icon vocabulary the picker cards use. A depleted entry's
   // count is tinted to draw the eye to it (the heal screen's candidate).
-  _buildInfoElement(state) {
+_buildInfoElement(state) {
     const wrap = document.createElement('div');
     wrap.className = 'campaign-info';
 
@@ -1315,6 +1510,22 @@ _priceOfOffer(offer, costModifiers = null) {
     gold.className = 'campaign-info-gold';
     gold.textContent = `${state.gold} gold`;
     wrap.appendChild(gold);
+
+    const cap = CampaignArmy.capFor(state.champion);
+    const fieldedEntries = CampaignArmy.fieldedEntries(state.roster);
+    const reserveEntries = CampaignArmy.reserveEntries(state.roster);
+
+    const army = document.createElement('div');
+    army.className = 'campaign-info-army';
+    army.textContent = `Army ${fieldedEntries.length}/${cap}`;
+    army.title = 'Fielded units / unit cap';
+    if (reserveEntries.length > 0) {
+      const extra = document.createElement('span');
+      extra.className = 'campaign-info-army-reserve';
+      extra.textContent = `+${reserveEntries.length} in reserve`;
+      army.appendChild(extra);
+    }
+    wrap.appendChild(army);
 
     const roster = document.createElement('div');
     roster.className = 'campaign-info-roster';
@@ -1325,60 +1536,17 @@ _priceOfOffer(offer, costModifiers = null) {
       empty.textContent = 'No units yet.';
       roster.appendChild(empty);
     } else {
-      for (const entry of state.roster) {
-        const typeDef = UnitTypes[entry.typeId];
-        // customName wins when present — used by the champion's retinue
-        // entry, which reads as the champion's name rather than the
-        // unit type's default label.
-        const baseName = entry.customName || typeDef.displayName;
-        const name = entry.isUndead ? `Skeleton ${baseName}` : baseName;
-        const depleted = entry.aliveCount < entry.maxCount;
-
-        const card = document.createElement('div');
-        card.className = 'campaign-info-card';
-        card.title = `${name} — ${entry.aliveCount}/${entry.maxCount} (right-click for details)`;
-        card.style.cursor = 'pointer';
-
-        // Right-click → open the shared UnitInfoPanel with a synthetic
-        // preview of this roster entry. Mirrors the picker-card
-        // right-click path (see _openCardInfo): the roster entry already
-        // carries every field that method reads (id, typeId, isUndead,
-        // aliveCount, maxCount), so it is passed through directly rather
-        // than being adapted into a card-shaped object. teamId defaults
-        // to 'blue' inside _openCardInfo, matching this panel's
-        // player-only roster.
-        //
-        // No-op when no UnitInfoPanel was supplied — CampaignFlow is
-        // constructible without one, and _openCardInfo guards on that
-        // case (as does its cardDef.typeId check). preventDefault
-        // suppresses the browser's native context menu, matching the
-        // picker-card behaviour.
-        card.addEventListener('contextmenu', (e) => {
-          e.preventDefault();
-          this._openCardInfo(entry, card);
-        });
-
-        const icon = document.createElement('div');
-        icon.className = 'campaign-info-card-icon';
-        icon.innerHTML = unitIconSvg(typeDef, entry.isUndead);
-        // Rank badge for levelled roster entries. entry.level is always
-        // present (CampaignRoster.newEntry seeds it to 1); level 1 gets
-        // no badge, so a fresh recruit card looks exactly as before.
-        attachRankBadge(icon, entry.level);
-        card.appendChild(icon);
-
-        const nameEl = document.createElement('div');
-        nameEl.className = 'campaign-info-card-name';
-        nameEl.textContent = name;
-        card.appendChild(nameEl);
-
-        const countEl = document.createElement('div');
-        countEl.className = 'campaign-info-card-count'
-          + (depleted ? ' depleted' : '');
-        countEl.textContent = `${entry.aliveCount}/${entry.maxCount}`;
-        card.appendChild(countEl);
-
-        roster.appendChild(card);
+      for (const entry of fieldedEntries) {
+        roster.appendChild(this._buildInfoCard(entry, false));
+      }
+      if (reserveEntries.length > 0) {
+        const label = document.createElement('div');
+        label.className = 'campaign-info-section';
+        label.textContent = 'Reserve';
+        roster.appendChild(label);
+        for (const entry of reserveEntries) {
+          roster.appendChild(this._buildInfoCard(entry, true));
+        }
       }
     }
     wrap.appendChild(roster);
@@ -1386,7 +1554,49 @@ _priceOfOffer(offer, costModifiers = null) {
     return wrap;
   }
 
-  // --- Card power gating ------------------------------------------------
+// One roster card in the left info panel. Right-click opens the shared
+  // UnitInfoPanel on a synthetic preview of the entry, same as picker cards.
+  _buildInfoCard(entry, inReserve) {
+    const typeDef = UnitTypes[entry.typeId];
+    // customName wins when present: the champion's retinue entry reads as
+    // the champion's name rather than the unit type's default label.
+    const baseName = entry.customName || typeDef.displayName;
+    const name = entry.isUndead ? `Skeleton ${baseName}` : baseName;
+    const depleted = entry.aliveCount < entry.maxCount;
+
+    const card = document.createElement('div');
+    card.className = 'campaign-info-card' + (inReserve ? ' reserve' : '');
+    card.title = `${name} \u2014 ${entry.aliveCount}/${entry.maxCount}`
+      + (inReserve ? ' \u2014 reserve' : '')
+      + ' (right-click for details)';
+    card.style.cursor = 'pointer';
+
+    card.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      this._openCardInfo(entry, card);
+    });
+
+    const icon = document.createElement('div');
+    icon.className = 'campaign-info-card-icon';
+    icon.innerHTML = unitIconSvg(typeDef, entry.isUndead);
+    attachRankBadge(icon, entry.level);
+    card.appendChild(icon);
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'campaign-info-card-name';
+    nameEl.textContent = name;
+    card.appendChild(nameEl);
+
+    const countEl = document.createElement('div');
+    countEl.className = 'campaign-info-card-count'
+      + (depleted ? ' depleted' : '');
+    countEl.textContent = `${entry.aliveCount}/${entry.maxCount}`;
+    card.appendChild(countEl);
+
+    return card;
+  }
+
+// --- Card power gating ------------------------------------------------
 
   // Returns `{ power }` when the campaign power display is on, `{}` when
   // it is off. The campaign shows prices in the description text, so this
@@ -1426,6 +1636,19 @@ _priceOfOffer(offer, costModifiers = null) {
       maxCount: cardDef.maxCount,
       teamId: cardDef.teamId || 'blue'
     });
+    // Roster entries carry a name and veterancy; shop offers do not. Copy
+    // them onto the preview so UnitInfoPanel shows the Veterancy section.
+    if (cardDef.customName) preview.customName = cardDef.customName;
+    if (typeof cardDef.level === 'number' || typeof cardDef.xp === 'number') {
+      const level = Math.max(1, Math.floor(cardDef.level || 1));
+      const levelFloor = UNIT_LEVEL_THRESHOLDS[
+        Math.min(level, UNIT_LEVEL_THRESHOLDS.length) - 1
+      ] || 0;
+      const prog = unitXpProgress(level, Math.max(cardDef.xp || 0, levelFloor));
+      preview.unitLevel = level;
+      preview.unitXpFrac = prog.frac;
+      preview.unitXpText = prog.text;
+    }
     this.unitInfoPanel.open(preview, anchorEl);
   }
 
@@ -1436,6 +1659,7 @@ _priceOfOffer(offer, costModifiers = null) {
     // the listener cannot mutate the pre-battle state object while the
     // simulation runs.
     this._setActivePicker(null, null);
+    CampaignArmy.normalize(state.roster, CampaignArmy.capFor(state.champion));
     state.battleIndex = battleIndex;
     state.phase = 'battle';
 
@@ -1472,6 +1696,7 @@ _priceOfOffer(offer, costModifiers = null) {
     // menu" flag here so a subsequent reload auto-resumes instead of
     // dropping back to the menu (needed because the reward-picker
     // Continue path reloads the page to escape the previous battle).
+    this._hideCamp();
     if (this.onEnterBattle) this.onEnterBattle();
     if (reload) {
       window.location.reload();

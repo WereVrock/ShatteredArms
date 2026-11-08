@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { CombatConfig } from '../config/CombatConfig.js';
 import { SettingsStore } from '../ui/settings/SettingsStore.js';
+import { setAttackCursor } from '../ui/MedievalTheme.js';
 
 const LINE_GAP_BETWEEN_UNITS = 1.0;
 
@@ -11,6 +12,12 @@ const HOLD_TIME_MS = 1000;
 
 const RIGHT_DOUBLE_CLICK_MS = 350;
 const RIGHT_DOUBLE_CLICK_PX = 6;
+
+// Floor on how far the lateral gaps between units of a multi-unit selection
+// may shrink while the line is narrowed. Applies to the GAPS only, never to
+// a unit's own width, so any unit can still be dragged as narrow as the
+// player wants.
+const MIN_LATERAL_SCALE = 0.3;
 
 // Right-click-and-hold-drag: Total-War style formation drag.
 //
@@ -80,6 +87,23 @@ export class OrderDragController {
     this._lastRightDownScreenX = 0;
     this._lastRightDownScreenY = 0;
     this._isDoubleClick = false;
+
+    // True while the themed attack (sword) cursor is showing on the
+    // canvas. Kept as a local mirror of the <html>.attack-cursor class so
+    // a per-mousemove storm of identical "should be on" answers does not
+    // re-toggle a class on the root every frame. Only written by
+    // _setAttackCursor.
+    this._attackCursorOn = false;
+
+    // RAF throttle for the enemy-hover check. Mousemove fires up to 60-120+
+    // times per second while the pointer moves; the pick
+    // (pickUnitAtScreen) is a per-unit screen-space projection, so
+    // coalescing to one check per animation frame caps the worst case at
+    // 60 Hz regardless of mouse rate. `_lastAttackCursorEvent` holds the
+    // latest position; the RAF callback reads and clears it. Both null
+    // when idle.
+    this._attackCursorRafId = null;
+    this._lastAttackCursorEvent = null;
 
     this._bindEvents();
   }
@@ -199,6 +223,42 @@ export class OrderDragController {
       this._dragExceededThreshold = false;
       this._rightDownTime = performance.now();
       e.preventDefault();
+    });
+
+    // Enemy-hover cursor. Two O(1) guards fire before the per-unit pick
+    // is even attempted:
+    //
+    //   1. isOrderDragging — while a drag runs, the drag path owns the
+    //      pointer; virtual-cursor mode sets body.cursor = 'none' and the
+    //      !important canvas rule for the sword would otherwise defeat
+    //      it.
+    //   2. e.target !== this.canvas — the pointer is on the army bar, a
+    //      menu, a tooltip, etc., so nothing is hovered. This skips the
+    //      pick entirely for the majority of mousemove events (the
+    //      pointer spends most of its time on UI, not canvas).
+    //
+    // When either guard fires, any pending RAF is cancelled too: a
+    // check scheduled a frame earlier against a canvas position must not
+    // complete after the pointer has already moved off canvas (it would
+    // re-show the sword based on stale coordinates).
+    //
+    // Only when both guards pass is the throttled check scheduled.
+    window.addEventListener('mousemove', (e) => {
+      if (this.isOrderDragging || e.target !== this.canvas) {
+        this._cancelPendingAttackCursorCheck();
+        this._setAttackCursor(false);
+        return;
+      }
+      this._scheduleAttackCursorCheck(e);
+    });
+
+    // Pointer left the canvas entirely (moved to another window, or off
+    // the page). No further mousemoves will fire against the canvas, so
+    // nothing would turn the sword off. Cancel any pending check and
+    // drop it here.
+    this.canvas.addEventListener('mouseleave', () => {
+      this._cancelPendingAttackCursorCheck();
+      this._setAttackCursor(false);
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -325,6 +385,92 @@ export class OrderDragController {
       document.body.style.cursor = '';
     }
     this.orderPreviewView.hide();
+  }
+
+  // --- enemy-hover attack cursor -------------------------------------------
+
+  // Schedules an attack-cursor check for the next animation frame.
+  //
+  // Multiple mousemoves in the same frame collapse to one check: the
+  // first call schedules the RAF and stores the position; subsequent
+  // calls just update the stored position. The RAF callback reads the
+  // latest position and clears it. This caps the pick cost at 60 Hz
+  // regardless of mouse polling rate. Combined with the guards in the
+  // mousemove listener (which already skip everything that isn't a
+  // canvas hover), the pick only runs when the pointer is genuinely
+  // over the canvas AND the player has a selection.
+  _scheduleAttackCursorCheck(e) {
+    this._lastAttackCursorEvent = { clientX: e.clientX, clientY: e.clientY };
+    if (this._attackCursorRafId !== null) return;
+    this._attackCursorRafId = requestAnimationFrame(() => {
+      this._attackCursorRafId = null;
+      const ev = this._lastAttackCursorEvent;
+      this._lastAttackCursorEvent = null;
+      if (!ev) return;
+      this._evaluateAttackCursor(ev);
+    });
+  }
+
+  // Cancels a pending check and drops its stored position. Called when
+  // the pointer leaves the canvas or a drag starts — a check scheduled a
+  // frame earlier against a canvas position must not complete after the
+  // pointer has already moved off (it would re-show the sword from stale
+  // coordinates and overwrite the immediate _setAttackCursor(false)).
+  _cancelPendingAttackCursorCheck() {
+    if (this._attackCursorRafId !== null) {
+      cancelAnimationFrame(this._attackCursorRafId);
+      this._attackCursorRafId = null;
+    }
+    this._lastAttackCursorEvent = null;
+  }
+
+  // Recomputes whether the themed attack (sword) cursor should show for
+  // the pointer's current position. Runs at most once per animation
+  // frame, only when the pointer is on the canvas and no drag is
+  // running (both filtered before this method is reached).
+  //
+  // Rules, in order:
+  //   - no selection -> no attack is possible -> off.
+  //   - pointer not over a unit -> off.
+  //   - pointer over a unit on a team none of the selection belongs to
+  //     -> the sword (this click will issue an attack).
+  //   - otherwise (over a friendly) -> off.
+  //
+  // Using the selection's full team set (not selected[0].teamId) means a
+  // selection that happens to span both teams — impossible in SP, possible
+  // momentarily in local MP — treats a unit on EITHER selected team as
+  // friendly, so the sword only shows for an actually-hostile target.
+  _evaluateAttackCursor(ev) {
+    const selection = this.selectionController.selectedUnits;
+    if (!selection || selection.size === 0) {
+      this._setAttackCursor(false);
+      return;
+    }
+
+    const hoveredId = this.selectionController.pickUnitAtScreen(ev.clientX, ev.clientY);
+    if (hoveredId === null || hoveredId === undefined) {
+      this._setAttackCursor(false);
+      return;
+    }
+    const hovered = this.selectionController.unitsById.get(hoveredId);
+    if (!hovered) {
+      this._setAttackCursor(false);
+      return;
+    }
+
+    const selectedTeams = new Set();
+    for (const u of selection) selectedTeams.add(u.teamId);
+
+    this._setAttackCursor(!selectedTeams.has(hovered.teamId));
+  }
+
+  // Idempotent wrapper around MedievalTheme's setAttackCursor. The local
+  // `_attackCursorOn` mirror makes a per-mousemove storm of identical
+  // answers a no-op instead of a class toggle on <html> every frame.
+  _setAttackCursor(on) {
+    if (on === this._attackCursorOn) return;
+    this._attackCursorOn = on;
+    setAttackCursor(on);
   }
 
   _resolveDirectMarch() {
@@ -521,11 +667,14 @@ export class OrderDragController {
     );
     const naturalTotal = naturalWidths.reduce((a, b) => a + b, 0);
 
+    // Unit widths follow the drag exactly. They used to be clamped to
+    // 0.3..3.0 x the unit's CURRENT width, so a wide formation could not be
+    // dragged narrower than 30% of its last ordered width.
     let widthScale = 1.0;
     if (totalWidthUnits && naturalTotal > 0) {
       widthScale = totalWidthUnits / naturalTotal;
-      widthScale = Math.max(0.3, Math.min(widthScale, 3.0));
     }
+    const lateralScale = Math.max(MIN_LATERAL_SCALE, widthScale);
 
     const rightX = Math.cos(facing);
     const rightZ = -Math.sin(facing);
@@ -545,7 +694,7 @@ export class OrderDragController {
         });
         continue;
       }
-      const lat = off.lateral * widthScale;
+      const lat = off.lateral * lateralScale;
       const fwd = off.forward;
       placements.push({
         unit,

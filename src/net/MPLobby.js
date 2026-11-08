@@ -22,10 +22,12 @@
 import { PlayableScenarios } from '../scenarios/PlayableScenarios.js';
 import { UnitTypes } from '../config/UnitTypes.js';
 import { UnitFamilies } from '../campaign/UnitFamilies.js';
-import { CampaignConfig } from '../campaign/CampaignConfig.js';
 import { raceSupportsUndead } from '../config/RaceConfig.js';
-import { buildPreviewUnit } from '../campaign/UnitPreview.js';
+import { previewPower } from '../campaign/UnitPreview.js';
 import { unitIconSvg } from '../ui/UnitIcon.js';
+import { baseSizeFor, sizeStateOf, stepSoldierCount } from '../scenarios/RosterScaling.js';
+import { createSizeStepper } from '../ui/UnitSizeStepper.js';
+import { captureScroll, restoreScroll } from '../ui/ScrollMemory.js';
 
 const DEFAULT_POWER_BUDGET = 1500;
 const DEFAULT_DEPLOYMENT_SECONDS = 45;
@@ -43,6 +45,14 @@ const PAUSE_MODES = [
   { value: 'accumulative', label: 'Accumulative — +1 per 2 min, max 3' }
 ];
 const DEFAULT_PAUSE_MODE = 'free';
+
+// Scrollable regions whose position survives a re-render (the lobby
+// rebuilds its whole DOM on every roster edit).
+const SCROLL_TARGETS = {
+  body: '.mpl-body',
+  palette: '.mpl-palette',
+  roster: '.mpl-roster'
+};
 
 export class MPLobby {
   constructor(opts = {}) {
@@ -341,43 +351,26 @@ export class MPLobby {
     return this._role === 'host' ? 'blue' : 'red';
   }
 
-  // Shared power read for the roster summary and the budget gate. Routes
-  // through buildPreviewUnit -> UnitPower.compute, the single power
-  // formula the AI, Custom Battle, campaign pricing, and the in-battle
-  // score all read. Deleting the old preview-only computePreviewPower
-  // left every caller of it broken; this helper is the one replacement
-  // shape so future call sites in this file don't need to know how
-  // preview units are built.
-  _powerOf(typeDef, isUndead, aliveCount) {
-    const preview = buildPreviewUnit({
-      id: 'mp-power-preview',
-      typeDef,
-      isUndead,
-      aliveCount,
-      maxCount: aliveCount,
-      teamId: 'blue'
-    });
-    return preview.getPower().total;
+  // Power reads for the roster summary and the budget gate. Everything
+  // routes through UnitPreview.previewPower, the single power formula the
+  // AI, Custom Battle, campaign pricing and the in-battle score all read.
+  _entryPower(entry) {
+    const typeDef = UnitTypes[entry.typeId];
+    return typeDef ? previewPower(typeDef, entry.isUndead, entry.aliveCount) : 0;
+  }
+
+  _rosterPower(roster) {
+    let sum = 0;
+    for (const e of roster) sum += this._entryPower(e);
+    return sum;
   }
 
   _myTotalPower() {
-    let sum = 0;
-    for (const e of this._myRoster) {
-      const t = UnitTypes[e.typeId];
-      if (!t) continue;
-      sum += this._powerOf(t, e.isUndead, e.aliveCount);
-    }
-    return sum;
+    return this._rosterPower(this._myRoster);
   }
 
   _peerTotalPower() {
-    let sum = 0;
-    for (const e of this._peerRoster) {
-      const t = UnitTypes[e.typeId];
-      if (!t) continue;
-      sum += this._powerOf(t, e.isUndead, e.aliveCount);
-    }
-    return sum;
+    return this._rosterPower(this._peerRoster);
   }
 
   // --- roster editing -------------------------------------------------------
@@ -385,7 +378,7 @@ export class MPLobby {
   _addUnit(typeId) {
     const typeDef = UnitTypes[typeId];
     if (!typeDef) return;
-    const size = CampaignConfig.defaultSizes[typeId] || 15;
+    const size = baseSizeFor(typeDef);
     const isUndead = this._skeletonMode && raceSupportsUndead(typeDef);
 
     const entry = {
@@ -396,12 +389,7 @@ export class MPLobby {
       maxCount: size
     };
 
-    const test = this._myRoster.concat([entry]);
-    let sum = 0;
-    for (const e of test) {
-      const t = UnitTypes[e.typeId];
-      if (t) sum += this._powerOf(t, e.isUndead, e.aliveCount);
-    }
+    const sum = this._rosterPower(this._myRoster.concat([entry]));
     if (sum > this._config.powerBudget) {
       this._setStatus(`Adding that would exceed the ${this._config.powerBudget} power budget.`);
       return;
@@ -416,6 +404,33 @@ export class MPLobby {
     const i = this._myRoster.findIndex(e => e.id === entryId);
     if (i < 0) return;
     this._myRoster.splice(i, 1);
+    this._broadcastRoster();
+    this._render();
+  }
+
+  // Grows or shrinks one roster entry by one base size. There is no soldier
+  // cap, but growing is gated on the power budget, same as adding a unit:
+  // the change is tried on a copy first and the real entry is only touched
+  // when the new total fits. Shrinking is always allowed.
+  _stepUnitSize(entryId, delta) {
+    const entry = this._myRoster.find(e => e.id === entryId);
+    if (!entry) return;
+
+    const trial = { ...entry };
+    if (!stepSoldierCount(trial, delta)) return;
+
+    if (trial.aliveCount > entry.aliveCount) {
+      const total = this._myTotalPower()
+        - this._entryPower(entry)
+        + this._entryPower(trial);
+      if (total > this._config.powerBudget) {
+        this._setStatus(`Growing that unit would exceed the ${this._config.powerBudget} power budget.`);
+        return;
+      }
+    }
+
+    stepSoldierCount(entry, delta);
+    this._setStatus('');
     this._broadcastRoster();
     this._render();
   }
@@ -447,10 +462,13 @@ export class MPLobby {
       .mpl-root.hidden { display: none; }
       .mpl-panel {
         background: #1a1f28; border: 1px solid #3a4a5e; border-radius: 10px;
-        padding: 20px 24px; width: min(860px, calc(100vw - 40px));
-        max-height: calc(100vh - 40px); overflow-y: auto;
+        padding: 16px 20px; width: min(860px, calc(100vw - 40px));
+        max-height: calc(100vh - 40px); overflow: hidden;
+        display: flex; flex-direction: column;
         box-shadow: 0 12px 40px rgba(0,0,0,0.6);
       }
+      .mpl-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 6px; }
+      .mpl-footer { flex: 0 0 auto; padding-top: 8px; border-top: 1px solid #2a3544; }
       .mpl-title { margin: 0 0 4px; font-size: 20px; letter-spacing: 2px; }
       .mpl-sub { margin: 0 0 18px; font-size: 12px; color: #99a; letter-spacing: 0.5px; }
       .mpl-section { margin: 16px 0; padding-top: 14px; border-top: 1px solid #2a3544; }
@@ -493,7 +511,8 @@ export class MPLobby {
       .mpl-power-fill { height: 100%; border-radius: 4px;
         background: linear-gradient(90deg, #4a8a4a, #8ad08a); transition: width 0.15s; }
       .mpl-power-fill.over { background: linear-gradient(90deg, #8a4a2a, #d06a4a); }
-      .mpl-palette { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+      .mpl-palette { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0;
+        max-height: 196px; overflow-y: auto; align-content: flex-start; }
       .mpl-pal-card {
         width: 96px; padding: 6px; background: #1e2430; border: 1px solid #3a4a5e;
         border-radius: 6px; display: flex; flex-direction: column; align-items: center;
@@ -504,12 +523,15 @@ export class MPLobby {
       .mpl-pal-icon svg { width: 100%; height: 100%; }
       .mpl-pal-name { font-size: 10px; color: #d8e6ff; text-align: center; }
       .mpl-roster { display: flex; flex-wrap: wrap; gap: 6px; min-height: 40px;
+        max-height: 184px; overflow-y: auto; align-content: flex-start;
         padding: 6px; background: #0e1218; border: 1px solid #2a3544; border-radius: 4px; }
       .mpl-roster-item {
         position: relative; padding: 4px 20px 4px 6px; background: #1e2430;
         border: 1px solid #3a4a5e; border-radius: 4px; display: flex;
-        align-items: center; gap: 6px; font-size: 11px;
+        align-items: center; gap: 8px; font-size: 11px;
       }
+      .mpl-roster-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mpl-roster-power { color: #e0c060; font-weight: bold; white-space: nowrap; }
       .mpl-remove {
         position: absolute; top: 1px; right: 2px; background: transparent;
         border: none; color: #778; cursor: pointer; font-size: 14px; padding: 0 2px;
@@ -528,10 +550,18 @@ export class MPLobby {
 
   _render() {
     const root = this._root;
+    const savedScroll = captureScroll(root, SCROLL_TARGETS);
     root.innerHTML = '';
 
+    const shell = document.createElement('div');
+    shell.className = 'mpl-panel';
+
+    // Everything except the status line and the action buttons scrolls
+    // inside .mpl-body (`panel` below); the footer stays pinned so Ready
+    // and Back are always reachable however long the roster gets.
     const panel = document.createElement('div');
-    panel.className = 'mpl-panel';
+    panel.className = 'mpl-body';
+    shell.appendChild(panel);
 
     const title = document.createElement('h2');
     title.className = 'mpl-title';
@@ -585,11 +615,15 @@ export class MPLobby {
       panel.appendChild(this._buildSettingsSection());
     }
 
-    // --- status + actions ---
+    // --- status + actions (pinned footer) ---
+    const footer = document.createElement('div');
+    footer.className = 'mpl-footer';
+    shell.appendChild(footer);
+
     const status = document.createElement('div');
     status.className = 'mpl-status';
     status.textContent = this._statusText || '';
-    panel.appendChild(status);
+    footer.appendChild(status);
     this._statusEl = status;
 
     const actions = document.createElement('div');
@@ -614,9 +648,10 @@ export class MPLobby {
       actions.appendChild(readyBtn);
     }
 
-    panel.appendChild(actions);
+    footer.appendChild(actions);
 
-    root.appendChild(panel);
+    root.appendChild(shell);
+    restoreScroll(root, SCROLL_TARGETS, savedScroll);
     this._statusEl.textContent = this._statusText || '';
   }
 
@@ -872,8 +907,25 @@ export class MPLobby {
     item.className = 'mpl-roster-item';
 
     const label = document.createElement('span');
-    label.textContent = `${entry.isUndead ? 'Sk. ' : ''}${typeDef?.displayName || entry.typeId} ×${entry.aliveCount}`;
+    label.className = 'mpl-roster-name';
+    label.textContent = `${entry.isUndead ? 'Sk. ' : ''}${typeDef?.displayName || entry.typeId}`;
+    label.title = label.textContent;
     item.appendChild(label);
+
+    if (typeDef) {
+      const power = document.createElement('span');
+      power.className = 'mpl-roster-power';
+      power.textContent = `\u2694 ${Math.round(this._entryPower(entry))}`;
+      power.title = 'Power';
+      item.appendChild(power);
+    }
+
+    // The stepper's number is the unit's soldier count (shown once).
+    item.appendChild(createSizeStepper({
+      count: entry.aliveCount,
+      state: sizeStateOf(entry),
+      onStep: (delta) => this._stepUnitSize(entry.id, delta)
+    }));
 
     const rm = document.createElement('button');
     rm.type = 'button';

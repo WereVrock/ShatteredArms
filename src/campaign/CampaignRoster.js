@@ -138,5 +138,17 @@ export const CampaignRoster = {
 
   hasRecoverableUnit(roster) {
     return roster.some(e => e.aliveCount < e.maxCount);
+  },
+
+  // Grows the champion's retinue entry by `amount` soldiers, both current
+  // and max. No-op for a non-positive amount or when no champion entry
+  // exists (e.g. the retinue was wiped but the champion routed away).
+  growChampionRetinue(roster, amount) {
+    if (!(amount > 0)) return;
+    for (const entry of roster) {
+      if (!entry.hasChampion) continue;
+      entry.maxCount += amount;
+      entry.aliveCount += amount;
+    }
   }
 };

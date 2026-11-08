@@ -77,6 +77,9 @@ function hydrateChampion(parsed) {
   // means "no mid-battle state saved" — resuming restarts the battle
   // from start-of-battle, identical to non-easy behavior.
   if (parsed.battleSnapshot === undefined) parsed.battleSnapshot = null;
+  // Set once the debug cheat panel has been opened in this run. A cheated
+  // run scores 0 and is never submitted to the highscore board.
+  if (typeof parsed.cheatsUsed !== 'boolean') parsed.cheatsUsed = false;
   return parsed;
 }
 

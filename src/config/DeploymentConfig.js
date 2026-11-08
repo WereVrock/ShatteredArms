@@ -17,8 +17,14 @@ export const DeploymentConfig = {
   // backDepth just provides extra room behind the line. Doubling backDepth
   // without touching frontDepth leaves the formation exactly where it was
   // and only grows the empty space behind it.
-  minHalfLateral: 30,
-  lateralPerUnit: 7.2,
+  // DEPRECATED: DeploymentPlanner derives the half-width from the zone's
+  // computed depth (1.5 x half-depth, so width is 50% larger than height).
+  // Kept only so reverting the derived-width change is a one-line edit.
+  halfLateral: 43.2,
+  // The zone's rear edge stops at this box (the ORIGINAL +-200 playable area).
+  // Deliberately separate from CombatConfig.mapBounds so doubling the map
+  // leaves the zone where it was, centred in the larger field.
+  backReachBounds: { minX: -200, maxX: 200, minZ: -200, maxZ: 200 },
   frontDepth: 9,
   backDepth: 18,
 

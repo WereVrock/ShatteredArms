@@ -1,9 +1,36 @@
+// ===== style.css =====
 html, body {
   margin: 0;
   padding: 0;
   overflow: hidden;
   background: #1a1a1a;
   height: 100%;
+}
+
+/* ===== Text selection =====
+   This is a game, not a page: nothing is selectable by default. Inputs
+   keep selection so typing and editing still work. The debug HUD (text
+   block + change history) and the cheat panel are debug tools and stay
+   selectable so their text can be copied by hand. Buttons inside them stay
+   unselectable. */
+html, body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#hud, #hud *, .cheat-root, .cheat-root * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#hud button, .cheat-root button {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 #renderCanvas {
@@ -30,6 +57,13 @@ html, body {
   font-family: monospace;
   font-size: 13px;
   cursor: pointer;
+}
+
+/* Debug-only info button. Hidden from first paint so it never flashes
+   while the page loads. main.js reveals it with an inline display value
+   while a debug target is active, which overrides this rule. */
+#hudToggle {
+  display: none;
 }
 
 #topBar button:hover {
@@ -135,7 +169,7 @@ html, body {
   /* Safety net only. The redesigned layout fits in a normal window, so
      the scrollbar never appears in ordinary use — this only kicks in on
      a genuinely tiny viewport rather than clipping the bottom card. */
-  max-height: calc(100vh - 24px);
+  max-height: calc((100vh - 24px) / var(--ui-font-scale, 1));
   overflow-y: auto;
   padding: 4px 8px;
   box-sizing: border-box;
@@ -259,7 +293,7 @@ html, body {
    a flex item defaults to min-height: auto and refuses to shrink below
    its content, so overflow-y: auto would never engage. */
 .scenario-menu-panel {
-  max-height: calc(100vh - 32px);
+  max-height: calc((100vh - 32px) / var(--ui-font-scale, 1));
   display: flex;
   flex-direction: column;
   padding: 4px 8px;
@@ -589,6 +623,19 @@ html, body {
   border-color: #888;
 }
 
+/* Dense campaign screens (the shop). MenuAutoFit sets data-dense="true" on
+   the panel when it holds 5+ cards; two columns roughly halve the height.
+   An odd trailing card spans both columns. */
+.menu-panel[data-dense="true"] .menu-list:not(.horizontal) {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.menu-panel[data-dense="true"] .menu-list:not(.horizontal) > .menu-card:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 /* Horizontal card list: two big cards side by side, equal width. Used by
    the sequential initial picker (pick-one-of-two). */
 .menu-list.horizontal {
@@ -631,10 +678,39 @@ html, body {
 .custom-battle-panel {
   max-width: min(1400px, calc(100vw - 40px));
   width: calc(100vw - 40px);
-  max-height: calc(100vh - 40px);
+  max-height: calc((100vh - 40px) / var(--ui-font-scale, 1));
+  /* Flex column: the title, skeleton row and action buttons keep their
+     size; the palette and the two team strips share what is left and
+     scroll inside themselves. overflow-y stays as a last-resort fallback
+     for a viewport too short even for the minimum section heights. */
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   padding: 4px 12px;
   box-sizing: border-box;
+}
+
+.custom-battle-panel .menu-title,
+.custom-battle-panel .menu-subtitle,
+.custom-skeleton-row,
+.custom-spectator-hint,
+.custom-actions {
+  flex-shrink: 0;
+}
+
+.custom-battle-panel .menu-title {
+  font-size: 22px;
+}
+
+.custom-battle-panel .menu-subtitle {
+  margin: 0 0 8px;
+}
+
+/* The subtitle is the first thing to go on a short window. */
+@media (max-height: 760px) {
+  .custom-battle-panel .menu-subtitle {
+    display: none;
+  }
 }
 
 /* Team strips. Two teams stacked vertically (blue above, red below); each
@@ -655,9 +731,16 @@ html, body {
 .custom-team-strip {
   border: 1px solid #3a4a5e;
   border-radius: 6px;
-  padding: 10px 12px;
-  margin: 12px 0;
+  padding: 8px 12px;
+  margin: 6px 0;
   text-align: left;
+  /* Column: header on top, tile area below taking the remaining height.
+     min-height keeps the header plus roughly one row of tiles visible. */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 120px;
+  box-sizing: border-box;
   transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
 }
 
@@ -699,12 +782,16 @@ html, body {
 
 .custom-team-header {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
+  gap: 6px 10px;
+  margin-bottom: 6px;
 }
 
 .custom-team-label {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 13px;
   font-weight: bold;
   color: #d8e6ff;
@@ -738,25 +825,25 @@ html, body {
 }
 
 .custom-role-btn.ai {
-  background: #2a2f3a;
-  border-color: #4a5568;
-  color: #aab;
+  background: rgba(0, 0, 0, 0.5) !important;
+  border-color: #5a3a10 !important;
+  color: #e8dcc0 !important;
 }
 .custom-role-btn.ai:hover {
-  background: #3a4050;
-  border-color: #6a7588;
-  color: #cdd;
+  background: rgba(0, 0, 0, 0.7) !important;
+  border-color: #8a5a20 !important;
+  color: #f2e4c4 !important;
+}
+.custom-team-label {
+  color: #f2e4c4 !important;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8) !important;
 }
 
-/* Unit strip: rows of tiles. Tiles wrap to a SECOND row before any
-   scrolling appears, so a growing roster stays fully visible rather than
-   being cut off by a horizontal scrollbar. Past two rows the strip caps
-   its height and scrolls vertically — beyond that the strip would start
-   to eat the panel and push the other team off-screen.
-
-   Row height math: tile ≈ 72px (icon 32 + name 12 + count 12 + padding
-   10 + border 2 + child gaps 4); two rows + one 6px gap + container
-   padding = 160px, rounded up to 170 for safety. */
+/* Unit strip: tiles wrap onto as many rows as the roster needs. The strip
+   takes whatever height its team section is given (the section shares the
+   panel height with the palette and the other team) and scrolls
+   vertically inside it, so a growing roster never pushes the palette, the
+   other team or the action buttons off-screen. */
 .custom-team-units {
   display: flex;
   flex-direction: row;
@@ -765,8 +852,8 @@ html, body {
   justify-content: flex-start;
   gap: 6px;
   padding: 4px 2px 6px;
-  min-height: 76px;
-  max-height: 170px;
+  flex: 1 1 auto;
+  min-height: 56px;
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -778,22 +865,26 @@ html, body {
   padding: 22px 4px;
 }
 
+/* Compact two-line tile: icon on the left; name above, and below it the
+   power badge and the [-] count [+] size stepper. */
 .custom-team-unit {
   position: relative;
-  flex: 0 0 72px;
-  padding: 6px 4px 4px;
+  flex: 0 0 208px;
+  box-sizing: border-box;
+  padding: 5px 20px 5px 6px;
   background: rgba(0, 0, 0, 0.35);
   border: 1px solid #3a4a5e;
   border-radius: 4px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
 }
 
 .custom-team-unit-icon {
-  width: 32px;
-  height: 32px;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -805,19 +896,30 @@ html, body {
   display: block;
 }
 
+.custom-team-unit-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
 .custom-team-unit-name {
-  font-size: 10px;
+  font-size: 11px;
   color: #cdd;
-  text-align: center;
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
 }
 
-.custom-team-unit-count {
-  font-size: 10px;
-  color: #99a;
+.custom-team-unit-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
 }
 
 .custom-team-unit-remove {
@@ -848,11 +950,22 @@ html, body {
   letter-spacing: 0.4px;
 }
 
+/* The palette can shrink (it shares panel height with the two team
+   strips) and scrolls inside itself. min-height keeps the title plus one
+   full row of cards visible. */
+.custom-palette-section {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 130px;
+}
+
 .custom-palette-title {
+  flex-shrink: 0;
   text-align: left;
   font-size: 12px;
   color: #99a;
-  margin: 8px 0 6px;
+  margin: 4px 0;
   letter-spacing: 1px;
   text-transform: uppercase;
 }
@@ -861,24 +974,30 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 10px;
+  align-content: flex-start;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .custom-palette-card {
+  flex: 0 0 auto;
   width: 110px;
-  padding: 8px;
+  padding: 5px 6px;
   background: #1e2430;
   border: 1px solid #3a4a5e;
   border-radius: 6px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 
 .custom-palette-icon {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -933,7 +1052,7 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin: 14px 0 6px;
+  margin: 6px 0;
   font-size: 12px;
   color: #aac;
   cursor: pointer;
@@ -945,15 +1064,62 @@ html, body {
   gap: 10px;
   margin-top: 12px;
 }
-
+/* Start Battle: rich forest green with a bronze border and inner highlight */
 .custom-start {
   flex: 1 1 0;
-  margin-top: 0;
+  margin-top: 0 !important;
+  background: linear-gradient(180deg, #2a4a1a 0%, #152a0a 100%) !important;
+  border: 1px solid #4a8a3a !important;
+  color: #d0f0c0 !important;
+  box-shadow: inset 0 0 0 1px #6a9a5a, 0 4px 12px rgba(0,0,0,0.6) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.5px !important;
+}
+.custom-start:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3a5a2a 0%, #203a10 100%) !important;
+  border-color: #6a9a5a !important;
+  color: #ffffff !important;
+}
+.custom-start:disabled {
+  background: linear-gradient(180deg, #1a140e 0%, #0a0603 100%) !important;
+  border-color: #3a2e20 !important;
+  color: #5a4a3a !important;
+  box-shadow: none !important;
+}
+
+/* Reset to Blank / Back */
+.custom-reset {
+  flex: 0 0 auto !important;
+  margin-top: 0 !important;
+  padding: 0 16px !important;
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  color: #a89878 !important;
+  font-size: 12px !important;
+  letter-spacing: 0.3px !important;
+  text-align: center !important;
+}
+.custom-reset:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3a2e20 0%, #22180e 100%) !important;
+  border-color: #8a5a20 !important;
+  color: #f2e4c4 !important;
+}
+.custom-reset:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
 }
 
 .custom-back {
-  flex: 0 0 140px;
-  margin-top: 0;
+  flex: 0 0 140px !important;
+  margin-top: 0 !important;
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border-color: #6a4a1e !important;
+  color: #a89878 !important;
+}
+.custom-back:hover {
+  background: linear-gradient(180deg, #3a2e20 0%, #22180e 100%) !important;
+  border-color: #8a5a20 !important;
+  color: #f2e4c4 !important;
 }
 
 .custom-reset {
@@ -976,4 +1142,773 @@ html, body {
 .custom-reset:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+/* =====================================================================
+   PARCHMENT THEME — the army-bar tooltip's look, applied to all UI.
+   Cream parchment gradient, bronze border with inner highlight, dark ink,
+   serif font, bronze rivets in the corners of windows.
+   !important is deliberate: several screens set colours in their own
+   injected stylesheets or inline.
+   ===================================================================== */
+
+/* ----- fonts ----- */
+#mainMenu, .menu-panel, .menu-card, .champ-root, .amv-root, .cheat-root,
+.campaign-exit-root, .profile-root, .mp-menu, .uip, .cmd-btn, .lm-tab,
+.lm-select, .hs-table, #profileBadge .pb-pill, #versionBadge > div,
+.mt-root, .mt-root *, .custom-team-strip, .custom-palette-card,
+.army-bar-tool-btn, #topBar button {
+  font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif !important;
+}
+
+/* ----- backdrops (dark, so the parchment windows stand out) ----- */
+#mainMenu {
+  background:
+    radial-gradient(ellipse at 50% 35%, rgba(70, 44, 18, 0.55) 0%, rgba(14, 8, 3, 0) 70%),
+    rgba(14, 8, 3, 0.9) !important;
+}
+.champ-root, .amv-root, .cheat-root, .campaign-exit-root, .profile-root,
+.mp-menu {
+  background: rgba(14, 8, 3, 0.74) !important;
+}
+
+/* ----- windows: the tooltip plaque, scaled up ----- */
+.menu-panel, .champ-panel, .amv-panel, .cheat-panel, .campaign-exit-panel,
+.profile-panel, .mp-panel, .uip, .mt-root > div {
+  background:
+    radial-gradient(ellipse at 30% 12%,
+      rgba(120, 100, 60, 0.20) 0%,
+      rgba(120, 100, 60, 0) 55%),
+    linear-gradient(180deg, #221b12 0%, #15100a 55%, #0d0906 100%) !important;
+  border: 2px solid #6a4a1e !important;
+  border-radius: 5px !important;
+  color: #e8dcc0 !important;
+  box-shadow:
+    0 0 0 1px #0a0603,
+    inset 0 0 0 1px #6a4a1e,
+    inset 0 1px 0 rgba(255, 220, 150, 0.08),
+    0 12px 40px rgba(0, 0, 0, 0.9),
+    0 0 26px rgba(232, 192, 96, 0.1) !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+  box-sizing: border-box !important;
+}
+.menu-panel {
+  padding: 18px 24px !important;
+}
+
+/* Two bronze rivets in the top corners of every window. */
+.menu-panel, .champ-panel, .amv-panel, .cheat-panel, .campaign-exit-panel,
+.profile-panel, .mp-panel, .mt-root > div {
+  position: relative !important;
+}
+.menu-panel::before, .menu-panel::after,
+.champ-panel::before, .champ-panel::after,
+.amv-panel::before, .amv-panel::after,
+.cheat-panel::before, .cheat-panel::after,
+.campaign-exit-panel::before, .campaign-exit-panel::after,
+.profile-panel::before, .profile-panel::after,
+.mp-panel::before, .mp-panel::after,
+.mt-root > div::before, .mt-root > div::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  width: 7px;
+  height: 7px;
+  background: radial-gradient(circle at 35% 30%, #f0d080 0%, #a87a44 60%, #3a2410 100%);
+  border: 1px solid #2a1a08;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 1;
+}
+.menu-panel::before, .champ-panel::before, .amv-panel::before,
+.cheat-panel::before, .campaign-exit-panel::before, .profile-panel::before,
+.mp-panel::before, .mt-root > div::before { left: 5px; }
+.menu-panel::after, .champ-panel::after, .amv-panel::after,
+.cheat-panel::after, .campaign-exit-panel::after, .profile-panel::after,
+.mp-panel::after, .mt-root > div::after { right: 5px; }
+
+/* Header and footer bands inside windows. */
+.champ-header, .amv-header, .cheat-header, .profile-header, .uip-header {
+  background: linear-gradient(180deg, rgba(176, 136, 72, 0.32) 0%, rgba(176, 136, 72, 0.12) 100%) !important;
+  border-color: #b08848 !important;
+}
+.champ-footer { background: rgba(176, 136, 72, 0.18) !important; }
+.champ-footer, .amv-footer, .cheat-footer, .profile-footer, .uip-section,
+.profile-create {
+  border-color: #b08848 !important;
+}
+
+/* ----- ink: all text inside windows ----- */
+.mt-root > div, .mt-root > div * {
+  color: #e8dcc0 !important;
+}
+.menu-title, .menu-brand-title, .champ-name, .amv-title, .cheat-title,
+.profile-title, .campaign-exit-title, .mp-title, .uip-name, .mt-root h2 {
+  color: #f2e4c4 !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8) !important;
+}
+.menu-subtitle, .menu-brand-subtitle, .champ-desc, .amv-subtitle,
+.profile-sub, .campaign-exit-sub, .hs-meta, .champ-tree-desc,
+.champ-node-desc, .cheat-row-desc, .amv-hint, .amv-pane-note,
+.menu-card-desc, .lm-mode-desc, .lm-label, .uip-meta, .uip-description,
+.uip-trait-desc, .champ-xplabel, .champ-starting-label,
+.custom-palette-title, .custom-skeleton-row, .custom-spectator-hint,
+.profile-empty, .mp-status, .hs-empty, .hs-loading {
+  color: #a89878 !important;
+}
+.uip-section-title, .champ-tier-label, .cheat-section-title,
+.champ-starting-title, .lm-section-title, .champ-level, .uip-stat-label,
+.uip-strength-label, .uip-kills-label, .uip-combat-label,
+.uip-progression-label, .hs-table th, .profile-create label {
+  color: #c8a860 !important;
+}
+.uip-stat-value, .uip-combat-value, .uip-trait-name, .uip-kills-value,
+.uip-strength-count, .uip-progression-value, .menu-card-name,
+.champ-tree-title, .champ-starting-value, .cheat-row-label, .amv-card-name,
+.amv-pane-title, .hs-name, .hs-rank, .hs-commander, .hs-diff,
+.lm-mode-name, .custom-team-label, .custom-palette-name,
+.custom-team-unit-name, .amv-card-count, .size-stepper-count {
+  color: #e8dcc0 !important;
+}
+.uip-strength-count .total, .uip-stat-value .total, .uip-combat-value .unit,
+.champ-starting-value .hint {
+  color: #a89878 !important;
+}
+.hs-score, .champ-points, .amv-pane-count, .uip-progression-value .level,
+.amv-card-tag {
+  color: #e0c060 !important;
+}
+.uip-kills-value .friendly { color: #e0a080 !important; }
+.amv-card-count.amv-depleted, .cheat-row-note, .profile-error, .hs-error,
+.cheat-notice {
+  color: #e0a080 !important;
+}
+.cheat-footer { color: #a8d090 !important; }
+.custom-team-empty, .amv-slot { color: #8a7868 !important; }
+.hs-table td, .hs-table th { border-color: #5a3a10 !important; }
+
+/* Stat icons take the bronze. */
+.uip-strength-icon, .uip-stat-icon, .uip-kills-icon, .uip-trait-icon {
+  color: #c8a860 !important;
+}
+
+/* ----- surfaces inside windows ----- */
+.champ-tree, .champ-starting, .cheat-row, .amv-slot,
+.custom-palette-card, .custom-team-unit, .lm-mode-row, .cheat-notice {
+  background: rgba(0, 0, 0, 0.35) !important;
+  border: 1px solid #5a3a10 !important;
+}
+/* Campaign army manager: the pane and every unit card are transparent,
+   so the roster shares the panel's dark theme background — the same
+   treatment the army bar cards got. Hover / merge-target / drop-hover
+   keep a faint tint so gestures still read. */
+.amv-pane, .amv-card {
+  background: transparent !important;
+  border: 1px solid #5a3a10 !important;
+}
+.amv-pane.amv-reserve, .amv-slot { border-style: dashed !important; }
+.amv-card:hover {
+  background: rgba(224, 192, 96, 0.06) !important;
+  border-color: #8a5a20 !important;
+}
+.custom-team-unit:hover { border-color: #8a5a20 !important; }
+.amv-card.amv-merge-target {
+  background: rgba(224, 192, 96, 0.12) !important;
+  border-color: #e0c060 !important;
+  box-shadow: 0 0 14px rgba(224, 192, 96, 0.8) !important;
+}
+.amv-card.amv-drop-hover {
+  background: rgba(138, 208, 208, 0.12) !important;
+  border-color: #8ad0d0 !important;
+}
+.amv-menu {
+  background: linear-gradient(180deg, #221b12 0%, #15100a 100%) !important;
+  border: 2px solid #6a4a1e !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85), inset 0 0 0 1px #5a3a10 !important;
+}
+.amv-menu-title, .amv-menu-detail { color: #a89878 !important; }
+.amv-menu-label { color: #e8dcc0 !important; }
+
+/* Team-tinted strips in custom battle. */
+.custom-team-strip {
+  background: rgba(0, 0, 0, 0.25) !important;
+}
+.custom-team-blue {
+  border-color: #5a8ac0 !important;
+  background: linear-gradient(180deg, rgba(61, 107, 153, 0.30) 0%, rgba(61, 107, 153, 0.12) 100%) !important;
+}
+.custom-team-red {
+  border-color: #c05a5a !important;
+  background: linear-gradient(180deg, rgba(153, 61, 61, 0.30) 0%, rgba(153, 61, 61, 0.12) 100%) !important;
+}
+.custom-team-blue.player {
+  border-color: #6a9ac9 !important;
+  background: linear-gradient(180deg, rgba(61, 107, 153, 0.55) 0%, rgba(61, 107, 153, 0.22) 100%) !important;
+  box-shadow: 0 0 0 2px rgba(106, 154, 201, 0.35) !important;
+}
+.custom-team-red.player {
+  border-color: #c96a6a !important;
+  background: linear-gradient(180deg, rgba(153, 61, 61, 0.55) 0%, rgba(153, 61, 61, 0.22) 100%) !important;
+  box-shadow: 0 0 0 2px rgba(201, 106, 106, 0.35) !important;
+}
+
+/* Army bar cards: the inner image box is fully transparent so the unit
+   model floats directly on the card's thematic background. */
+.army-card-image {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+/* Other screens keep the dark portrait well. */
+.amv-card-icon, .custom-palette-icon,
+.custom-team-unit-icon, .campaign-pick-icon {
+  background: radial-gradient(circle at 50% 35%, #4a3820 0%, #1a110a 100%) !important;
+  border: 1px solid #3a2410 !important;
+  border-radius: 4px !important;
+  box-shadow: inset 0 0 8px rgba(0, 0, 0, 0.55) !important;
+  box-sizing: border-box;
+}
+
+/* Progress-bar tracks. Fills keep their own colours. */
+.uip-strength-bar, .uip-stat-bar, .uip-progression-bar, .champ-xpbar {
+  background: #2a2010 !important;
+}
+
+/* ----- army bar container: shares the battlefield background ----- */
+/* The bar has no background of its own — only the cards carry borders,
+   so the whole strip reads as transparent over the canvas. !important
+   guards against any future state class (scrollable, overlap) or rule
+   adding a backing. #armyBarRed is the top-of-screen bar used in
+   free-pause local MP. */
+#armyBar, #armyBarRed {
+  background: transparent !important;
+}
+
+/* ----- army bar cards ----- */
+.army-card {
+  background: linear-gradient(180deg, #221b12 0%, #15100a 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.7),
+    inset 0 0 0 1px rgba(106, 74, 30, 0.55) !important;
+  color: #e8dcc0 !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+.army-card.team-blue { border-color: #5a8ac0 !important; }
+.army-card.team-red { border-color: #c05a5a !important; }
+.army-card:hover {
+  border-color: #e0c060 !important;
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+}
+.army-card.selected {
+  border-color: #e0c060 !important;
+  background: linear-gradient(180deg, #3a2e10 0%, #22180a 100%) !important;
+  box-shadow: 0 0 10px rgba(224, 192, 96, 0.9), inset 0 0 0 1px #d8a830 !important;
+}
+.army-card-count { color: #f0e2c0 !important; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9) !important; }
+.army-card-flag { color: #ff8080 !important; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9) !important; }
+.army-card-icon { color: #ffd860 !important; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9) !important; }
+
+/* ----- top bar ----- */
+#topBar button {
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  color: #e8dcc0 !important;
+  border-radius: 4px !important;
+  box-shadow: inset 0 0 0 1px #5a3a10, 0 2px 4px rgba(0, 0, 0, 0.7) !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+}
+#topBar button:hover {
+  background: linear-gradient(180deg, #3a2e20 0%, #22180e 100%) !important;
+  border-color: #8a5a20 !important;
+}
+
+/* ----- buttons: parchment with a bronze edge ----- */
+.menu-card, .champ-btn, .amv-btn, .cheat-btn, .profile-action, .profile-btn,
+.campaign-exit-option, .campaign-exit-cancel, .mp-btn, .lm-tab,
+.amv-split-btn, .amv-menu-item, .army-bar-tool-btn, .size-stepper-btn,
+.custom-add-btn, .custom-role-btn, .custom-mirror-btn, .champ-node,
+.ai-tier-picker button, .mt-root button {
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  border-radius: 4px !important;
+  color: #e8dcc0 !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+  box-shadow: inset 0 0 0 1px #5a3a10, 0 2px 4px rgba(0, 0, 0, 0.7) !important;
+}
+.menu-card:hover:not(:disabled), .champ-btn:hover:not(:disabled),
+.amv-btn:hover:not(:disabled), .cheat-btn:hover:not(:disabled),
+.profile-action:hover, .profile-btn:hover, .campaign-exit-option:hover,
+.campaign-exit-cancel:hover, .mp-btn:hover, .lm-tab:hover,
+.amv-split-btn:hover, .amv-menu-item:hover, .army-bar-tool-btn:hover,
+.size-stepper-btn:hover:not(:disabled), .custom-add-btn:hover,
+.custom-role-btn:hover, .custom-mirror-btn:hover:not(:disabled),
+.champ-node:hover:not(:disabled), .ai-tier-picker button:hover,
+.mt-root button:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3a2e20 0%, #22180e 100%) !important;
+  border-color: #8a5a20 !important;
+  color: #f2e4c4 !important;
+}
+.menu-card:disabled, .champ-btn:disabled, .amv-btn:disabled,
+.cheat-btn:disabled, .mt-root button:disabled {
+  opacity: 0.5 !important;
+}
+
+/* Selected / active */
+.menu-card.selected, .lm-tab.active, .lm-mode-row.active,
+.champ-node.available {
+  border-color: #e0c060 !important;
+  background: linear-gradient(180deg, #3a2e10 0%, #22180a 100%) !important;
+  color: #f2e4c4 !important;
+  box-shadow: 0 0 10px rgba(224, 192, 96, 0.6), inset 0 0 0 1px #d8a830 !important;
+}
+/* AITierPicker marks its active option with an inline background that
+   serialises as rgb(38, 53, 74); this selector picks that up. */
+.ai-tier-picker button[style*="38, 53, 74"] {
+  background: linear-gradient(180deg, #fdf3d0 0%, #ecd890 100%) !important;
+  border-color: #b8860b !important;
+  box-shadow: 0 0 8px rgba(184, 134, 11, 0.6), inset 0 0 0 1px #d8a830 !important;
+}
+.champ-node.owned {
+  background: linear-gradient(180deg, #3a5a2a 0%, #2a4020 100%) !important;
+  border-color: #6a9a5a !important;
+  color: #d0f0c0 !important;
+}
+.champ-node.owned * { color: #d0f0c0 !important; }
+.profile-btn.active {
+  background: linear-gradient(180deg, #3a5a2a 0%, #2a4020 100%) !important;
+  border-color: #6a9a5a !important;
+  color: #d0f0c0 !important;
+}
+
+/* Confirm / primary: green wax seal. */
+.menu-confirm, .champ-btn.primary, .amv-btn.amv-primary,
+.profile-action.primary, .cheat-btn, .mt-btn-primary,
+.custom-role-btn.player {
+  background: linear-gradient(180deg, #5d8a3a 0%, #35591f 100%) !important;
+  border: 1px solid #1f3010 !important;
+  color: #f6f0d0 !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6) !important;
+  box-shadow: inset 0 0 0 1px #8ab060, 0 2px 4px rgba(0, 0, 0, 0.4) !important;
+}
+.menu-confirm:hover:not(:disabled), .champ-btn.primary:hover:not(:disabled),
+.amv-btn.amv-primary:hover:not(:disabled), .profile-action.primary:hover,
+.mt-btn-primary:hover, .custom-role-btn.player:hover {
+  background: linear-gradient(180deg, #6c9c46 0%, #3f6a26 100%) !important;
+  color: #ffffff !important;
+}
+.mt-btn-primary { font-family: 'Palatino Linotype', Georgia, serif !important; }
+
+/* Danger: crimson. */
+.campaign-exit-option.danger, .profile-btn.danger, .mt-btn-danger {
+  background: linear-gradient(180deg, #a03838 0%, #6a1c1c 100%) !important;
+  border: 1px solid #3a0e0e !important;
+  color: #f8e4d4 !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6) !important;
+  box-shadow: inset 0 0 0 1px #c97a5a, 0 2px 4px rgba(0, 0, 0, 0.4) !important;
+}
+.campaign-exit-option.danger:hover, .profile-btn.danger:hover,
+.mt-btn-danger:hover {
+  background: linear-gradient(180deg, #b84646 0%, #7a2424 100%) !important;
+  color: #ffffff !important;
+}
+.campaign-exit-option.danger .campaign-exit-option-desc { color: #f0cdb8 !important; }
+.campaign-exit-option-desc { color: #6a5030 !important; }
+
+/* Muted back / reset. */
+.menu-back, .custom-reset {
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border-color: #5a3a10 !important;
+  color: #a89878 !important;
+}
+
+/* Command bar. Neutral is parchment; states are coloured seals. */
+.cmd-btn { color: #e8dcc0 !important; }
+.cmd-btn.faw-on  { background: linear-gradient(180deg, #5d8a3a, #35591f) !important; border-color: #1f3010 !important; color: #f6f0d0 !important; }
+.cmd-btn.faw-off { background: linear-gradient(180deg, #a03838, #6a1c1c) !important; border-color: #3a0e0e !important; color: #f8e4d4 !important; }
+.cmd-btn.rush-on  { background: linear-gradient(180deg, #c8862e, #8a5614) !important; border-color: #4a2e08 !important; color: #fff4d8 !important; }
+.cmd-btn.rush-off { background: linear-gradient(180deg, #8a96a8, #5a6678) !important; border-color: #2a3240 !important; color: #f0f4fa !important; }
+
+/* Team add buttons keep their side colour, muted for the dark theme. */
+.custom-add-btn.custom-add-blue {
+  background: linear-gradient(180deg, #2a4a70 0%, #1a3050 100%) !important;
+  border-color: #4a7ab0 !important;
+  color: #d0e8ff !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5) !important;
+}
+.custom-add-btn.custom-add-blue:hover {
+  background: linear-gradient(180deg, #3a5a80 0%, #2a4060 100%) !important;
+  border-color: #8ab0e0 !important;
+}
+.custom-add-btn.custom-add-red {
+  background: linear-gradient(180deg, #702a2a 0%, #501a1a 100%) !important;
+  border-color: #b04a4a !important;
+  color: #ffd0d0 !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5) !important;
+}
+.custom-add-btn.custom-add-red:hover {
+  background: linear-gradient(180deg, #803a3a 0%, #602a2a 100%) !important;
+  border-color: #e08a8a !important;
+}
+
+/* Close buttons stay bare. */
+.amv-close, .champ-close, .cheat-close, .uip-close, .custom-team-unit-remove,
+.mt-root .mt-close {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+  color: #a89878 !important;
+}
+.amv-close:hover, .champ-close:hover, .cheat-close:hover, .uip-close:hover,
+.custom-team-unit-remove:hover, .mt-root .mt-close:hover {
+  background: transparent !important;
+  color: #e0a080 !important;
+}
+.army-squad-chip button {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: inherit !important;
+  text-shadow: none !important;
+}
+
+/* ----- inputs ----- */
+.profile-create input, .mp-input, .mp-select, .lm-select, .mt-root select,
+.mt-root input[type="text"] {
+  background: #0a0805 !important;
+  border: 1px solid #6a4a1e !important;
+  color: #e8dcc0 !important;
+  border-radius: 3px !important;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7) !important;
+}
+input[type="checkbox"], input[type="radio"] { accent-color: #8a5a20; }
+.mt-root label { border-bottom-color: #5a3a10 !important; }
+.mt-root pre {
+  background: #0a0805 !important;
+  border: 1px solid #6a4a1e !important;
+  color: #e8dcc0 !important;
+}
+
+/* ----- dividers ----- */
+.menu-divider {
+  background: linear-gradient(90deg, transparent 0%, #8a5a20 30%, #8a5a20 70%, transparent 100%) !important;
+}
+.menu-divider::after { background: #8a5a20 !important; }
+.menu-brand { filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.7)) !important; }
+
+/* ----- corner chips ----- */
+#profileBadge .pb-pill, #versionBadge > div {
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  color: #e8dcc0 !important;
+  box-shadow: inset 0 0 0 1px #5a3a10 !important;
+}
+#profileBadge .pb-pill.guest { color: #a89878 !important; }
+
+/* ----- scrollbars ----- */
+.menu-panel, .champ-panel, .amv-body, .cheat-body, .uip, .mt-root,
+.mt-root *, .custom-team-units, .custom-palette, .menu-list {
+  scrollbar-color: #6a4a1e #1a140e !important;
+}
+/* Hide the army bar's phantom scrollbar. When the layout algorithm
+   reports that content fits (no .scrollable class), any sub-pixel
+   overflow would otherwise show a scrollbar that cannot be interacted
+   with because the bar has pointer-events: none. When content genuinely
+   overflows, .scrollable is added and the scrollbar is shown. */
+#armyBar:not(.scrollable) {
+  overflow-y: hidden;
+}
+
+/* ===== Campaign sidebar (roster) ===== */
+/* The left-hand panel in the campaign screens showing gold, army capacity
+   and the current roster. */
+.campaign-info {
+  background: linear-gradient(180deg, #221b12 0%, #15100a 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  border-radius: 8px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.85) !important;
+  color: #e8dcc0 !important;
+}
+.campaign-info-header {
+  background: rgba(0, 0, 0, 0.2) !important;
+  border-bottom: 1px solid #5a3a10 !important;
+  color: #f2e4c4 !important;
+}
+.campaign-info-item, .campaign-roster-item {
+  background: transparent !important;
+  border-color: #3a2e20 !important;
+  color: #e8dcc0 !important;
+}
+
+/* The viewport must never scroll. */
+html, body {
+  overflow: hidden !important;
+}
+
+/* ===== Viewport lock =====
+   The battle scene is a full-bleed canvas with absolutely-positioned
+   overlays. Any sub-pixel gap at the viewport edge — rounding, a
+   scrollbar appearing then vanishing without a re-measure, or a
+   device-pixel-ratio mismatch — shows the body background as a thin
+   dark strip that reads as a border around the whole screen.
+   
+   To guarantee no gap can ever appear, the canvas is pulled 1px
+   outside the viewport on all four sides (top/left -1px, width/height
+   +2px). This bleeds it past the screen edge, making sub-pixel rounding
+   physically impossible to expose the body background. */
+html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  outline: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+#renderCanvas {
+  position: fixed !important;
+  top: -1px !important;
+  left: -1px !important;
+  width: calc(100vw + 2px) !important;
+  height: calc(100vh + 2px) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  display: block !important;
+}
+
+#end-of-file-marker { display: none; }
+
+/* ===== Custom Battle Setup fixes ===== */
+
+/* 1. AI role button (fix illegible dark text) */
+.custom-role-btn.ai {
+  background: rgba(0, 0, 0, 0.5) !important;
+  border: 1px solid #5a3a10 !important;
+  color: #e8dcc0 !important;
+}
+.custom-role-btn.ai:hover {
+  background: rgba(0, 0, 0, 0.7) !important;
+  border-color: #8a5a20 !important;
+  color: #f2e4c4 !important;
+}
+
+/* 2. Start Battle button (override the bright green) */
+.custom-start {
+  background: linear-gradient(180deg, #2a4a1a 0%, #152a0a 100%) !important;
+  border: 1px solid #4a8a3a !important;
+  color: #d0f0c0 !important;
+  box-shadow: inset 0 0 0 1px #6a9a5a, 0 4px 12px rgba(0,0,0,0.6) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.5px !important;
+  margin-top: 0 !important; /* Fixes the spacing */
+}
+.custom-start:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3a5a2a 0%, #203a10 100%) !important;
+  border-color: #6a9a5a !important;
+  color: #ffffff !important;
+}
+.custom-start:disabled {
+  background: linear-gradient(180deg, #1a140e 0%, #0a0603 100%) !important;
+  border-color: #3a2e20 !important;
+  color: #5a4a3a !important;
+  box-shadow: none !important;
+}
+
+/* 3. Reset to Blank / Back buttons */
+.custom-reset, .custom-back {
+  background: linear-gradient(180deg, #2a2218 0%, #1a140e 100%) !important;
+  border: 1px solid #6a4a1e !important;
+  color: #a89878 !important;
+  margin-top: 0 !important;
+}
+.custom-reset:hover:not(:disabled), .custom-back:hover {
+  background: linear-gradient(180deg, #3a2e20 0%, #22180e 100%) !important;
+  border-color: #8a5a20 !important;
+  color: #f2e4c4 !important;
+}
+
+/* 4. Roster items (transparent to match the card aesthetic) */
+.custom-team-unit {
+  background: transparent !important;
+  border: 1px solid #5a3a10 !important;
+  box-shadow: none !important;
+}
+.custom-team-unit:hover {
+  border-color: #8a5a20 !important;
+}
+
+/* 5. Palette cards (keep the dark background) */
+.custom-palette-card {
+  background: #221b12 !important;
+  border: 1px solid #5a3a10 !important;
+}
+
+/ =====================================================================
+THEME UNIFICATION
+
+Every primary action shares one “gilded emerald” look.
+Toggled / active states stay legible (dark gold + bright text).
+Selectors are button.xxx so they also beat “.mt-root button”.
+===================================================================== */
+
+button.menu-confirm,
+button.custom-start,
+button.champ-btn.primary,
+button.amv-btn.amv-primary,
+button.profile-action.primary,
+button.mt-btn-primary,
+button.cheat-btn {
+background: linear-gradient(180deg, 
+#4d6c2e 0%, 
+#2c4718 52%, 
+#1d3010 100%) !important;
+border: 1px solid 
+#c8a04a !important;
+border-radius: 4px !important;
+color: 
+#f7e9bd !important;
+font-weight: 700 !important;
+letter-spacing: 0.08em !important;
+text-shadow: 0 1px 1px rgba(0, 0, 0, 0.85) !important;
+box-shadow:
+inset 0 0 0 1px rgba(255, 224, 150, 0.22),
+inset 0 1px 0 rgba(255, 244, 200, 0.28),
+0 3px 8px rgba(0, 0, 0, 0.7) !important;
+}
+button.menu-confirm,
+button.custom-start {
+text-transform: uppercase !important;
+}
+button.menu-confirm:hover:not(:disabled),
+button.custom-start:hover:not(:disabled),
+button.champ-btn.primary:hover:not(:disabled),
+button.amv-btn.amv-primary:hover:not(:disabled),
+button.profile-action.primary:hover:not(:disabled),
+button.mt-btn-primary:hover:not(:disabled),
+button.cheat-btn:hover:not(:disabled) {
+background: linear-gradient(180deg, 
+#5d8038 0%, 
+#38591f 52%, 
+#264016 100%) !important;
+border-color: 
+#e8c868 !important;
+color: 
+#fff6d8 !important;
+box-shadow:
+inset 0 0 0 1px rgba(255, 230, 160, 0.35),
+inset 0 1px 0 rgba(255, 244, 200, 0.35),
+0 0 12px rgba(224, 192, 96, 0.45),
+0 3px 8px rgba(0, 0, 0, 0.7) !important;
+}
+button.menu-confirm:disabled,
+button.custom-start:disabled,
+button.champ-btn.primary:disabled,
+button.amv-btn.amv-primary:disabled,
+button.cheat-btn:disabled {
+background: linear-gradient(180deg, 
+#2a2218 0%, 
+#1a140e 100%) !important;
+border-color: 
+#4a3a22 !important;
+color: 
+#7a6a4c !important;
+box-shadow: none !important;
+text-shadow: none !important;
+opacity: 0.85 !important;
+}
+
+/* Player / AI role toggle (custom battle + scenario modal). */
+button.custom-role-btn.player,
+.mt-root button.custom-role-btn.player {
+background: linear-gradient(180deg, 
+#4d6c2e 0%, 
+#2c4718 100%) !important;
+border-color: 
+#c8a04a !important;
+color: 
+#f7e9bd !important;
+box-shadow: inset 0 0 0 1px rgba(255, 224, 150, 0.22), 0 2px 4px rgba(0, 0, 0, 0.6) !important;
+}
+button.custom-role-btn.player:hover,
+.mt-root button.custom-role-btn.player:hover:not(:disabled) {
+background: linear-gradient(180deg, 
+#5d8038 0%, 
+#38591f 100%) !important;
+border-color: 
+#e8c868 !important;
+color: 
+#fff6d8 !important;
+}
+button.custom-role-btn.ai,
+.mt-root button.custom-role-btn.ai {
+background: linear-gradient(180deg, 
+#2a2218 0%, 
+#1a140e 100%) !important;
+border-color: 
+#6a4a1e !important;
+color: 
+#cdbf9c !important;
+}
+button.custom-role-btn.ai:hover,
+.mt-root button.custom-role-btn.ai:hover:not(:disabled) {
+background: linear-gradient(180deg, 
+#3a2e20 0%, 
+#22180e 100%) !important;
+border-color: 
+#8a5a20 !important;
+color: 
+#f2e4c4 !important;
+}
+
+/* AI tier picker: the active option used to be cream with light text. */
+.ai-tier-picker button.ai-tier-btn:not(.active) {
+color: 
+#b9a987 !important;
+}
+.ai-tier-picker button.ai-tier-btn.active,
+.ai-tier-picker button.ai-tier-btn.active:hover,
+.mt-root .ai-tier-picker button.ai-tier-btn.active:hover:not(:disabled) {
+background: linear-gradient(180deg, 
+#6e5116 0%, 
+#402e0a 100%) !important;
+border-color: 
+#e0c060 !important;
+color: 
+#fff2c8 !important;
+font-weight: 700 !important;
+text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9) !important;
+box-shadow: 0 0 8px rgba(224, 192, 96, 0.55), inset 0 0 0 1px 
+#d8a830 !important;
+}
+
+/* Selected rows keep readable secondary text. */
+.lm-mode-row.active .lm-mode-desc,
+.menu-card.selected .menu-card-desc {
+color: 
+#d8c8a0 !important;
+}
+
+/* 6. Palette +Red / +Blue buttons */
+.custom-add-btn.custom-add-blue {
+  background: linear-gradient(180deg, #2a4a70 0%, #1a3050 100%) !important;
+  border-color: #4a7ab0 !important;
+  color: #d0e8ff !important;
+}
+.custom-add-btn.custom-add-blue:hover {
+  background: linear-gradient(180deg, #3a5a80 0%, #2a4060 100%) !important;
+  border-color: #8ab0e0 !important;
+}
+.custom-add-btn.custom-add-red {
+  background: linear-gradient(180deg, #702a2a 0%, #501a1a 100%) !important;
+  border-color: #b04a4a !important;
+  color: #ffd0d0 !important;
+}
+.custom-add-btn.custom-add-red:hover {
+  background: linear-gradient(180deg, #803a3a 0%, #602a2a 100%) !important;
+  border-color: #e08a8a !important;
 }

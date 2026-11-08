@@ -3,11 +3,11 @@
 // the player's own army. The board row uses only `playerName`.
 //
 // The names are written with \u escapes so the file survives any editor
-// or encoding round-trip: 'Tayip Sultan \u015eevket' is "Tayip Sultan Şevket".
+// or encoding round-trip.
 export const AUTO_PLAYER_PROFILES = [
   {
     id: 'best',
-    playerName: 'Tayip Sultan \u015eevket',
+    playerName: 'Tayyar I',
     tierName: 'best_possible'
   },
   {

@@ -239,6 +239,14 @@ const eliteGoblinSwordsman = {
   id: 'eliteGoblinSwordsman',
   displayName: 'Elite Swordsman',
   bodyVariant: 'goblinElite',
+  // Still under development: kept out of the campaign on both sides.
+  // Absent means available. Custom battles and multiplayer are unaffected.
+  campaignPlayerAvailable: false,
+  campaignAiAvailable: false,
+  // Campaign pools (rewards, initial picks, shop) skip types with this set
+  // to false. Absent means available. Custom battles and multiplayer are
+  // not affected.
+  campaignAvailable: false,
   description: 'A goblin swordsman in clean kit — team-colour crest and tunic. Visual variant of the common goblin swordsman — same mechanics.'
 };
 
@@ -301,6 +309,11 @@ const goblinSlave = {
   // future UI skin from inheriting a helmet the slave does not wear.
   helmetType: null,
   bodyVariant: 'goblinSlave',
+  // Campaign enemies may field slaves; the player never gets them as
+  // rewards, initial picks or shop stock. Absent means available.
+  campaignPlayerAvailable: false,
+  // Campaign pools skip types with this set to false. Absent means available.
+  campaignAvailable: false,
   // The club uses the sword's weaponType (see the block comment above
   // this entry — the sim's sword combat tables drive the swing, and the
   // render layer substitutes the club mesh). But a club is not a

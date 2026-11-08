@@ -312,13 +312,52 @@ export class BattleSimulation {
   _updateSoldierPowerCache() {
     for (const unit of this.units) {
       const fighters = unit.getNonRoutingAliveCount();
-      if (fighters === 0) {
-        for (const s of unit.soldiers) s.soldierPowerCache = 0;
+      const aliveCount = unit.getAliveSoldiers().length;
+
+      // Nobody left alive at all — clean zero, no XP accrual from
+      // swinging at corpses.
+      if (aliveCount === 0) {
+        for (const s of unit.soldiers) {
+          s.soldierPowerCache = 0;
+          s.routingXpCache = 0;
+        }
         continue;
       }
-      const total = unit.getPower().total;
-      const perSoldier = total / fighters;
-      for (const s of unit.soldiers) s.soldierPowerCache = perSoldier;
+
+      if (fighters > 0) {
+        // Normal case: per-fighting-soldier rate. Remember it so a
+        // fully routed unit can still fall back to a routing rate
+        // after the last fighter breaks.
+        const total = unit.getPower().total;
+        const perSoldier = total / fighters;
+        unit._lastFightingPowerPerSoldier = perSoldier;
+        // Routing / shattered soldiers teach at one-third the rate of
+        // a fighter of the same unit — see CombatResolutionSystem
+        // ._accrueChampionXp and ProjectileSystem._resolveHit for the
+        // consumption side. isBattleOver() counts routers as "still
+        // fighting, may rally", so the pursuit phase produces real
+        // combat; a fleeing enemy is not defending itself, so the
+        // attacker learns less per swing.
+        const routingRate = perSoldier / 3;
+        for (const s of unit.soldiers) {
+          s.soldierPowerCache = perSoldier;
+          s.routingXpCache = routingRate;
+        }
+      } else {
+        // Fully routed / shattered. UnitPower.compute excludes routing
+        // soldiers, so getPower().total is 0 here by design — that is
+        // what display and AI should see. For XP accrual only, fall
+        // back to one-third of the last known per-fighter rate so
+        // swinging at a fleeing enemy still teaches the attacker. A
+        // unit that spawned already routing (no prior fighting state,
+        // e.g. a hand-edited save) contributes 0; defensive but
+        // acceptable.
+        const routingRate = (unit._lastFightingPowerPerSoldier || 0) / 3;
+        for (const s of unit.soldiers) {
+          s.soldierPowerCache = 0;
+          s.routingXpCache = routingRate;
+        }
+      }
     }
   }
 

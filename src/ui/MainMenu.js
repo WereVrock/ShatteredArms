@@ -14,6 +14,7 @@
 // paint.
 //
 // Card construction lives in MenuCard.js — shared with ScenarioMenu.
+import './MedievalTheme.js';
 import { brandMarkSvg } from './BrandMark.js';
 import { createMenuCard, createMenuButton } from './MenuCard.js';
 

@@ -1,9 +1,16 @@
-// ===== CustomBattleSetup.js =====
-// ===== CustomBattleSetup.js =====
 // Setup screen for a custom battle. Two teams, stacked top and bottom, each
-// laid out as a HORIZONTAL strip of unit tiles. A shared palette sits
-// between the two strips and adds to whichever team you press (+Blue /
-// +Red). A skeleton-mode toggle applies to all subsequent additions.
+// laid out as a wrapping strip of unit tiles. A shared palette sits between
+// the two strips and adds to whichever team you press (+Blue / +Red). A
+// skeleton-mode toggle applies to all subsequent additions.
+//
+// Layout: the panel is a flex column bounded to the viewport. Title, skeleton
+// row and action buttons keep their size; the palette and the two team
+// strips share the remaining height and scroll INSIDE themselves, so a
+// roster that wraps onto many rows never pushes the Start button off-screen.
+//
+// Unit size: every roster tile carries a [-] count [+] stepper that scales
+// the unit by whole multiples of its base size (see RosterScaling). Power
+// is recomputed from the new count on the next render.
 //
 // Player/AI role: each team's header carries a role button. Clicking it
 // makes that team the player and the other team AI. Clicking the button on
@@ -27,14 +34,24 @@
 
 import { UnitTypes } from '../config/UnitTypes.js';
 import { UnitFamilies } from '../campaign/UnitFamilies.js';
-import { CampaignConfig } from '../campaign/CampaignConfig.js';
 import { raceSupportsUndead } from '../config/RaceConfig.js';
 import { unitIconSvg } from './UnitIcon.js';
 import { insertPowerStatsAbove } from './PowerBadge.js';
-import { buildPreviewUnit } from '../campaign/UnitPreview.js';
+import { buildPreviewUnit, previewPower } from '../campaign/UnitPreview.js';
 import { AITierConfig } from '../config/AITierConfig.js';
 import { AITierPreference } from '../config/AITierPreference.js';
 import { AITierPicker } from './AITierPicker.js';
+import { baseSizeFor, stepSoldierCount } from '../scenarios/RosterScaling.js';
+import { buildRosterUnitTile } from './RosterUnitTile.js';
+import { captureScroll, restoreScroll } from './ScrollMemory.js';
+
+// Scrollable regions whose position survives a re-render.
+const SCROLL_TARGETS = {
+  panel: '.custom-battle-panel',
+  red: '.custom-team-red .custom-team-units',
+  blue: '.custom-team-blue .custom-team-units',
+  palette: '.custom-palette'
+};
 
 export class CustomBattleSetup {
   constructor(rootElement, { onStart, onBack, onReset, unitInfoPanel }) {
@@ -131,17 +148,17 @@ export class CustomBattleSetup {
 
   _render() {
     // Dispose every previously-built picker before rebuilding the DOM.
-    // _render() runs on every add/remove/role-toggle; each global-mode
-    // picker registers an AITierPreference subscription at construction,
-    // so an undisposed list is a real leak. The list is rebuilt below as
-    // team strips render their own per-team pickers.
+    // _render() runs on every add/remove/resize/role-toggle; each
+    // global-mode picker registers an AITierPreference subscription at
+    // construction, so an undisposed list is a real leak. The list is
+    // rebuilt below as team strips render their own per-team pickers.
     for (const p of this._tierPickers) p.dispose();
     this._tierPickers = [];
 
-    // Preserve scroll position across re-renders triggered by add/remove,
-    // so a long panel doesn't jump the user back to the top on each click.
-    const prevPanel = this.root.querySelector('.custom-battle-panel');
-    const prevScroll = prevPanel ? prevPanel.scrollTop : 0;
+    // The panel, both team strips and the palette scroll independently;
+    // remember all of them so a click does not jump any list back to the
+    // top.
+    const savedScroll = captureScroll(this.root, SCROLL_TARGETS);
 
     this.root.innerHTML = '';
     this.root.classList.remove('hidden');
@@ -159,7 +176,7 @@ export class CustomBattleSetup {
     sub.textContent = 'Choose units for both sides, pick which one you command, then start the battle.';
     panel.appendChild(sub);
 
-    // Per-team AI difficulty now lives inside each AI team's header strip
+    // Per-team AI difficulty lives inside each AI team's header strip
     // (see _buildTeamStrip). No global picker is rendered here — a
     // top-level control next to the per-team ones would be confusing
     // about which value wins.
@@ -181,13 +198,12 @@ export class CustomBattleSetup {
 
     this.root.appendChild(panel);
 
-    if (prevScroll > 0) panel.scrollTop = prevScroll;
+    restoreScroll(this.root, SCROLL_TARGETS, savedScroll);
   }
 
-  // One team: header (role button + label + mirror button) above a
-  // horizontal strip of unit tiles. The strip scrolls horizontally if the
-  // roster overflows the panel width — no wrapping, so the two teams stay
-  // visually distinct rows rather than bleeding into each other.
+  // One team: header (role button + label + mirror button + AI tier) above
+  // a wrapping strip of unit tiles. The tile area scrolls vertically inside
+  // the strip when the roster needs more rows than the strip is given.
   _buildTeamStrip(teamId, roster, label) {
     const strip = document.createElement('div');
     strip.className = `custom-team-strip custom-team-${teamId}`;
@@ -209,18 +225,19 @@ export class CustomBattleSetup {
 
     // Team aggregates. Total soldier count = sum of every entry's
     // aliveCount; total power = sum of every entry's full-strength
-    // preview power. Both are computed on the same scale the per-card
-    // badges use, so the header and the tile badges agree.
+    // preview power. Both are computed on the same scale the per-tile
+    // badges use, so the header and the tiles agree.
     //
     // Both are recomputed on every render (this function runs from
-    // _render), so removing a tile updates the header immediately.
+    // _render), so removing or resizing a tile updates the header
+    // immediately.
     let totalSoldiers = 0;
     let totalPower = 0;
     for (const e of roster) {
       totalSoldiers += e.aliveCount || 0;
       const typeDef = UnitTypes[e.typeId];
       if (typeDef) {
-        totalPower += this._powerOf(typeDef, e.isUndead, e.aliveCount);
+        totalPower += previewPower(typeDef, e.isUndead, e.aliveCount);
       }
     }
 
@@ -240,8 +257,7 @@ export class CustomBattleSetup {
 
     // Per-team AI difficulty picker. Rendered only for AI-controlled
     // teams — the player team has no difficulty to speak of. Compact
-    // variant so it sits inline in the header without changing the
-    // header's height.
+    // variant so it sits inline in the header.
     //
     // Controlled-mode picker: it neither reads nor writes the shared
     // AITierPreference, so each team's selection is independent. The
@@ -269,7 +285,8 @@ export class CustomBattleSetup {
       units.appendChild(empty);
     } else {
       for (const entry of roster) {
-        units.appendChild(this._buildUnitTile(entry, roster, teamId));
+        const tile = this._buildUnitTile(entry, roster, teamId);
+        if (tile) units.appendChild(tile);
       }
     }
 
@@ -314,73 +331,38 @@ export class CustomBattleSetup {
     return btn;
   }
 
+  // Roster tile. DOM construction lives in RosterUnitTile; this method only
+  // supplies the data (power at the entry's CURRENT count) and the three
+  // callbacks. On Custom Battle every entry is full-strength by
+  // construction, but reading aliveCount keeps the number correct after a
+  // resize.
   _buildUnitTile(entry, roster, teamId) {
-    const tile = document.createElement('div');
-    tile.className = 'custom-team-unit';
-
     const typeDef = UnitTypes[entry.typeId];
+    if (!typeDef) return null;
 
-    const icon = document.createElement('div');
-    icon.className = 'custom-team-unit-icon';
-    icon.innerHTML = unitIconSvg(typeDef, entry.isUndead);
-    tile.appendChild(icon);
-
-    const nameEl = document.createElement('div');
-    nameEl.className = 'custom-team-unit-name';
-    const baseName = typeDef.displayName;
-    nameEl.textContent = entry.isUndead ? `Skeleton ${baseName}` : baseName;
-    nameEl.title = nameEl.textContent;
-    tile.appendChild(nameEl);
-
-    const countEl = document.createElement('div');
-    countEl.className = 'custom-team-unit-count';
-    countEl.textContent = `×${entry.aliveCount}`;
-    tile.appendChild(countEl);
-
-    // Stat row (power + soldier count) at the entry's CURRENT alive
-    // count, placed in normal flow above the icon so it does not cover
-    // the portrait. On Custom Battle every entry is full-strength by
-    // construction (nothing has fought), but reading aliveCount keeps
-    // the number correct if a future deployed-strength editor lands.
-    insertPowerStatsAbove(icon, {
-      power: this._powerOf(typeDef, entry.isUndead, entry.aliveCount),
-      soldiers: entry.aliveCount
+    return buildRosterUnitTile({
+      entry,
+      power: previewPower(typeDef, entry.isUndead, entry.aliveCount),
+      onStep: (delta) => this._stepUnitSize(entry, delta),
+      onRemove: () => this._removeEntry(roster, entry),
+      // Right-click opens the info panel with a preview built from this
+      // entry. Without a panel, right-click falls through to the browser.
+      onInspect: this.unitInfoPanel
+        ? (anchor) => this._openPreview(
+            entry.typeId,
+            entry.isUndead,
+            entry.aliveCount,
+            entry.maxCount,
+            teamId,
+            anchor
+          )
+        : null
     });
-
-    // Right-click opens the info panel with a preview built from this
-    // entry. Guarded on unitInfoPanel being supplied (see constructor);
-    // without it, right-click falls through to the browser default.
-    if (this.unitInfoPanel) {
-      tile.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        this._openPreview(
-          entry.typeId,
-          entry.isUndead,
-          entry.aliveCount,
-          entry.maxCount,
-          teamId,
-          tile
-        );
-      });
-    }
-
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'custom-team-unit-remove';
-    removeBtn.textContent = '×';
-    removeBtn.title = 'Remove';
-    removeBtn.addEventListener('click', () => {
-      const i = roster.indexOf(entry);
-      if (i >= 0) roster.splice(i, 1);
-      this._render();
-    });
-    tile.appendChild(removeBtn);
-
-    return tile;
   }
 
   _buildPalette() {
     const wrap = document.createElement('div');
+    wrap.className = 'custom-palette-section';
 
     const paletteTitle = document.createElement('div');
     paletteTitle.className = 'custom-palette-title';
@@ -404,7 +386,7 @@ export class CustomBattleSetup {
     // preview of what "+Blue"/"+Red" would add RIGHT NOW, and the current
     // skeleton toggle is part of that.
     const isUndead = this._undeadFor(typeDef);
-    const size = CampaignConfig.defaultSizes[typeId] || 15;
+    const size = baseSizeFor(typeDef);
 
     const card = document.createElement('div');
     card.className = 'custom-palette-card';
@@ -420,15 +402,15 @@ export class CustomBattleSetup {
     card.appendChild(name);
 
     // Power + soldier count, placed in normal flow above the icon so they
-    // do not cover the portrait. Same scale as a live unit's in-battle
-    // power score, so two palette options can be ranked at a glance, and
-    // `size` is the count the +Blue / +Red buttons would add — matching
-    // CampaignConfig.defaultSizes so the preview matches what lands in the
-    // roster.
-    insertPowerStatsAbove(icon, {
-      power: this._powerOf(typeDef, isUndead, size),
+    // do not cover the portrait. `size` is the count the +Blue / +Red
+    // buttons would add (the type's base size), so the preview matches
+    // what lands in the roster. This is the palette's ONE place the base
+    // count is shown; roster tiles show their count in the stepper.
+    const stats = insertPowerStatsAbove(icon, {
+      power: previewPower(typeDef, isUndead, size),
       soldiers: size
     });
+    if (stats) stats.style.margin = '0';
 
     // Right-click opens the info panel with a preview of this type. Team
     // defaults to the player's team so the panel's colour stripe matches
@@ -544,23 +526,6 @@ export class CustomBattleSetup {
 
   // --- card info panel -----------------------------------------------------
 
-  // Shared power read for every per-card badge and the team-strip
-  // aggregate. Routes through buildPreviewUnit -> UnitPower.compute,
-  // the same path computeUnitPrice and the AI's Unit.getPower use, so
-  // the setup screen, the campaign shop, and the in-battle score all
-  // report the same number for the same type / undead / count.
-  _powerOf(typeDef, isUndead, aliveCount) {
-    const preview = buildPreviewUnit({
-      id: 'power-preview',
-      typeDef,
-      isUndead,
-      aliveCount,
-      maxCount: aliveCount,
-      teamId: 'blue'
-    });
-    return preview.getPower().total;
-  }
-
   // Shared right-click handler for palette cards and roster tiles. Builds
   // a full-strength preview of the unit the card describes and opens the
   // shared UnitInfoPanel on it. No-op if the panel was not supplied or the
@@ -597,16 +562,29 @@ export class CustomBattleSetup {
   }
 
   _addUnit(side, typeId) {
-    const size = CampaignConfig.defaultSizes[typeId] || 15;
+    const typeDef = UnitTypes[typeId];
+    const size = baseSizeFor(typeDef);
     const entry = {
       id: `custom-${side}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       typeId,
-      isUndead: this._undeadFor(UnitTypes[typeId]),
+      isUndead: this._undeadFor(typeDef),
       aliveCount: size,
       maxCount: size
     };
     if (side === 'blue') this.blueRoster.push(entry);
     else this.redRoster.push(entry);
+    this._render();
+  }
+
+  // Custom Battle has no power budget and no size cap, so + can be
+  // clicked without limit. +/- moves by one base size.
+  _stepUnitSize(entry, delta) {
+    if (stepSoldierCount(entry, delta)) this._render();
+  }
+
+  _removeEntry(roster, entry) {
+    const i = roster.indexOf(entry);
+    if (i >= 0) roster.splice(i, 1);
     this._render();
   }
 
@@ -619,7 +597,8 @@ export class CustomBattleSetup {
   // The `custom-${toTeamId}-...` prefix keeps the regenerated ids
   // disjoint from the source's `custom-${fromTeamId}-...` ids even if
   // the loop runs inside a single millisecond, and the random suffix
-  // guarantees uniqueness within the new roster.
+  // guarantees uniqueness within the new roster. Sizes are copied with
+  // the entry, so a mirrored x3 unit stays x3.
   //
   // No-op when the source is empty: the header's mirror button is
   // disabled in that case, but a direct call from somewhere else should
@@ -651,17 +630,7 @@ export class CustomBattleSetup {
     this._render();
   }
 
-  // Reset wipes the in-memory rosters AND asks the caller to clear the
-  // persisted last-setup slot. Both halves are required for the button to
-  // mean what it says: without the callback, closing the setup screen and
-  // reopening it would restore the pre-reset state from storage, which
-  // reads as the reset having silently failed.
-  //
-  // The ACTIVE slot (the currently-running battle) is deliberately not
-  // touched — by the time this screen is open there is no active battle,
-  // and if there somehow were, blowing it away from a UI button would be
-  // the wrong place to do it.
-// Reset wipes the in-memory rosters but deliberately preserves the
+  // Reset wipes the in-memory rosters but deliberately preserves the
   // player/AI role selection. Role is independent of roster contents:
   // a spectator (both-AI) setup that gets its rosters cleared must NOT
   // silently become player-vs-AI on the next open.
@@ -674,6 +643,10 @@ export class CustomBattleSetup {
   // silently promoted a spectator setup back to player-vs-AI.
   // Writing back the empty-rosters-with-current-role payload keeps the
   // "reset is sticky" contract AND survives a close-and-reopen.
+  //
+  // The ACTIVE slot (the currently-running battle) is deliberately not
+  // touched — by the time this screen is open there is no active battle,
+  // and blowing it away from a UI button would be the wrong place to do it.
   //
   // aiTierByTeamId IS re-seeded from the current global preference:
   // tiers are a property of a fresh roster, not of the role pick.

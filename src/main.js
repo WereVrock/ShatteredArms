@@ -7,7 +7,7 @@ import { SelectionBoxView } from './render/SelectionBoxView.js';
 import { HudView } from './ui/HudView.js';
 import { MainMenu } from './ui/MainMenu.js';
 import { ScenarioMenu } from './ui/ScenarioMenu.js';
-import { ArmyBarView } from './ui/ArmyBarView.js';
+import { ArmyBarView } from './ui/armybar/ArmyBarView.js';
 import { CommandBarView } from './ui/CommandBarView.js';
 import { CameraController } from './input/CameraController.js';
 import { SelectionController } from './input/SelectionController.js';
@@ -41,9 +41,13 @@ import { DeploymentPanel } from './ui/DeploymentPanel.js';
 import { DeploymentConfig } from './config/DeploymentConfig.js';
 import { SettingsStore } from './ui/settings/SettingsStore.js';
 import { SettingsPanel } from './ui/settings/SettingsPanel.js';
+import { UiFontScale } from './ui/settings/UiFontScale.js';
+import { ensureMedievalThemeStyles } from './ui/MedievalTheme.js';
 import { PauseMenuPanel } from './ui/PauseMenuPanel.js';
 import { BattleResultView } from './ui/BattleResultView.js';
 import { UnitInfoPanel } from './ui/UnitInfoPanel.js';
+import { CheatPanelController } from './cheats/CheatPanelController.js';
+import { isCheatUser } from './cheats/CheatAccess.js';
 import { HelpPanel } from './ui/HelpPanel.js';
 import { FpsCounter } from './ui/FpsCounter.js';
 import { PowerBalanceView } from './ui/PowerBalanceView.js';
@@ -281,11 +285,29 @@ function promptCampaignExit() {
 
 // --- Menu wiring ----------------------------------------------------------
 
+// A game, not a website: no browser context menu. Text inputs and the
+// debug windows keep it so their text can still be copied by hand.
+document.addEventListener('contextmenu', (e) => {
+  const t = e.target;
+  if (t && t.closest && t.closest('input, textarea, #hud, .cheat-root')) return;
+  e.preventDefault();
+});
+
+UiFontScale.init();
+
+// Fantasy-themed cursor set + the themed tooltip stylesheet. Cursors
+// apply page-wide, so this must run at boot regardless of whether a
+// battle has started (menus use the same cursor theme).
+ensureMedievalThemeStyles();
+
 const settingsPanel = new SettingsPanel();
 
 const battleResultView = new BattleResultView();
 
 const unitInfoPanel = new UnitInfoPanel();
+
+// Debug cheat panel, opened from the debug HUD for the "wv" profile only.
+const cheatController = new CheatPanelController();
 
 const helpPanel = new HelpPanel();
 
@@ -637,6 +659,9 @@ document.addEventListener('keydown', (e) => {
 
   // Unit info panel owns Escape while it is open; skip so its own close
   // handler (registered on document during open()) does its job.
+  // Cheat panel owns Escape while open.
+  if (cheatController.isOpen()) { cheatController.close(); return; }
+
   if (unitInfoPanel.isOpen()) return;
 
   // Settings panel has no Escape handler of its own — close it here.
@@ -798,7 +823,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   // global appears; leave it false and ordinary play is completely
   // silent. Nothing outside the block reads either the wrappers or the
   // window global, so gating the IIFE on the flag is sufficient.
-  const RENDER_DIAG_ENABLED = true;
+  const RENDER_DIAG_ENABLED = false;
   if (RENDER_DIAG_ENABLED) (() => {
     if (window.__diag && typeof window.__diag.off === 'function') {
       try { window.__diag.off(); } catch (e) { /* previous renderer gone */ }
@@ -1063,6 +1088,25 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   const orderPreviewView = new OrderPreviewView(sceneSetup.scene);
   const selectionBoxView = new SelectionBoxView(document.body);
   const hudView = new HudView(hudElement);
+
+  // Cheats button (debug HUD only, single-player, "wv" profile). Opening
+  // the panel pauses the sim; closing restores the previous pause state.
+  // simulation is declared further down; the click fires long after.
+  hudView.onCheatsClick = () => {
+    if (mp || !isCheatUser()) return;
+    _pausedBeforePauseMenu = isPaused;
+    isPaused = true;
+    pauseIndicator.classList.toggle('hidden', !isPaused);
+    cheatController.open({
+      simulation,
+      playerTeamId: scenario.playerTeamId,
+      campaignState: activeCampaignBattle ? activeCampaignBattle.state : null,
+      onClose: () => {
+        isPaused = _pausedBeforePauseMenu;
+        pauseIndicator.classList.toggle('hidden', !isPaused);
+      }
+    });
+  };
 
   const simulation = new BattleSimulation(units, {
     playerTeamId: scenario.playerTeamId
@@ -1391,7 +1435,8 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
       simulation.debugHistoryEnabled = true;
       hudView.enableHistory();
     }
-    hudToggle.style.display = unit ? '' : 'none';
+    hudToggle.style.display = unit ? 'inline-block' : 'none';
+    hudView.setCheatsAvailable(!mp && isCheatUser());
     if (!unit) hudElement.classList.add('hidden');
     fpsCounter.setDebugOverride(!!unit);
     const intentInfo = findIntentInfo(simulation.battleAI, unit);

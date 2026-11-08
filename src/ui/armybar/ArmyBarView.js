@@ -20,14 +20,30 @@
 // panel, not a scoreboard. To show both sides later, drop the teamId check
 // in update() (the .team-red CSS rules are already there for it).
 
-import { unitIconSvg } from './UnitIcon.js';
-import { attachRankBadge } from './UnitRank.js';
-import { SettingsStore } from './settings/SettingsStore.js';
+import { unitIconSvg } from '../UnitIcon.js';
+import { ArmyBarOrder } from './ArmyBarOrder.js';
+import { ArmyBarDrag } from './ArmyBarDrag.js';
+import { ArmyControlGroups } from './ArmyControlGroups.js';
+import { ArmyBarHotkeys } from './ArmyBarHotkeys.js';
+import { ArmySquads } from './ArmySquads.js';
+import { ArmyBarReorderer } from './ArmyBarReorderer.js';
+import { ArmyBarToolbar } from './ArmyBarToolbar.js';
+import { ArmySquadOverlay } from './ArmySquadOverlay.js';
+import { ArmyBarZoom } from './ArmyBarZoom.js';
+import { ensureArmyBarExtrasStyles } from './ArmyBarExtrasStyles.js';
+import { attachRankBadge } from '../UnitRank.js';
+import { SettingsStore } from '../settings/SettingsStore.js';
+import { getMedievalTooltip } from '../MedievalTheme.js';
 import {
   computeArmyBarLayout,
   ARMY_BAR_SIDE_MARGIN,
   ARMY_BAR_MAX_HEIGHT_FRACTION
 } from './ArmyBarLayout.js';
+
+// rootElement -> the ArmyBarView currently driving it. #armyBar is reused
+// across battles (a campaign runs several per page load), so a new view
+// disposes the previous one for the same root.
+const viewByRoot = new WeakMap();
 
 // Icon shown in the top-right corner. One glyph per unit, chosen by
 // _activityFor() with a strict priority order (fighting > shooting >
@@ -123,6 +139,13 @@ export class ArmyBarView {
   // the 3D scene, per the project's UI-logic separation rule.
   constructor(rootElement, selectionController, playerTeamId, onUnitFocus = null) {
     ensureBarStyles();
+    ensureArmyBarExtrasStyles();
+
+    // Tear the previous view down first so its document-level listeners
+    // and body-level toolbar / squad frames do not pile up.
+    const previousView = viewByRoot.get(rootElement);
+    if (previousView) previousView.dispose();
+    viewByRoot.set(rootElement, this);
 
     // Wipe any cards left by a previous battle. #armyBar is a fixed
     // DOM node shared across every battle, so when a new battle starts
@@ -144,6 +167,63 @@ export class ArmyBarView {
     // context menu — the bar still works when constructed without it.
     this.onUnitInfo = null;
 
+    // Player-defined card order, control groups, drag-to-reorder and the
+    // digit-key hotkeys. All state lives in these helper classes; this view
+    // only asks them questions and forwards DOM events.
+    this.order = new ArmyBarOrder();
+    this.groups = new ArmyControlGroups();
+    this.squads = new ArmySquads();
+    this.reorderer = new ArmyBarReorderer(this.order, this.squads);
+    this.drag = new ArmyBarDrag(
+      rootElement,
+      (drop) => this._handleDrop(drop),
+      (kind, id, targetUnitId) => this._isValidDropTarget(kind, id, targetUnitId)
+    );
+    this.hotkeys = new ArmyBarHotkeys({
+      owner: rootElement,
+      groups: this.groups,
+      selectionController,
+      getUnits: () => Array.from(this.unitById.values())
+        .filter((u) => u.teamId === this.playerTeamId),
+      onUnitFocus: (u) => { if (this.onUnitFocus) this.onUnitFocus(u); }
+    });
+    this.hotkeys.attach();
+
+    // Group / selection actions shared by the hotkeys, the toolbar and the
+    // squad tabs.
+    this.actions = this.hotkeys.actions;
+
+    // Card size multiplier set by the toolbar's - and + buttons. Stored per
+    // team so the red and blue bars of local multiplayer keep their own.
+    this.zoom = new ArmyBarZoom('sa.armyBarZoom.' + playerTeamId);
+
+    // Floating toolbar (sort, make squad, card size) and the squad frame
+    // overlay. Both live on document.body, not inside the bar, so they
+    // never take part in the card order or layout.
+    this.toolbar = new ArmyBarToolbar(rootElement, {
+      onSort: () => this._sortByType(),
+      onCreateSquad: () => this._createSquadFromSelection(),
+      onZoom: (direction) => this._changeZoom(direction)
+    });
+    this.overlay = new ArmySquadOverlay(rootElement, this.squads, {
+      onSelect: (squadId, additive) => this._selectSquad(squadId, additive),
+      onToggle: (squadId) => this.squads.toggleCollapsed(squadId),
+      onToggleLock: (squadId) => this.squads.toggleLocked(squadId),
+      onDisband: (squadId) => this.squads.disband(squadId),
+      attachDrag: (chipEl, squadId) => this.drag.attachSquad(chipEl, squadId)
+    });
+
+    // Display bookkeeping. _displayIds is the order the player currently
+    // sees, hidden (collapsed) cards included. The overlay and toolbar are
+    // only recomputed when _overlayDirty is set, never per frame.
+    this._displayIds = [];
+    this._displaySig = '';
+    this._overlayDirty = true;
+    this._wasHidden = false;
+    this._squadsVersion = -1;
+    this._onScroll = () => { this._overlayDirty = true; };
+    rootElement.addEventListener('scroll', this._onScroll, { passive: true });
+
     // unitId -> { el, flagEl, iconEl, imageEl, countEl }
     this.cardByUnitId = new Map();
     // unitId -> Unit, refreshed every update() so the click handler never
@@ -155,7 +235,7 @@ export class ArmyBarView {
     this._layoutKey = '';
   }
 
-  update(units) {
+update(units) {
     // Bar visibility is read once per update() call — not per card — so
     // a settings change takes effect on the next render frame without
     // requiring a subscription or dispose() plumbing. The `!== false`
@@ -168,12 +248,17 @@ export class ArmyBarView {
     this.unitById.clear();
     for (const u of units) this.unitById.set(u.id, u);
 
+    const playerUnits = units.filter((u) => u.teamId === this.playerTeamId);
+    // Player order with every squad made contiguous.
+    const arranged = this.order.arrange(
+      playerUnits,
+      (id) => this.squads.squadIdFor(id)
+    );
+
     const orderedChildren = [];
     const seen = new Set();
 
-    for (const unit of units) {
-      if (unit.teamId !== this.playerTeamId) continue;
-
+    for (const unit of arranged) {
       seen.add(unit.id);
 
       let card = this.cardByUnitId.get(unit.id);
@@ -195,43 +280,62 @@ export class ArmyBarView {
       }
     }
 
+    const displayIds = arranged.map((u) => u.id);
+    const signature = displayIds.join('|');
+    if (signature !== this._displaySig) {
+      this._displaySig = signature;
+      this._overlayDirty = true;
+    }
+    this._displayIds = displayIds;
+
+    const visibleCount = this._applyCollapse(arranged);
     this._syncChildOrder(orderedChildren);
-    this._applyLayout(orderedChildren.length);
+    this._applyLayout(visibleCount);
+    this._refreshExtras();
   }
 
   // Fits every card into the bar by scaling them (see ArmyBarLayout.js).
   // Runs only when the unit count or the window size changed. The
   // scrollable flag is a last resort for armies too big even at the
   // minimum scale.
-  _applyLayout(count) {
+_applyLayout(count) {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const key = count + '|' + w + '|' + h;
     if (key === this._layoutKey) return;
     this._layoutKey = key;
 
+    // The layout is solved for an area 1/zoom as large, then every size it
+    // returns is multiplied back by zoom. At zoom 1 this is the plain
+    // fit-to-bar layout; above 1 the cards grow past the fit (the bar then
+    // scrolls), below 1 they shrink.
+    const z = this.zoom.value;
     const layout = computeArmyBarLayout({
       count,
-      availableWidth: w - ARMY_BAR_SIDE_MARGIN,
-      availableHeight: h * ARMY_BAR_MAX_HEIGHT_FRACTION
+      availableWidth: (w - ARMY_BAR_SIDE_MARGIN) / z,
+      availableHeight: (h * ARMY_BAR_MAX_HEIGHT_FRACTION) / z
     });
     const style = this.root.style;
-    style.setProperty('--army-scale', String(layout.scale));
+    style.setProperty('--army-scale', String(layout.scale * z));
 
     const overlap = layout.mode === 'overlap';
     this.root.classList.toggle('overlap', overlap);
     if (overlap) {
       style.setProperty('--army-cols', String(layout.perRow));
-      style.setProperty('--army-step', layout.step.toFixed(2) + 'px');
-      style.setProperty('--army-card-w', layout.cardW.toFixed(2) + 'px');
-      style.setProperty('--army-card-h', layout.cardH.toFixed(2) + 'px');
-      style.setProperty('--army-overhang', layout.overhang.toFixed(2) + 'px');
+      style.setProperty('--army-step', (layout.step * z).toFixed(2) + 'px');
+      style.setProperty('--army-card-w', (layout.cardW * z).toFixed(2) + 'px');
+      style.setProperty('--army-card-h', (layout.cardH * z).toFixed(2) + 'px');
+      style.setProperty('--army-overhang', (layout.overhang * z).toFixed(2) + 'px');
     }
 
     this.root.classList.toggle(
       'scrollable',
       this.root.scrollHeight > this.root.clientHeight + 1
     );
+
+    // Card positions changed, so squad frames and the toolbar need to be
+    // recomputed on the next _refreshExtras().
+    this._overlayDirty = true;
   }
 
   // Cheap order check: if the DOM already matches, do nothing. If it
@@ -249,7 +353,7 @@ export class ArmyBarView {
     this.root.append(...orderedChildren);
   }
 
-  _createCard(unit) {
+_createCard(unit) {
     const el = document.createElement('div');
     el.className = `army-card team-${unit.teamId}`;
     el.dataset.unitId = String(unit.id);
@@ -307,6 +411,13 @@ export class ArmyBarView {
 
     imageEl.appendChild(barsEl);
 
+    // Control-group badge (e.g. "1" or "1 3"). Lives inside the image
+    // area so it anchors to the icon; hidden until the unit is in a group.
+    const groupEl = document.createElement('span');
+    groupEl.className = 'army-card-group';
+    groupEl.style.display = 'none';
+    imageEl.appendChild(groupEl);
+
     const countEl = document.createElement('span');
     countEl.className = 'army-card-count';
     countEl.textContent = '0/0';
@@ -318,11 +429,7 @@ export class ArmyBarView {
 
     // Click → select. Shift-click → add to selection. Matches the canvas
     // selection rules exactly (see SelectionController._handleSingleClick).
-    el.addEventListener('click', (e) => {
-      const u = this.unitById.get(unit.id);
-      if (!u) return;
-      this.selectionController.selectUnit(u, e.shiftKey);
-    });
+    el.addEventListener('click', (e) => this._handleCardClick(unit.id, e));
 
     // Double-click → recenter the camera on this unit. Selection still
     // happens (dblclick fires after the second click), so double-clicking
@@ -331,11 +438,7 @@ export class ArmyBarView {
     //
     // onUnitFocus is optional so the view still works when constructed
     // without it (e.g. in tests or a future non-3D context).
-    el.addEventListener('dblclick', () => {
-      const u = this.unitById.get(unit.id);
-      if (!u) return;
-      if (this.onUnitFocus) this.onUnitFocus(u);
-    });
+    el.addEventListener('dblclick', (e) => this._handleCardDoubleClick(unit.id, e));
 
     // Right-click → open the unit-info panel. The card element is passed
     // through so the panel can anchor itself to this specific card and
@@ -350,10 +453,31 @@ export class ArmyBarView {
       if (this.onUnitInfo) this.onUnitInfo(u, el);
     });
 
+    // Hover tooltip. A custom medieval-styled tooltip (see
+    // MedievalTheme.js) replaces the native `title` attribute, whose
+    // appearance the browser controls and which cannot be styled. The
+    // text itself is written into `dataset.tooltipName` by _writeCard, so
+    // it tracks customName / isUndead changes without rebuilding the
+    // listeners.
+    el.addEventListener('mouseenter', () => {
+      // Suppress while dragging: the drop-target highlight is the only
+      // feedback that should appear during a drag.
+      if (this.root.classList.contains('army-bar-drag-active')) return;
+      const text = el.dataset.tooltipName;
+      if (text) getMedievalTooltip().schedule(el, text);
+    });
+    el.addEventListener('mouseleave', () => {
+      getMedievalTooltip().hide(el);
+    });
+
+    // Drag-to-reorder. Only starts after the pointer moves a few pixels,
+    // so the click / dblclick / contextmenu handlers above are unaffected.
+    this.drag.attach(el, unit.id);
+
     this.root.appendChild(el);
 
     return {
-      el, flagEl, iconEl, imageEl, countEl,
+      el, flagEl, iconEl, imageEl, countEl, groupEl,
       barsEl, moraleBarEl, moraleFillEl, fatigueBarEl, fatigueFillEl,
       championHpBarEl, championHpFillEl
     };
@@ -388,7 +512,7 @@ export class ArmyBarView {
     this._writeCard(card, unit);
   }
 
-  _cardKey(unit) {
+_cardKey(unit) {
     const alive = unit.getAliveSoldiers();
     let routing = 0;
     let moraleSum = 0;
@@ -419,15 +543,23 @@ export class ArmyBarView {
     return `${alive.length}|${unit.soldiers.length}|${routing}|` +
       `${this._activityFor(unit)}|${unit.selected ? 1 : 0}|` +
       `${moraleKey}|${fatigueKey}|${champKey}|` +
-      `${this._showMoraleBar ? 1 : 0}${this._showFatigueBar ? 1 : 0}`;
+      `${this._showMoraleBar ? 1 : 0}${this._showFatigueBar ? 1 : 0}|` +
+      `${this.groups.labelFor(unit.id)}`;
   }
 
-  _writeCard(card, unit) {
+_writeCard(card, unit) {
     const alive = unit.getAliveSoldiers().length;
     const total = unit.soldiers.length;
     const routingCount = this._routingCount(unit);
     const activity = this._activityFor(unit);
     const defeated = alive === 0;
+
+    // Casualty flash. lastAlive is undefined on the first write, so a
+    // freshly built card never flashes.
+    if (card.lastAlive !== undefined && alive < card.lastAlive) {
+      this._flashHit(card);
+    }
+    card.lastAlive = alive;
 
     card.el.classList.toggle('routing', routingCount > 0);
     card.el.classList.toggle('selected', !!unit.selected);
@@ -438,6 +570,10 @@ export class ArmyBarView {
     card.iconEl.textContent = ACTIVITY_ICON[activity] || '';
     card.iconEl.title = ACTIVITY_LABEL[activity] || '';
 
+    const groupLabel = this.groups.labelFor(unit.id);
+    card.groupEl.textContent = groupLabel;
+    card.groupEl.style.display = groupLabel ? '' : 'none';
+
     // Unit has no unitTypeDef — its type comes from the soldiers. See
     // _installIcon for the same lookup. customName (set on champion
     // units at battle-build time) overrides the type's displayName.
@@ -446,14 +582,206 @@ export class ArmyBarView {
       || (lead && lead.unitTypeDef && lead.unitTypeDef.displayName)
       || 'Unit';
     const typeName = unit.isUndead ? `Skeleton ${baseName}` : baseName;
-    card.el.title = `${typeName} #${unit.id} (${unit.teamId}) — `
-      + `${ACTIVITY_LABEL[activity] || activity}, ${alive}/${total}`
-      + (routingCount > 0 ? ` — ${routingCount} routing` : '');
+    // Consumed by the mouseenter listener installed in _createCard.
+    // The native `title` attribute is deliberately NOT set — the browser
+    // would render its own unstylable tooltip alongside the custom one.
+    // Storing on the dataset lets the text change (custom name, undead
+    // flag) without reattaching listeners.
+    card.el.dataset.tooltipName = typeName;
 
     this._updateBars(card, unit);
   }
 
-  // Averages morale and fatigue across the unit's LIVING soldiers —
+// Restarts the red outline pulse. Removing the class and forcing a
+  // reflow is the standard way to replay a CSS animation on the same
+  // element; it only happens on frames where a unit actually lost soldiers.
+  _flashHit(card) {
+    card.el.classList.remove('army-card-hit');
+    void card.el.offsetWidth;
+    card.el.classList.add('army-card-hit');
+  }
+
+// Groups the player's cards by unit type. The new order is stored in
+  // ArmyBarOrder; the next update() frame re-sorts the DOM from it.
+  _sortByType() {
+    const units = Array.from(this.unitById.values())
+      .filter((u) => u.teamId === this.playerTeamId);
+    this.order.sortByKey(units, (u) => this._typeKey(u));
+  }
+
+  // Sort key for a unit: its type's display name, skeletons grouped
+  // together under "Skeleton ...". Same lookup as _installIcon.
+  _typeKey(unit) {
+    const lead = unit.soldiers && unit.soldiers[0];
+    const name = (lead && lead.unitTypeDef && lead.unitTypeDef.displayName) || '';
+    return (unit.isUndead ? 'Skeleton ' : '') + name;
+  }
+
+// Card click. The second click of a double-click is left to the dblclick
+  // handler, so a double-click does not also run the squad / single toggle.
+  // The selection rules themselves live in ArmyBarActions.clickCard.
+  _handleCardClick(unitId, e) {
+    if (e.detail >= 2) return;
+    const u = this.unitById.get(unitId);
+    if (!u) return;
+
+    const squadId = this.squads.squadIdFor(unitId);
+    if (squadId === undefined) {
+      this.actions.clickCard(u, e.shiftKey, null, false);
+      return;
+    }
+    this.actions.clickCard(
+      u,
+      e.shiftKey,
+      this._squadUnits(squadId),
+      this.squads.get(squadId).collapsed
+    );
+  }
+
+  // Double-click recentres the camera on the unit. Shift+double-click
+  // selects every unit of the same type instead.
+  _handleCardDoubleClick(unitId, e) {
+    const u = this.unitById.get(unitId);
+    if (!u) return;
+    if (e.shiftKey) {
+      this.actions.selectSameType(u, (x) => this._typeKey(x));
+      return;
+    }
+    if (this.onUnitFocus) this.onUnitFocus(u);
+  }
+
+  // Every Unit of the squad, hidden (collapsed) ones included.
+  _squadUnits(squadId) {
+    const units = [];
+    for (const id of this._displayIds) {
+      if (this.squads.squadIdFor(id) !== squadId) continue;
+      const u = this.unitById.get(id);
+      if (u) units.push(u);
+    }
+    return units;
+  }
+
+  // Which cards may be a drop target for what is being dragged. Called by
+  // ArmyBarDrag while the pointer moves, so invalid targets never show the
+  // drop indicator.
+  _isValidDropTarget(kind, id, targetUnitId) {
+    const targetSquad = this.squads.squadIdFor(targetUnitId);
+    if (kind === 'squad') return targetSquad !== id;
+    if (id === targetUnitId) return false;
+
+    // A locked squad moves as a block, so its own cards are not targets.
+    const ownSquad = this.squads.squadIdFor(id);
+    if (ownSquad !== undefined && this.squads.isLocked(ownSquad)) {
+      return targetSquad !== ownSquad;
+    }
+    return true;
+  }
+
+  // Toolbar - / + buttons. Clearing the layout key makes the next update()
+  // recompute the layout with the new zoom.
+  _changeZoom(direction) {
+    if (!this.zoom.step(direction)) return;
+    this._layoutKey = '';
+    this._overlayDirty = true;
+  }
+
+// Routes a finished drag to the reorderer. _displayIds is what the
+  // player sees right now, including cards hidden inside collapsed squads.
+  _handleDrop(drop) {
+    if (drop.kind === 'squad') {
+      this.reorderer.dropSquad(drop.id, drop.targetId, drop.placeAfter, this._displayIds);
+    } else {
+      this.reorderer.dropCard(drop.id, drop.targetId, drop.placeAfter, this._displayIds);
+    }
+  }
+
+  // Toolbar "make squad" button: the selected cards become one squad.
+  _createSquadFromSelection() {
+    const ids = this._displayIds.filter((id) => {
+      const u = this.unitById.get(id);
+      return u && u.selected;
+    });
+    if (ids.length === 0) return;
+    // Make the stored order match the screen so the squad forms where its
+    // first selected card already is.
+    this.order.normalize(this._displayIds);
+    this.squads.create(ids);
+  }
+
+  // Squad tab click: select every member, hidden ones included.
+_selectSquad(squadId, additive) {
+    this.actions.selectUnits(this._squadUnits(squadId), additive);
+  }
+
+  // A collapsed squad shows only its first card; the rest get display:none.
+  // Returns the number of visible cards, which is what the layout needs.
+  // Styles are written only when a card's hidden state actually changes.
+  _applyCollapse(arranged) {
+    let visible = 0;
+    const collapsedSeen = new Set();
+    for (const unit of arranged) {
+      const card = this.cardByUnitId.get(unit.id);
+      const squadId = this.squads.squadIdFor(unit.id);
+      let hidden = false;
+      if (squadId !== undefined && this.squads.get(squadId).collapsed) {
+        if (collapsedSeen.has(squadId)) hidden = true;
+        else collapsedSeen.add(squadId);
+      }
+      if (card.hidden !== hidden) {
+        card.hidden = hidden;
+        card.el.style.display = hidden ? 'none' : '';
+        this._overlayDirty = true;
+      }
+      if (!hidden) visible++;
+    }
+    return visible;
+  }
+
+  // Refreshes the toolbar and squad frames, but only when something that
+  // affects them changed (see _overlayDirty). Bar visibility is read from
+  // the inline style main.js toggles in turn-based local multiplayer.
+_refreshExtras() {
+    const hidden = this.root.style.display === 'none';
+    if (hidden !== this._wasHidden) {
+      this._wasHidden = hidden;
+      this._overlayDirty = true;
+    }
+    if (this.squads.version !== this._squadsVersion) {
+      this._squadsVersion = this.squads.version;
+      this._overlayDirty = true;
+    }
+    if (!this._overlayDirty) return;
+    this._overlayDirty = false;
+
+    if (hidden) {
+      this.toolbar.hide();
+      this.overlay.clear();
+      return;
+    }
+
+    // Leave room above the bar for squad tabs only when squads exist.
+    this.toolbar.position(this.squads.size > 0 ? 19 : 2);
+
+    const cards = this._displayIds.map((id) => {
+      const card = this.cardByUnitId.get(id);
+      return { unitId: id, el: card.el, hidden: !!card.hidden };
+    });
+    this.overlay.render(cards);
+  }
+
+// Detaches the document-level hotkey listener. ArmyBarHotkeys also
+  // replaces any previous instance on attach(), so forgetting to call this
+  // between battles does not stack listeners.
+dispose() {
+    this.hotkeys.dispose();
+    this.drag.dispose();
+    this.toolbar.dispose();
+    this.overlay.dispose();
+    this.root.removeEventListener('scroll', this._onScroll);
+    if (viewByRoot.get(this.root) === this) viewByRoot.delete(this.root);
+  }
+
+// Averages morale and fatigue across the unit's LIVING soldiers —
   // routing / shattered soldiers included, since a routing soldier
   // draining the unit's morale is exactly the state a player needs to
   // see. Dead soldiers are excluded: their morale is meaningless, and

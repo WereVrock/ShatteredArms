@@ -161,6 +161,7 @@ export class ChangelogPanel {
 
   _build() {
     const root = document.createElement('div');
+    root.className = 'mt-root';
     root.style.cssText = [
       'position:fixed',
       'inset:0',
@@ -222,6 +223,7 @@ export class ChangelogPanel {
     closeBtn.type = 'button';
     closeBtn.textContent = '\u00d7'; // multiplication sign, reads as an X
     closeBtn.title = 'Close (Esc)';
+    closeBtn.className = 'mt-close';
     closeBtn.style.cssText = [
       'background:transparent',
       'border:none',

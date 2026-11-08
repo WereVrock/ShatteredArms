@@ -257,6 +257,22 @@ _layoutGrid(cols, spacing, soldiers = this.soldiers) {
     return typeDef?.formationSpacing ?? SOLDIER_SPACING;
   }
 
+  // Layout context for FormationDisorder. The count is the one the
+  // formation was LAID OUT for (_laidOutCount), not the live alive count,
+  // so soldiers dying mid-battle do not nudge every survivor's slot a
+  // fraction each time. The drag ghost passes the count it is previewing.
+  // The seed is the first soldier's id, which is stable for the unit's
+  // whole life (dead soldiers stay in the array) and differs between units.
+  _disorderContext(count) {
+    const n = count ?? this._laidOutCount ?? this.getAliveCount();
+    return FormationDisorder.contextFor({
+      typeDef: this.soldiers[0]?.unitTypeDef,
+      count: Math.max(1, n),
+      spacing: this.getFormationSpacing(),
+      seed: this.soldiers.length > 0 ? this.soldiers[0].id : 0
+    });
+  }
+
 // Called by TargetingSystem the tick a soldier of this unit first becomes
   // 'engaged' while the unit still believes it has an active march order.
   // Without this, soldiers who haven't personally arrived at their
@@ -990,6 +1006,7 @@ _recomputeShapeForWidth(widthUnits) {
     // unaffected — the unit opens a corridor without advancing or
     // recoiling.
     const spread = this._spreadFactor ?? 1.0;
+    const disorderCtx = this._disorderContext();
 
     for (const s of this.getAliveSoldiers()) {
       const off = s.formationOffset;
@@ -1003,7 +1020,7 @@ _recomputeShapeForWidth(widthUnits) {
       // Spread is applied on top of the jitter, so the corridor opens
       // from where soldiers already are regardless of how loosely the
       // formation was arranged.
-      const jit = s.disciplineJitter;
+      const jit = FormationDisorder.forSoldier(s, disorderCtx);
       const localX = (off.x + jit.x) * spread;
       const localZ = off.z + jit.z;
       const rotatedX = localX * cos + localZ * sin;
@@ -1432,25 +1449,17 @@ previewFormationSlots(x, z, facing, widthUnits) {
     // nearest slots on order issue, so the soldier at index i in `alive`
     // generally ends up near slot i — close enough that the ghost reads
     // as the same formation.
-    const typeDef = this.soldiers[0]?.unitTypeDef;
-    const discKey = typeDef?.discipline || 'normal';
-    const discCfg = CombatConfig.discipline[discKey]
-      || CombatConfig.discipline.normal;
-    const amp = discCfg.formationJitterUnits || 0;
+    // Same disorder the live layout will apply (see FormationDisorder).
+    // `count` is what the live layout will be built for after the order
+    // commits, so ghost and result agree.
+    const disorderCtx = this._disorderContext(count);
 
     const slots = FormationGrid.computeSlots(count, cols, spacing);
     return slots.map((s, i) => {
-      let localX = s.x;
-      let localZ = s.z;
-      if (amp > 0) {
-        const soldierId = alive[i] ? alive[i].id : (i + 1);
-        const hx = hash32(soldierId);
-        const hz = hash32((soldierId ^ 0x9E3779B9) >>> 0);
-        const rx = (hx / 4294967295) * 2 - 1;
-        const rz = (hz / 4294967295) * 2 - 1;
-        localX += rx * amp;
-        localZ += rz * amp;
-      }
+      const soldierId = alive[i] ? alive[i].id : (i + 1);
+      const dis = FormationDisorder.offsetFor(disorderCtx, soldierId, s.x, s.z);
+      const localX = s.x + dis.x;
+      const localZ = s.z + dis.z;
       return {
         x: x + localX * cos + localZ * sin,
         z: z + (-localX * sin + localZ * cos)
@@ -1615,7 +1624,7 @@ previewFormationSlots(x, z, facing, widthUnits) {
 import { CombatConfig, WeaponMatchup } from '../config/CombatConfig.js';
 import { isRanged, getRangedRange } from '../config/UnitClasses.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
-import { hash32 } from './Soldier.js';
+import { FormationDisorder } from './FormationDisorder.js';
 import { UnitPower } from './UnitPower.js';
 import { FormationGrid } from './FormationGrid.js';
 import { FormationReflow } from './FormationReflow.js';

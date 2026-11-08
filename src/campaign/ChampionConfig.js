@@ -71,6 +71,12 @@ export const ChampionConfig = {
     // retinue is a single-row formation (preferredRows: 1 on the type),
     // so the champion and his guards stand shoulder to shoulder.
     initialBodyguards: 6,
+    // Soldiers added to BOTH aliveCount and maxCount of the retinue entry
+    // after every won battle. Read by CampaignRoster.growChampionRetinue.
+    retinueGrowthPerBattle: 1,
+    // Player unit cap while commanding the Warlord. Read by
+    // CampaignArmy.capFor; commanders without it use CampaignConfig.unitCap.
+    unitCap: 12,
     // Absolute champion HP. When present, overrides the derived
     // bodyguardHp × championHpMultiplier formula in both the preview
     // (previewStartingStats, updated below) and the battle builder

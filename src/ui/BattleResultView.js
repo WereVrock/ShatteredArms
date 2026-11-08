@@ -31,6 +31,7 @@ export class BattleResultView {
   const peerLeft = outcome === 'peer-left';
 
     const overlay = document.createElement('div');
+    overlay.className = 'mt-root';
     overlay.style.cssText = [
       'position:fixed', 'inset:0',
       'background:rgba(0,0,0,0.72)',

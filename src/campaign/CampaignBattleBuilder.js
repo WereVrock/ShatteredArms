@@ -8,6 +8,8 @@ import { UnitTypes } from '../config/UnitTypes.js';
 import { raceOf } from '../config/RaceConfig.js';
 import { computeUnitPrice } from './UnitPreview.js';
 import { layoutRoster } from '../scenarios/RosterLayout.js';
+import { CampaignArmy } from './CampaignArmy.js';
+import { AIRosterCap } from './AIRosterCap.js';
 
 // Builds a scenario object for main.js's startScenario from a campaign state,
 // plus the AI roster generator used when a battle begins. The scenario's
@@ -126,13 +128,16 @@ function buildFirstBattleRoster(difficulty) {
     }
   };
 
-  appendFromPool(UnitFamilies.allTypeIds(), comp.human || 0);
-  appendFromPool(UnitFamilies.goblinTypeIds(), comp.goblin || 0);
+  appendFromPool(UnitFamilies.allTypeIds('ai'), comp.human || 0);
+  appendFromPool(UnitFamilies.goblinTypeIds('ai'), comp.goblin || 0);
 
   let bonus = diffCfg.firstBattleGoldBonus || 0;
   if (bonus <= 0) return entries;
 
-  const bonusPool = UnitFamilies.campaignPoolTypeIds();
+  const bonusPool = UnitFamilies.campaignPoolTypeIds('ai');
+  // Separate counter: merging at the cap shrinks entries.length, so ids
+  // derived from it could collide.
+  let nextAiId = entries.length;
 
   const MAX_EXTRA_UNITS = 20;
   const MAX_CONSECUTIVE_FAILURES = 24;
@@ -159,14 +164,25 @@ function buildFirstBattleRoster(difficulty) {
       continue;
     }
 
-    bonus -= price;
-    entries.push({
-      id: `ai-0-${entries.length}`,
+    if (price <= 0) {
+      consecutiveFailures++;
+      continue;
+    }
+
+    const placed = AIRosterCap.tryAdd(entries, {
+      id: `ai-0-${nextAiId}`,
       typeId,
       aliveCount: size,
       maxCount: size,
       isUndead: false
-    });
+    }, CampaignConfig.unitCap);
+    if (!placed) {
+      consecutiveFailures++;
+      continue;
+    }
+
+    nextAiId++;
+    bonus -= price;
     consecutiveFailures = 0;
   }
 
@@ -217,7 +233,8 @@ export function generateAIRoster(battleIndex, survivors = [], difficulty = 'norm
   while (entries.length < MAX_UNITS
          && consecutiveFailures < MAX_CONSECUTIVE_FAILURES) {
     const offer = UnitFamilies.randomOffer({
-      skeletonChance: CampaignConfig.aiUndeadChance
+      skeletonChance: CampaignConfig.aiUndeadChance,
+      side: 'ai'
     });
     const typeDef = UnitTypes[offer.typeId];
     const size = CampaignConfig.defaultSizes[offer.typeId];
@@ -238,14 +255,27 @@ export function generateAIRoster(battleIndex, survivors = [], difficulty = 'norm
       continue;
     }
 
-    gold -= price;
-    entries.push({
-      id: `ai-${battleIndex}-${i++}`,
+    if (price <= 0) {
+      consecutiveFailures++;
+      continue;
+    }
+
+    // At the cap the AI merges a pair to make room, or buys only a type
+    // that merges into an existing unit. A refused purchase costs nothing.
+    const placed = AIRosterCap.tryAdd(entries, {
+      id: `ai-${battleIndex}-${i}`,
       typeId: offer.typeId,
       aliveCount: size,
       maxCount: size,
       isUndead: offer.isUndead
-    });
+    }, CampaignConfig.unitCap);
+    if (!placed) {
+      consecutiveFailures++;
+      continue;
+    }
+
+    i++;
+    gold -= price;
     consecutiveFailures = 0;
   }
 
@@ -319,7 +349,7 @@ export function processAISurvivors(aiRoster, simulation) {
 
 function buildUnits(state) {
   const units = [];
-  const playerRoster = state.roster.filter(e => e.aliveCount > 0);
+  const playerRoster = CampaignArmy.fieldedForBattle(state.roster);
   const aiRoster = state.aiRoster;
 
   const playerUnits = layoutRoster(
@@ -476,6 +506,12 @@ function applyChampionToUnit(unit, champion) {
       const bodyguardHp = Math.max(1, Math.round(unitTypeDef.baseHp * raceHpMult));
       baseHp = Math.round(bodyguardHp * (championDef.championHpMultiplier ?? 1.0));
     }
+  }
+  // An absolute championHp on the def wins over the derived formula, the
+  // same rule previewStartingStats uses, so the preview screen and the sim
+  // agree on the number.
+  if (championDef && typeof championDef.championHp === 'number') {
+    baseHp = championDef.championHp;
   }
   const bonusFlat = combatMods.maxHpBonus ?? 0;
   const bonusPerLevel = (combatMods.maxHpPerLevel ?? 0) * champion.level;

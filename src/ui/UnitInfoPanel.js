@@ -239,7 +239,7 @@ const STYLE_TEXT = `
     left: 24px;
     top: 50%;
     transform: translateY(-50%);
-    z-index: 35;
+    z-index: 1200;
     width: 480px;
     max-height: calc(100vh - 48px);
     overflow-y: auto;

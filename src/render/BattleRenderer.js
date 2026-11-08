@@ -193,7 +193,7 @@ setPlayerTeamId(teamId) {
 
     this._syncRangeCircles(unitsById);
     this._syncSelectionRings(allSoldiers, unitsById);
-    this.unitOverlayView.update(unitsById, deltaSeconds);
+    this.unitOverlayView.update(unitsById, deltaSeconds, this.sceneSetup.camera);
     this.debugPathLine.sync();
     this.corridorDebugView.update(deltaSeconds);
 

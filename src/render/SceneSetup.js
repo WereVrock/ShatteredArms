@@ -57,6 +57,10 @@ const GRASS_MARGIN = 20;
 // default camera distance without being obtrusive.
 const FIELD_EDGE_THICKNESS = 0.5;
 
+// Ground plane size. Must stay well beyond the map bounds plus the farthest
+// camera reach, so the plane's edge is never visible.
+const GROUND_EXTENT = 6000;
+
 // Builds the base 3D scene: camera, lights, ground, grass, field boundary.
 // No game logic.
 // Accepts optional initial camera params so callers can start the view
@@ -152,7 +156,7 @@ export class SceneSetup {
     // scatter across that rectangle means the boundary strips sit on grass
     // all the way to their corners.
     this.grassField = new GrassField(this.scene, {
-      count: 5000,
+      count: 18000,
       bounds: CombatConfig.mapBounds,
       margin: GRASS_MARGIN
     });
@@ -314,7 +318,7 @@ applySettings(settings) {
     // Segment count stays at 64x64: vertex-level Lambert shading on a
     // plane this size is imperceptibly different at higher counts, and
     // the texture masks any residual vertex gradient.
-    const GROUND_EXTENT = 3000;
+    // GROUND_EXTENT is a module-level constant (see top of file).
     const geo = new THREE.PlaneGeometry(GROUND_EXTENT, GROUND_EXTENT, 64, 64);
     const mat = new THREE.MeshLambertMaterial({
       color: 0xffffff,
@@ -536,7 +540,7 @@ _createGroundTexture() {
     tex.wrapT = THREE.RepeatWrapping;
     // 8 tiles across the 600-unit ground plane → each tile is 75 world
     // units. The seam fix means tiling is not visible regardless.
-    tex.repeat.set(40, 40);
+    tex.repeat.set(GROUND_EXTENT / 75, GROUND_EXTENT / 75);
     tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
     // Guarded because colorSpace was renamed in three.js r152. Older
     // builds simply leave the texture in the default space, which is fine

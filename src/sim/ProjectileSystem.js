@@ -235,13 +235,23 @@ _resolveHit(proj, defender, byId) {
     // melee ones, which is intended — arrows are cheaper per shot.
     if (shooter) {
       const mult = CombatConfig.championXpPerSoldierPower;
-      if (defender.soldierPowerCache > 0) {
+      // Routing / shattered targets give one-third of their non-routing
+      // XP rate. Symmetric with CombatResolutionSystem._accrueChampionXp
+      // — same rationale, same routingXpCache source (see
+      // BattleSimulation._updateSoldierPowerCache).
+      const defenderRate = (defender.state === 'routing' || defender.state === 'shattered')
+        ? (defender.routingXpCache ?? ((defender.soldierPowerCache || 0) / 3))
+        : defender.soldierPowerCache;
+      if (defenderRate > 0) {
         shooter.championXpRaw =
-          (shooter.championXpRaw || 0) + defender.soldierPowerCache * mult;
+          (shooter.championXpRaw || 0) + defenderRate * mult;
       }
-      if (shooter.soldierPowerCache > 0) {
+      const shooterRate = (shooter.state === 'routing' || shooter.state === 'shattered')
+        ? (shooter.routingXpCache ?? ((shooter.soldierPowerCache || 0) / 3))
+        : shooter.soldierPowerCache;
+      if (shooterRate > 0) {
         defender.championXpRaw =
-          (defender.championXpRaw || 0) + shooter.soldierPowerCache * mult;
+          (defender.championXpRaw || 0) + shooterRate * mult;
       }
     }
 

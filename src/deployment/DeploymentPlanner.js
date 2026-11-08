@@ -67,7 +67,7 @@ _buildZone(teamUnits, enemyUnits) {
     const rightZ = -fwdX;
 
     // Push this team's zone center BACK along -forward so the two teams'
-    // deployable areas are separated by deploymentSeparationScale × the
+    // deployable areas are separated by deploymentSeparationScale x the
     // spawn distance between their mean positions. Each side contributes
     // half of the extra gap, so the zone spacing is symmetric and neither
     // team's front edge is favored. Units still spawn at their scenario
@@ -77,17 +77,31 @@ _buildZone(teamUnits, enemyUnits) {
     const centerX = teamMean.x - fwdX * backOffset;
     const centerZ = teamMean.z - fwdZ * backOffset;
 
-    const halfLateral = Math.max(
-      DeploymentConfig.minHalfLateral,
-      (teamUnits.length * DeploymentConfig.lateralPerUnit) / 2
+    // Rear edge: cast a ray from the zone centre along -forward and stop at
+    // the original playable area (backReachBounds).
+    const box = DeploymentConfig.backReachBounds;
+    const backDirX = -fwdX;
+    const backDirZ = -fwdZ;
+    let reach = Infinity;
+    if (backDirX > 1e-6) reach = Math.min(reach, (box.maxX - centerX) / backDirX);
+    else if (backDirX < -1e-6) reach = Math.min(reach, (box.minX - centerX) / backDirX);
+    if (backDirZ > 1e-6) reach = Math.min(reach, (box.maxZ - centerZ) / backDirZ);
+    else if (backDirZ < -1e-6) reach = Math.min(reach, (box.minZ - centerZ) / backDirZ);
+    const backDepth = Math.max(
+      DeploymentConfig.backDepth,
+      Number.isFinite(reach) ? reach : 0
     );
+
+    // Width derived from total depth: half-width = 1.5 x half the total depth
+    // (frontDepth + backDepth), so total width is 50% larger than total height.
+    const halfLateral = ((DeploymentConfig.frontDepth + backDepth) / 2) * 1.5;
 
     return new DeploymentZone({
       centerX,
       centerZ,
       halfLateral,
       frontDepth: DeploymentConfig.frontDepth,
-      backDepth: DeploymentConfig.backDepth,
+      backDepth,
       rightX,
       rightZ,
       forwardX: fwdX,

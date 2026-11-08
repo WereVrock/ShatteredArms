@@ -65,6 +65,34 @@ export class HudView {
     });
     this.el.appendChild(this._copyBtn);
 
+    // Debug-only Cheats button. Hidden until main.js reports that the
+    // active profile may use cheats (see setCheatsAvailable). Opening the
+    // panel is delegated to onCheatsClick so this view holds no game logic.
+    this.onCheatsClick = null;
+    this._cheatsBtn = document.createElement('button');
+    this._cheatsBtn.type = 'button';
+    this._cheatsBtn.textContent = 'CHEATS';
+    this._cheatsBtn.style.cssText = [
+      'display:none',
+      'width:100%',
+      'margin:0 0 6px 0',
+      'padding:3px 6px',
+      'background:rgba(180,70,50,0.25)',
+      'color:#f0c0b0',
+      'border:1px solid #8a4a3a',
+      'border-radius:3px',
+      'cursor:pointer',
+      'font:11px monospace',
+      'letter-spacing:0.5px',
+      'pointer-events:auto',
+      'position:relative',
+      'z-index:100'
+    ].join(';');
+    this._cheatsBtn.addEventListener('click', () => {
+      if (this.onCheatsClick) this.onCheatsClick();
+    });
+    this.el.appendChild(this._cheatsBtn);
+
     // Text block. pre-wrap renders the newline-joined text as separate
     // lines. Capped at 30vh with its own scroll: a debug target with a
     // long intent block must not grow the panel past the viewport.
@@ -125,7 +153,13 @@ export class HudView {
     this.debugInfo = info || null;
   }
 
-  update(units, allSoldiersById, selectedUnits) {
+// Shows or hides the Cheats button. main.js decides availability; this
+  // view only toggles visibility.
+  setCheatsAvailable(available) {
+    this._cheatsBtn.style.display = available ? 'block' : 'none';
+  }
+
+update(units, allSoldiersById, selectedUnits) {
     const hasFocus =
       (selectedUnits && selectedUnits.size > 0) ||
       (this.debugInfo && this.debugInfo.unit && !this.debugInfo.unit.isDefeated());

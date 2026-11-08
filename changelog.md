@@ -1,12 +1,19 @@
 ### Shattered Arms — Changelog
 
-# Persistence Edition: 0.5.4
+# Perseus Edition: 0.5.4
 -Added global highscores
--Added user specific highscores
+-Added user specific saves
 -improved army ui when too many units in the army
+-ui polish
 -fixed a bug where unit cards from previous game gets stuck
 -more performance optimization
--added goblin slaves to custom battle
+-added goblin slaves to ai armies
+-capped campaign units 
+-added merge unit ability
+-added new more visible banners
+-routing units give xp now
+-ui theme change
+-camp footage
 
 # Horde Edition: 0.5.3
 -Heavy graphic optimization

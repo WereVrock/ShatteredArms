@@ -1,80 +1,58 @@
 // ===== src/render/UnitOverlayView.js =====
-// ===== src/render/UnitOverlayView.js =====
 // World-space overlays drawn during battle:
 //
 //   Shield billboard — ONE THREE.Sprite per unit, carrying the unit's
 //     entire marker on a single canvas: HP / morale / stamina bars on
-//     top, a team-coloured heater shield below (see ShieldBillboard.js).
+//     top, a team-coloured banner below (see ShieldBillboard.js).
 //     Because it is one sprite the whole thing billboards as a single
-//     unit — bars and shield stay rigidly aligned from any camera angle.
+//     unit — bars and banner stay rigidly aligned from any camera angle.
 //
-//     The shield's face shows the SAME composite unit icon the army bar
-//     draws (see UnitIcon.js), so the world marker and the army-bar card
-//     can never disagree about what a unit looks like.
-//
-//     The shield is split into SHIELD_PIECE_COUNT horizontal bands (see
-//     ShieldIconBuilder.js). As the unit's total current HP / total max
-//     HP drops, bands break off from the bottom up — the pointed base
-//     shatters first, the crest last. Each breaking piece is handed to
-//     a transient falling sprite that drops, spins and fades on the sim
-//     delta, so a paused battle freezes any in-flight shard mid-air.
-//
-//   Bars — drawn inside the billboard's canvas, ABOVE the shield. Only
-//     shown for PLAYER-TEAM units; enemy bars are deliberately NOT shown
-//     (reading the enemy's internal morale is information the player
-//     should have to infer from behaviour, not read off a bar).
-//
-// Both are gated by SettingsStore (showUnitFlags / showUnitBars, both
-// default true). update() reads the settings fresh every call, so a flip
-// in the settings panel takes effect on the very next render frame.
+//   Bars — drawn inside the billboard's canvas, ABOVE the banner. Only
+//     shown for PLAYER-TEAM units; enemy bars are deliberately NOT shown.
 //
 // ANCHORING
 // The overlay is positioned above the unit's STILL-FIGHTING soldiers —
-// the alive subset that is neither routing nor shattered — not above the
-// whole living formation. A unit that has lost a few soldiers to a rout
-// but is still holding keeps its marker over the men who are still in
-// the line; the runners do not drag it off with them. When every living
-// soldier is out the fighting subset is empty and the anchor falls back
-// to the full alive centroid.
+// the alive subset that is neither routing nor shattered. A unit that
+// has lost a few soldiers to a rout but is still holding keeps its
+// marker over the men who are still in the line.
+//
+// BANNER BOTTOM ANCHOR
+// The shield's bottom edge is pinned to SHIELD_BOTTOM_Y (2.0 world
+// units — above soldier heads at ~1.7). Both the distance scale and the
+// player-chosen banner size grow the shield UPWARD from that fixed
+// bottom edge, so neither zooming out nor picking "large" can cause the
+// banner to clip into the soldier models beneath it.
 //
 // STATE-CHANGE EFFECTS
-//   FULL COLLAPSE — the entire billboard FADES in and out on a fixed
-//     period while EVERY living soldier on the unit is routing or
-//     shattered. Partial routs do NOT fade; the marker just re-anchors
-//     to the still-fighting subset. The fade resets to its dim half on
-//     the rising edge, so the first thing the player sees is the marker
-//     dimming, and it keeps pulsing for as long as the collapse holds.
+//   FULL COLLAPSE — the entire billboard pulses opacity while EVERY
+//     living soldier on the unit is routing or shattered.
 //
 //   Shattered additionally triggers a one-shot burst of team-coloured
 //     fragment sprites, and — for a PLAYER-TEAM unit only — destroys
-//     the marker for the rest of the battle. Enemy shatters pulse but
-//     keep their markers.
+//     the marker for the rest of the battle.
 //
 // PAUSE BEHAVIOUR
-// The collapse pulse runs on WALL-CLOCK time (performance.now()), not on
-// the sim delta, so it keeps animating while the sim is paused. The
-// shield-piece fall and the shatter-burst fragments run on the sim delta
-// and freeze with the battle — they are physical effects in world space,
-// not UI alarms.
+// The collapse pulse runs on WALL-CLOCK time; the shield-piece fall and
+// the shatter-burst fragments run on the sim delta and freeze with the
+// battle.
 import * as THREE from 'three';
 import { SettingsStore } from '../ui/settings/SettingsStore.js';
 import { TeamColors } from './TeamColors.js';
 import {
   ShieldBillboard,
-  SPRITE_WORLD_W,
-  SPRITE_LOCAL_Y_OFFSET
+  bannerSizeMultiplier
 } from './ShieldBillboard.js';
 import {
   SHIELD_PIECE_COUNT
 } from './ShieldIconBuilder.js';
 
-// World Y of the SHIELD's own centre. Bars sit above it in the billboard
-// canvas, so their effective world Ys are derived by the canvas layout
-// (see ShieldBillboard.js) — this constant is the anchor.
-const SHIELD_Y = 2.4;
+// Fixed world Y of the shield's BOTTOM edge. The billboard's sprite is
+// positioned so the shield's bottom edge sits here; distance scale and
+// banner-size multiplier both grow the banner UP from this anchor. Set
+// to 2.0 to clear the ~1.7-tall soldier heads at any zoom or size.
+const SHIELD_BOTTOM_Y = 2.0;
 
-// Render order within the transparent pass. Billboard draws on top of the
-// ground decals and under any UI overlay sprites.
+// Render order within the transparent pass.
 const RENDER_ORDER_BILLBOARD = 3;
 
 // Morale band thresholds, matching ArmyBarView and UnitInfoPanel.
@@ -85,9 +63,9 @@ const BAND_HURT_MIN = 0.3;
 const FLASH_PULSE_PERIOD_S = 0.6;
 const FLASH_DIM_OPACITY = 0.30;
 
-// Shield-piece fall. One piece is released when the unit's HP crosses its
-// threshold; it drops + spins + fades over this duration, on the sim
-// delta so a paused battle freezes it in mid-air.
+// Shield-piece fall. One piece is released when the unit's HP crosses
+// its threshold; it drops + spins + fades over this duration, on the
+// sim delta so a paused battle freezes it in mid-air.
 const PIECE_FALL_DURATION_S = 0.7;
 const PIECE_FALL_DROP = 1.5;
 const PIECE_FALL_ROTATION_MAX = 0.9;
@@ -112,28 +90,29 @@ export class UnitOverlayView {
 
     // Per-piece sprite materials this view owns. Each falling piece gets
     // its own material so its opacity and rotation are independent of
-    // every other piece — collected here so dispose() can clean up any
-    // still in flight.
+    // every other piece.
     this._fallingPieceMaterials = new Set();
 
     // Active shatter bursts. Each is { material, frags, timeLeft }.
     this._shatterBursts = [];
   }
 
-  // Which team's units get bars inside their billboard. Shields show for
-  // every team regardless.
   setPlayerTeamId(teamId) {
     this.playerTeamId = teamId;
   }
 
-  update(unitsById, deltaSeconds) {
+  update(unitsById, deltaSeconds, camera) {
     const settings = SettingsStore.get();
     const showShields = settings.showUnitFlags !== false;
     const showBars = settings.showUnitBars !== false;
     const showAnything = showShields || showBars;
 
-    // Wall-clock timestamp for the collapse pulse — see the PAUSE
-    // BEHAVIOUR note at the top of the file.
+    // Banner size multiplier from the setting. Read fresh each frame so
+    // a change takes effect on the next render — consistent with how
+    // showShields / showBars already behave.
+    const sizeMult = bannerSizeMultiplier(settings.bannerSize || 'small');
+
+    // Wall-clock timestamp for the collapse pulse.
     const nowMs = performance.now();
 
     this._updateShatterBursts(deltaSeconds);
@@ -151,14 +130,28 @@ export class UnitOverlayView {
 
       seen.add(unitId);
 
+      const legacyBanners = settings.legacyBanners === true;
       let entry = this._entriesByUnitId.get(unitId);
       if (!entry) {
         entry = this._createEntry(unit);
+        entry.legacyBanners = legacyBanners;
+        this._entriesByUnitId.set(unitId, entry);
+      } else if (entry.legacyBanners !== legacyBanners) {
+        // Style setting flipped — dispose the current entry and rebuild
+        // through the other pipeline. The billboard's piece textures are
+        // baked by ShieldIconBuilder at construction time, so they cannot
+        // be swapped in place; a fresh entry is the simplest correct
+        // refresh. Broken-piece state resets, which reads as "the banner
+        // re-forms" — acceptable and expected for a display-style
+        // toggle that a player flips rarely.
+        this._disposeEntry(entry);
+        entry = this._createEntry(unit);
+        entry.legacyBanners = legacyBanners;
         this._entriesByUnitId.set(unitId, entry);
       }
 
       this._updateEntry(
-        entry, unit, alive, showShields, showBars, nowMs, deltaSeconds
+        entry, unit, alive, showShields, showBars, nowMs, deltaSeconds, camera, sizeMult
       );
     }
 
@@ -170,16 +163,7 @@ export class UnitOverlayView {
 
   dispose() {
     for (const entry of this._entriesByUnitId.values()) {
-      this.scene.remove(entry.group);
-      if (entry.billboard) entry.billboard.dispose();
-      // Detach any still-falling piece sprites (they live as children of
-      // the group, but the sprite itself was removed on completion —
-      // here we just make sure anything mid-flight is cleaned up).
-      for (const piece of entry.shieldPieces) {
-        if (piece.sprite && piece.sprite.parent) {
-          piece.sprite.parent.remove(piece.sprite);
-        }
-      }
+      this._disposeEntry(entry);
     }
     this._entriesByUnitId.clear();
 
@@ -193,6 +177,27 @@ export class UnitOverlayView {
     this._shatterBursts.length = 0;
   }
 
+  // Detaches one entry's scene graph, disposes its billboard's sprite
+  // material + texture, and cleans up any in-flight shard sprites and
+  // materials. Idempotent — safe to call on a live entry or one whose
+  // shards have already completed. Used by dispose() and by the
+  // legacyBanners setting flip in update().
+  _disposeEntry(entry) {
+    this.scene.remove(entry.group);
+    if (entry.billboard) entry.billboard.dispose();
+    for (const piece of entry.shieldPieces) {
+      if (piece.sprite && piece.sprite.parent) {
+        piece.sprite.parent.remove(piece.sprite);
+      }
+      if (piece.material) {
+        this._fallingPieceMaterials.delete(piece.material);
+        piece.material.dispose();
+        piece.material = null;
+      }
+      piece.sprite = null;
+    }
+  }
+
   // --- internals ---------------------------------------------------------
 
   _createEntry(unit) {
@@ -203,29 +208,22 @@ export class UnitOverlayView {
 
     const teamColorHex = TeamColors[unit.teamId] ?? 0xaaaaaa;
 
-    // --- The combined billboard (bars + shield, one sprite) ---
-    // Its local Y is offset by SPRITE_LOCAL_Y_OFFSET so the SHIELD's own
-    // centre (not the sprite's canvas centre) lands at SHIELD_Y. The
-    // bars then sit above that by their canvas layout.
     let billboard = null;
     if (typeDef) {
       // A unit is a "thrall unit" when its lead soldier carries the
-      // isThrall flag. Thralls get a blood-drop icon on their shield
-      // instead of the unit type's SVG icon. See ShieldIconBuilder.
+      // isThrall flag. Thralls get a blood-drop icon on their banner.
       const isThrallUnit = lead && lead.isThrall === true;
       billboard = new ShieldBillboard(
         typeDef, unit.isUndead, unit.teamId, isThrallUnit
       );
-      billboard.sprite.position.set(
-        0,
-        SHIELD_Y + SPRITE_LOCAL_Y_OFFSET,
-        0
-      );
+      // Initial position at the base anchor; real Y set every frame in
+      // _updateEntry via getAnchorOffset().
+      billboard.sprite.position.set(0, SHIELD_BOTTOM_Y, 0);
       billboard.sprite.renderOrder = RENDER_ORDER_BILLBOARD;
       group.add(billboard.sprite);
     }
 
-    // Per-piece break bookkeeping. Piece 0 is the shield's TOP band; the
+    // Per-piece break bookkeeping. Piece 0 is the banner's TOP band; the
     // BOTTOM band (index COUNT-1) has the highest HP threshold and so
     // breaks off first.
     const shieldPieces = [];
@@ -240,10 +238,8 @@ export class UnitOverlayView {
         material: null,
         fallRotVel: 0,
         fallDriftX: 0,
-        // Per-chunk HP break threshold, derived from the chunk's area
-        // and its distance from the shield's centre (see
-        // ShieldIconBuilder). Read below when deciding which chunks to
-        // break at the unit's current HP.
+        // Set at spawn; used by the fall animation as a stable start Y.
+        startY: 0,
         threshold: thresholds ? thresholds[i] : 0
       });
     }
@@ -259,12 +255,11 @@ export class UnitOverlayView {
       wasShattered: false,
       flagShattered: false,
       // Wall-clock timestamp (ms) of the current pulse's rising edge.
-      // Null when not pulsing.
       flashStartMs: null
     };
   }
 
-  _updateEntry(entry, unit, alive, showShields, showBars, nowMs, deltaSeconds) {
+  _updateEntry(entry, unit, alive, showShields, showBars, nowMs, deltaSeconds, camera, sizeMult) {
     entry.group.visible = true;
 
     // --- anchoring --------------------------------------------------------
@@ -273,8 +268,8 @@ export class UnitOverlayView {
     // fighting subset so a few runners do not drag it away.
     let fightingCount = 0;
     let shatteredCount = 0;
-    let fx = 0, fz = 0;   // fighting centroid accumulator
-    let ax = 0, az = 0;   // full-alive centroid accumulator
+    let fx = 0, fz = 0;
+    let ax = 0, az = 0;
 
     for (const s of alive) {
       ax += s.pos.x;
@@ -301,6 +296,30 @@ export class UnitOverlayView {
     }
     entry.group.position.set(anchorX, 0, anchorZ);
 
+    // --- distance + size scale --------------------------------------------
+    // The banner sits at a fixed SCREEN size across zoom (distance factor)
+    // but its WORLD size at that constant screen size is the player's
+    // banner-size setting (sizeMult). Both factors are multiplied together
+    // by the billboard. The sprite's Y offset is derived from the shield's
+    // BOTTOM anchor (SHIELD_BOTTOM_Y) plus the anchor offset at current
+    // combined scale, so the shield bottom always sits at SHIELD_BOTTOM_Y
+    // regardless of zoom or size.
+    if (camera && entry.billboard) {
+      entry.billboard.setSizeMultiplier(sizeMult);
+      // Shield center Y at the CURRENT state — used only as the reference
+      // point for the distance calc. One frame of lag is negligible; the
+      // billboard's _worldScale will refresh immediately after.
+      const shieldCenterY = SHIELD_BOTTOM_Y + entry.billboard.getShieldCenterOffset();
+      const cam = camera.position;
+      const dx = anchorX - cam.x;
+      const dy = shieldCenterY - cam.y;
+      const dz = anchorZ - cam.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      entry.billboard.setWorldScale(distance);
+      entry.billboard.sprite.position.y =
+        SHIELD_BOTTOM_Y + entry.billboard.getAnchorOffset();
+    }
+
     // --- collapse / shatter detection -------------------------------------
     const isCollapsed = fightingCount === 0;
     const isShattered = shatteredCount === alive.length;
@@ -309,7 +328,10 @@ export class UnitOverlayView {
     if (isShattered && !entry.wasShattered) {
       if (unit.teamId === this.playerTeamId && !entry.flagShattered) {
         entry.flagShattered = true;
-        this._spawnShatterBurst(anchorX, SHIELD_Y, anchorZ, entry.teamColorHex);
+        const burstY = entry.billboard
+          ? SHIELD_BOTTOM_Y + entry.billboard.getShieldCenterOffset()
+          : SHIELD_BOTTOM_Y + 0.9;
+        this._spawnShatterBurst(anchorX, burstY, anchorZ, entry.teamColorHex);
       }
     }
     entry.wasCollapsed = isCollapsed;
@@ -329,10 +351,6 @@ export class UnitOverlayView {
     // --- shield integrity + bar values ------------------------------------
     const isPlayerTeam = unit.teamId === this.playerTeamId;
 
-    // Total current HP / total max HP across the whole unit. Dead
-    // soldiers contribute 0 to the numerator but full maxHp to the
-    // denominator, so losing men reads as losing shield integrity even
-    // at full per-soldier health.
     let hpSum = 0;
     let maxHpSum = 0;
     for (const s of unit.soldiers) {
@@ -360,17 +378,17 @@ export class UnitOverlayView {
     }
 
     // Advance in-flight pieces. Uses the sim delta, so a paused battle
-    // freezes shards in mid-air.
+    // freezes shards in mid-air. The shard drops from its snapshotted
+    // startY, which was the shield's visual center Y at spawn time.
     for (const piece of entry.shieldPieces) {
       if (!piece.falling) continue;
       piece.fallTime += deltaSeconds;
       const t = Math.min(1, piece.fallTime / PIECE_FALL_DURATION_S);
 
-      // Quadratic drop so a shard accelerates as it falls.
       const drop = t * t * PIECE_FALL_DROP;
       piece.sprite.position.set(
         piece.fallDriftX * t,
-        SHIELD_Y - drop,
+        piece.startY - drop,
         0
       );
       piece.material.rotation = piece.fallRotVel * t;
@@ -429,7 +447,7 @@ export class UnitOverlayView {
       }
     }
 
-    // Hide the entire billboard when the shield overlay is off, or when
+    // Hide the entire billboard when the banner overlay is off, or when
     // the unit has shattered (for a player-team unit). Bars ride on the
     // same sprite, so they disappear together.
     entry.billboard.sprite.visible = showShields && !entry.flagShattered;
@@ -441,18 +459,15 @@ export class UnitOverlayView {
         hasChampion,
         championFrac,
         pulseOpacity,
-        // Enemy units and shattered units have barsVisible === false,
-        // so the billboard renders as a shield-only marker for them.
         showBars: barsVisible
       });
     }
   }
 
   // Spawns the transient falling sprite for a piece that just broke. The
-  // sprite uses the SHARED piece texture (which is CANVAS-sized and
-  // carries the piece's content at the correct y-offset), so starting
-  // the sprite at SHIELD_Y puts the piece's visible content exactly
-  // where it was on the shield, before the fall animation begins.
+  // sprite uses the SHARED piece texture (canvas-sized) so starting the
+  // sprite at the shield's current visual centre puts the piece's visible
+  // content exactly where it was on the shield, before the fall begins.
   _spawnFallingPiece(entry, pieceIndex) {
     const piece = entry.shieldPieces[pieceIndex];
     if (!piece || piece.sprite) return;
@@ -467,17 +482,28 @@ export class UnitOverlayView {
     });
     this._fallingPieceMaterials.add(mat);
 
+    // Shard inherits the banner's current sprite scale so the falling
+    // piece is exactly the same size as the band it just detached from.
+    // Since both dimensions of the sprite are SPRITE_WORLD_W * scale
+    // (the piece texture is square), reading sprite.scale.x gives the
+    // shard's world size directly. Snapshotted at spawn, so a camera
+    // zoom mid-fall does not resize an in-flight shard — matching the
+    // existing snapshot-at-spawn behaviour of entry.currentFactor.
+    const shardScale = entry.billboard.sprite.scale.x;
+    const startY = SHIELD_BOTTOM_Y + entry.billboard.getShieldCenterOffset();
+
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(SPRITE_WORLD_W, SPRITE_WORLD_W, 1);
-    sprite.position.set(0, SHIELD_Y, 0);
+    sprite.scale.set(shardScale, shardScale, 1);
+    sprite.position.set(0, startY, 0);
     sprite.renderOrder = RENDER_ORDER_BILLBOARD;
 
     entry.group.add(sprite);
     piece.sprite = sprite;
     piece.material = mat;
+    piece.startY = startY;
   }
 
-  // --- shatter burst --------------------------------------------------------
+  // --- shatter burst ------------------------------------------------------
 
   _spawnShatterBurst(x, y, z, teamColorHex) {
     const mat = new THREE.SpriteMaterial({

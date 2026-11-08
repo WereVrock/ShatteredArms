@@ -39,10 +39,10 @@ export const CombatConfig = {
   // When a proper MapConfig exists, this can move there and be overridden
   // per scenario.
   mapBounds: {
-    minX: -200,
-    maxX: 200,
-    minZ: -200,
-    maxZ: 200
+    minX: -400,
+    maxX: 400,
+    minZ: -400,
+    maxZ: 400
   },
 
   engagementRange: 1.6,
@@ -500,6 +500,23 @@ export const CombatConfig = {
       displayName: 'Low',
       impetuousChance: 1.0,
       formationJitterUnits: 0.35,
+      // Soldier-count disorder (see FormationDisorder.js). A unit at or
+      // below disorderRefCount soldiers looks exactly as it did before.
+      // Every doubling above it adds:
+      //   - disorderJitterGrowthPerDoubling x the base jitter, capped at
+      //     disorderMaxJitterUnits;
+      //   - disorderRowSwayPerDoubling world units of random SIDEWAYS shift
+      //     per row, and disorderColSwayPerDoubling of random FORWARD shift
+      //     per column, each capped at disorderMaxSwayUnits.
+      // Example with these numbers: 200 soldiers is 3 doublings above 25,
+      // giving jitter 0.55, row sway 0.75 and column sway 0.6. Set the
+      // PerDoubling values to 0 to switch the feature off.
+      disorderRefCount: 25,
+      disorderJitterGrowthPerDoubling: 0.35,
+      disorderMaxJitterUnits: 0.55,
+      disorderRowSwayPerDoubling: 0.25,
+      disorderColSwayPerDoubling: 0.2,
+      disorderMaxSwayUnits: 0.8,
       minFormationCols: 3,
       minFormationRows: 3,
       slotToleranceUnits: 0.4,

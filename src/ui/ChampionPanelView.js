@@ -42,13 +42,22 @@ const STYLE_TEXT = `
     border: 1px solid #384050;
     border-radius: 10px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
-    width: min(1080px, calc(100vw - 32px));
-    max-height: calc(100vh - 32px);
+    /* Scaled by the UI font size setting (see UiFontScale.js). Zoom
+       multiplies every length, so the viewport-relative limits are divided
+       by the scale to keep the panel inside the screen. */
+    zoom: var(--ui-font-scale, 1);
+    width: min(1080px, calc((100vw - 32px) / var(--ui-font-scale, 1)));
+    max-height: calc((100vh - 32px) / var(--ui-font-scale, 1));
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
+    /* The panel itself scrolls, so the header moves out of the way
+       together with the trees instead of pinning itself to the top. */
+    overflow-y: auto;
+    scrollbar-width: thin;
   }
   .champ-header {
+    flex: 0 0 auto;
     display: flex;
     align-items: flex-start;
     gap: 16px;
@@ -166,7 +175,7 @@ const STYLE_TEXT = `
 
   .champ-body {
     padding: 16px 20px 20px;
-    overflow-y: auto;
+    flex: 0 0 auto;
     display: flex;
     gap: 14px;
     align-items: flex-start;
@@ -263,6 +272,11 @@ const STYLE_TEXT = `
   }
 
   .champ-footer {
+    flex: 0 0 auto;
+    position: sticky;
+    bottom: 0;
+    background: #1e222a;
+    border-radius: 0 0 10px 10px;
     display: flex;
     justify-content: flex-end;
     gap: 10px;
@@ -318,6 +332,21 @@ export class ChampionPanelView {
       }
     });
     document.body.appendChild(this.root);
+
+    // Escape: Back in preview mode, plain close in live mode. Registered
+    // once for the page lifetime; it ignores the key while the panel is
+    // hidden.
+    document.addEventListener('keydown', (e) => {
+      if (e.code !== 'Escape' || !this.isOpen()) return;
+      e.preventDefault();
+      if (this._previewMode) {
+        const cb = this._previewOnCancel;
+        this._teardown();
+        if (cb) cb();
+      } else {
+        this.close();
+      }
+    });
 
     this._champion = null;
     this._onClose = null;

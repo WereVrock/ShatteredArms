@@ -7,12 +7,12 @@ import { LivePowerView } from './LivePowerView.js';
 // AutoCampaignBatch, shows progress and results, and posts averages to the
 // board through the admin API supplied by admin.html (api.call).
 //
-// The two derived rows "iskelet ibo" (lowest single-run score of the
-// weakened AI) and "J Cezar" (highest single-run score of the
-// best-possible AI) are not run as separate profiles. Their checkboxes
-// live right under the run checkboxes and only control whether the
-// derived row is written to the board — by auto-submit or by the
-// "Write to board" button.
+// The three derived rows "Deli ibo" (lowest single-run score of the
+// weakened AI), "J Cezar" (highest single-run score of the best-possible
+// AI), and "İskender 1.5" (J Cezar × 1.5, not run) are not run as
+// separate profiles. Their checkboxes live right under the run
+// checkboxes and only control whether the derived row is written to the
+// board — by auto-submit or by the "Write to board" button.
 
 const STYLE_ID = 'ai-campaign-panel-styles';
 
@@ -80,6 +80,15 @@ function clampInt(raw, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+// Maps each derived row's board name to the checkbox key that controls it.
+// Centralised so adding a fourth derived row is a one-line addition here
+// plus its tuple in _build's derivedDefs.
+const DERIVED_KEY_BY_NAME = {
+  [EXTREME_PLAYER_NAMES.weakenedLow]: 'weakenedLow',
+  [EXTREME_PLAYER_NAMES.bestPossibleHigh]: 'bestPossibleHigh',
+  [EXTREME_PLAYER_NAMES.iskender]: 'iskender'
+};
+
 export class AiCampaignPanel {
   constructor(rootElement, api) {
     ensureStyles();
@@ -90,7 +99,7 @@ export class AiCampaignPanel {
     this.lastResults = null;
     this.lastDifficulty = 'normal';
     this.playerChecks = new Map();
-    // { weakenedLow: cb, bestPossibleHigh: cb } — ticked by the user to
+    // { weakenedLow, bestPossibleHigh, iskender } — ticked by the user to
     // include the derived rows in submissions. They are not run.
     this.derivedChecks = {};
     this._build();
@@ -136,22 +145,24 @@ export class AiCampaignPanel {
     }
     wrap.appendChild(players);
 
-    // Note explaining the two derived rows, then their checkboxes right
+    // Note explaining the derived rows, then their checkboxes right
     // under the run checkboxes. They are not run; they only opt the
     // derived row into board submissions.
     const derivedNote = document.createElement('div');
     derivedNote.className = 'aic-note';
     derivedNote.textContent =
-      'Derived rows — not run separately. iskelet ibo = lowest single-run ' +
+      'Derived rows — not run separately. Deli ibo = lowest single-run ' +
       'score of the weakened AI. J Cezar = highest single-run score of the ' +
-      'best-possible AI. Tick to include when writing to the board.';
+      'best-possible AI. İskender 1.5 = J Cezar × 1.5. Tick to include ' +
+      'when writing to the board.';
     wrap.appendChild(derivedNote);
 
     const derived = document.createElement('div');
     derived.className = 'aic-players';
     const derivedDefs = [
       ['weakenedLow', EXTREME_PLAYER_NAMES.weakenedLow],
-      ['bestPossibleHigh', EXTREME_PLAYER_NAMES.bestPossibleHigh]
+      ['bestPossibleHigh', EXTREME_PLAYER_NAMES.bestPossibleHigh],
+      ['iskender', EXTREME_PLAYER_NAMES.iskender]
     ];
     for (const [key, labelText] of derivedDefs) {
       const label = document.createElement('label');
@@ -387,9 +398,8 @@ export class AiCampaignPanel {
     // derived row is picked up by the automatic path as well.
     const derived = AutoCampaignBatch.buildExtremeEntries(usable, this.lastDifficulty);
     for (const entry of derived) {
-      const key = entry.playerName === EXTREME_PLAYER_NAMES.weakenedLow
-        ? 'weakenedLow'
-        : 'bestPossibleHigh';
+      const key = DERIVED_KEY_BY_NAME[entry.playerName];
+      if (!key) continue;
       const cb = this.derivedChecks[key];
       if (cb && cb.checked) entries.push(entry);
     }

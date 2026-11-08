@@ -7,6 +7,12 @@ export const CampaignConfig = {
   // won battle. Gold buys units on the initial picker and the between-
   // battle reward screen, and pays for the (optional) heal.
   startingGold: 1000,
+
+  // Maximum number of units the player can FIELD (and the AI can deploy).
+  // Buying past the cap is allowed; extra units wait in the reserve and do
+  // not join battles. A champion def may declare its own unitCap, which
+  // overrides this for the player (see ChampionConfig.goblin_warlord).
+  unitCap: 10,
   battleReward: 150,
 
   // Unit price is computed from the unit's full-strength preview power:
@@ -173,5 +179,13 @@ export const CampaignConfig = {
   unitSpacing: 4.5,
   rankSpacing: 4.0,
   maxUnitsPerRank: 6,
-  formationSpacing: 0.7
+  formationSpacing: 0.7,
+  // Minimum empty space between the deepest unit of one rank and the next
+  // rank. Ranks are spaced by max(rankSpacing, unit depth + this), so
+  // default-sized units keep rankSpacing and large units get pushed apart.
+  rankClearance: 0.5,
+  // Minimum empty space between the side edges of neighbouring units in a
+  // rank. Units are spaced by max(unitSpacing, half-widths + this), so wide
+  // (large) units are pushed apart instead of overlapping.
+  unitClearance: 1.0
 };

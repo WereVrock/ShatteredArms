@@ -356,6 +356,7 @@ export class ScenarioMenu {
     this._closeModal();
 
     const overlay = document.createElement('div');
+    overlay.className = 'mt-root';
     overlay.style.cssText = [
       'position:fixed',
       'inset:0',
@@ -438,6 +439,9 @@ export class ScenarioMenu {
     const isPlayer = this.playerTeamId === teamId;
     const roleBtn = document.createElement('button');
     roleBtn.type = 'button';
+    // Class-based state so the global theme styles Player / AI legibly
+    // (see "THEME UNIFICATION" in style.css).
+    roleBtn.className = 'custom-role-btn ' + (isPlayer ? 'player' : 'ai');
     roleBtn.textContent = isPlayer ? '⚔ Player' : 'AI';
     roleBtn.style.cssText = [
       'padding:5px 14px',

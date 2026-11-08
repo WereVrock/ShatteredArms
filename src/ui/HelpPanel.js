@@ -51,6 +51,7 @@ export class HelpPanel {
 
   _build() {
     const root = document.createElement('div');
+    root.className = 'mt-root';
     Object.assign(root.style, {
       position: 'fixed',
       inset: '0',
@@ -102,6 +103,7 @@ export class HelpPanel {
     closeBtn.type = 'button';
     closeBtn.textContent = '\u00d7'; // multiplication sign, reads as an X
     closeBtn.title = 'Close (Esc)';
+    closeBtn.className = 'mt-close';
     Object.assign(closeBtn.style, {
       background: 'transparent',
       border: 'none',

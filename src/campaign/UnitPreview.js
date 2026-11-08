@@ -107,15 +107,7 @@ function maxMoraleForSoldier(race) {
 export function computeUnitPrice({
   typeDef, isUndead, aliveCount, championCostMultipliers
 }) {
-  const preview = buildPreviewUnit({
-    id: 'price-preview',
-    typeDef,
-    isUndead,
-    aliveCount,
-    maxCount: aliveCount,
-    teamId: 'blue'
-  });
-  const basePower = preview.getPower().total;
+  const basePower = previewPower(typeDef, isUndead, aliveCount);
   let price = Math.floor(basePower / POWER_PER_GOLD);
 
   if (championCostMultipliers) {
@@ -133,6 +125,23 @@ export function computeUnitPrice({
     price = Math.round(price * UNDEAD_RECRUITMENT_COST_MULT);
   }
   return price;
+}
+
+// Power of a fresh full-strength unit of `aliveCount` soldiers. The one
+// place that turns a (type, undead, count) triple into a power number:
+// the campaign price, the Custom Battle rows and team totals, and the
+// multiplayer lobby's budget gate all call this, so they cannot disagree.
+// `options` is forwarded to UnitPower.compute (includeRanged, ...).
+export function previewPower(typeDef, isUndead, aliveCount, options = {}) {
+  const preview = buildPreviewUnit({
+    id: 'power-preview',
+    typeDef,
+    isUndead,
+    aliveCount,
+    maxCount: aliveCount,
+    teamId: 'blue'
+  });
+  return preview.getPower(options).total;
 }
 
 export function buildPreviewUnit({

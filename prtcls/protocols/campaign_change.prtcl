@@ -1,0 +1,9 @@
+!id changes
+1-in campaign cap maximum number of units to 10. in campaign screen show number of units and the cap with the format of 5/10. Goblin warlord has 12 cap  
+2.player can buy but not field more than the cap. Unfielded armies dont join the battle. Proper ui update needed
+3 player can merge same unit types. Their current soldiers and current max soldiers get summed up.  xps (see xp calculation)  of each pre merge unit gets multiplied by unit size(current soldiers), summed up and divided to new unit size to figure out the new xp level.  
+
+Xp calculation: say unit is level 5 and gained 40 more xp after the 5th level. Xp is calculated as : the number of xp required to reach level 5 + 40
+4. Replenishing merged units still costs 1 unmerged unit full price but can only replenish up to maximum number of soldiers of the unmerged unit. 
+5. Ai armies still buys randomly but once unit cap is reached, it attempts to merge to make room for new units. İf cap reached can only buy units that can merge with existing ones
+

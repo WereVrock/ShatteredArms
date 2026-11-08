@@ -37,6 +37,7 @@ export class DeploymentPanel {
     // action, the explanatory line reads underneath.
     this.button = document.createElement('button');
     this.button.textContent = 'Start Battle';
+    this.button.className = 'mt-btn-primary';
     this.button.style.cssText = [
       'padding:12px 44px',
       'font-size:17px',

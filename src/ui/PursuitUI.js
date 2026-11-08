@@ -17,6 +17,7 @@
 
 export function showPursuitPrompt(onPursue, onFlee) {
   const overlay = document.createElement('div');
+  overlay.className = 'mt-root';
   overlay.style.cssText = [
     'position:fixed', 'inset:0', 'background:rgba(0,0,0,0.6)',
     'display:flex', 'align-items:center', 'justify-content:center',
@@ -79,6 +80,7 @@ export function showPursuitPrompt(onPursue, onFlee) {
 export function showEndBattleButton(onClick) {
   const btn = document.createElement('button');
   btn.textContent = 'END BATTLE';
+  btn.className = 'mt-btn-danger';
   btn.style.cssText = [
     'position:fixed',
     'top:16px',

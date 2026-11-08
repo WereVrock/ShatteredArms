@@ -775,12 +775,27 @@ _resolveAttack(attacker, defender, unitsById) {
     const mult = CombatConfig.championXpPerSoldierPower;
     let attackerGain = 0;
     let defenderGain = 0;
-    if (defender.soldierPowerCache > 0) {
-      attackerGain = defender.soldierPowerCache * mult;
+
+    // Routing / shattered soldiers give one-third of their non-routing
+    // XP rate. See BattleSimulation._updateSoldierPowerCache for where
+    // routingXpCache is populated. Rationale: isBattleOver() counts
+    // routing soldiers as still fighting (they may rally), so the sim
+    // keeps running while the attacker pursues them — but a fleeing
+    // enemy is not defending itself, so each swing teaches less. The
+    // fallback covers a resumed save from before this field existed.
+    const defenderRate = (defender.state === 'routing' || defender.state === 'shattered')
+      ? (defender.routingXpCache ?? ((defender.soldierPowerCache || 0) / 3))
+      : defender.soldierPowerCache;
+    if (defenderRate > 0) {
+      attackerGain = defenderRate * mult;
       attacker.championXpRaw += attackerGain;
     }
-    if (attacker.soldierPowerCache > 0) {
-      defenderGain = attacker.soldierPowerCache * mult;
+
+    const attackerRate = (attacker.state === 'routing' || attacker.state === 'shattered')
+      ? (attacker.routingXpCache ?? ((attacker.soldierPowerCache || 0) / 3))
+      : attacker.soldierPowerCache;
+    if (attackerRate > 0) {
+      defenderGain = attackerRate * mult;
       defender.championXpRaw += defenderGain;
     }
 
