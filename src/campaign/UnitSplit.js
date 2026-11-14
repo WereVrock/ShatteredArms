@@ -20,6 +20,7 @@
 //     CampaignArmy.placeNew).
 
 import { unmergedSize } from './UnitMerge.js';
+import { HoundRoster } from './HoundRoster.js';
 
 export const SplitMode = Object.freeze({
   BASE: 'base',
@@ -100,6 +101,11 @@ export function splitInRoster(roster, entryId, mode) {
     maxCount: plan.detachedMax
   };
 
+  if (HoundRoster.hasHounds(source)) {
+    const all = HoundRoster.normalized(source, source.aliveCount);
+    detached.houndCounts = all.slice(0, plan.detachedAlive);
+    source.houndCounts = all.slice(plan.detachedAlive);
+  }
   source.aliveCount = plan.keptAlive;
   source.maxCount = plan.keptMax;
 

@@ -62,6 +62,15 @@ export class HostController {
         case 'fireAtWill':
           unit.fireAtWill = !!p.value;
           break;
+        case 'crewDontWait':
+          unit.setCrewDontWait(!!p.value);
+          break;
+        case 'leaveBattle':
+          unit.leaveBattle();
+          break;
+        case 'recallHounds':
+          unit.recallHounds();
+          break;
       }
     }
   }

@@ -1748,13 +1748,13 @@ html, body {
   border: 1px solid #5a3a10 !important;
 }
 
-/ =====================================================================
-THEME UNIFICATION
+/* =====================================================================
+   THEME UNIFICATION
 
-Every primary action shares one “gilded emerald” look.
-Toggled / active states stay legible (dark gold + bright text).
-Selectors are button.xxx so they also beat “.mt-root button”.
-===================================================================== */
+   Every primary action shares one "gilded emerald" look.
+   Toggled / active states stay legible (dark gold + bright text).
+   Selectors are button.xxx so they also beat ".mt-root button".
+   ===================================================================== */
 
 button.menu-confirm,
 button.custom-start,

@@ -150,7 +150,7 @@ export class MoraleSystem {
       // champion's will — and they do not rout, rally, or react to allies
       // or enemies. Forced to max morale every tick so nothing downstream
       // reads a stale value.
-      if (soldier.isThrall) {
+      if (soldier.isThrall || soldier.unitTypeDef.noMorale === true) {
         soldier.morale = soldier.maxMorale;
         soldier.justKilled = false;
         if (soldier.isRouting) {
@@ -204,6 +204,8 @@ export class MoraleSystem {
       for (const s of allSoldiers) {
         if (s.teamId !== teamId) continue;
         if (!s.isAlive()) continue;
+        // Morale-less soldiers (hounds) do not keep a team from collapsing.
+        if (s.unitTypeDef.noMorale === true) continue;
         hasLiving = true;
         if (s.state !== 'routing' && s.state !== 'shattered') {
           allRouting = false;

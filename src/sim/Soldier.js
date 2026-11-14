@@ -2,7 +2,8 @@ import { CombatConfig } from '../config/CombatConfig.js';
 import { MoraleConfig } from '../config/MoraleConfig.js';
 import { toSimSpeed } from '../config/SpeedScale.js';
 import { raceOf } from '../config/RaceConfig.js';
-import { isCavalry } from '../config/UnitClasses.js';
+import { isCavalry, isMounted } from '../config/UnitClasses.js';
+import { SpearWall } from './SpearWall.js';
 
 // Plain data object for one soldier. No behavior methods beyond simple accessors.
 
@@ -244,6 +245,107 @@ export class Soldier {
     // without further Soldier changes.
     this.rangedAccuracyMult = 1.0;
 
+    // --- Crew-served weapon fields ---
+    // 'shooter' | 'carrier' | null. Written only by CrewPairing (and
+    // setCrewRole at unit build). crewPartnerId is the id of the soldier
+    // this one works a weapon with, or null while unpaired.
+    this.crewRole = null;
+    this.crewPartnerId = null;
+
+    // True once the soldier's unit has been ordered to leave the battle
+    // (see BattleWithdrawal). Read by MovementSystem and
+    // RoutingExtractionSystem.
+    this.withdrawing = false;
+
+    // --- Hound fields (see HoundPack / HoundSystem) ---
+    // Handler soldier this hound belongs to, its index among that
+    // handler's hounds, and its mode: 'leashed' | 'attacking' | 'rogue'.
+    this.houndOwnerId = null;
+    this.houndIndex = 0;
+    this.houndMode = 'leashed';
+    this.houndTargetUnitId = null;
+    this.houndLateral = null;
+    this.houndRogueDir = null;
+    // Hound followed while the owner is dead (see HoundPack.anchorFor).
+    this.houndBuddyId = null;
+    // Flanking state (see HoundSystem): the circling waypoint read by
+    // MovementSystem, the target it was planned for, the side (+1 / -1),
+    // whether circling is over and how long it has lasted.
+    this.houndWaypoint = null;
+    this.houndFlankTarget = null;
+    this.houndFlankDone = false;
+    this.houndFlankSide = 0;
+    this.houndFlankTicks = 0;
+
+    // --- Chargob beast fields (see ChargobCharge) ---
+    // chargeActive: running its fixed course. chargePending: 'through' |
+    // 'poke' | 'wild', set by whoever decided it should charge; ChargobSystem
+    // starts the charge on its next pass. chargeSpent: a charge that ended
+    // without dying, the beast never rejoins the line.
+    this.chargeActive = false;
+    this.chargeDirX = 0;
+    this.chargeDirZ = 0;
+    this.chargeHasHit = false;
+    this.chargePending = null;
+    this.chargeSpent = false;
+    this.chargeStallTicks = 0;
+    this.chargeLastX = x;
+    this.chargeLastZ = z;
+    // Herd place (ChargobPack), whether the beast is walking to it
+    // (ChargobHerd), the death charge (ChargobCharge.deathThroes) and the
+    // cosmetic scuffle (ChargobHerd.scuffle).
+    this.herdIndex = 0;
+    this.beastWalking = false;
+    this.chargeDying = false;
+    this.chargeDyingTicks = 0;
+    this.scuffleTicks = 0;
+    this.scuffleTarget = null;
+    // Herding (ChargobHerd / ChargobHandlers): the place a beast should walk
+    // to, the beast a handler is sent to (null = none), the handler's cosmetic
+    // hit cooldown, and whether an abandoned beast has lost its handlers.
+    this.herdTx = x;
+    this.herdTz = z;
+    this.herdAnchorId = null;
+    this.herdHitCd = 0;
+    this.beastOrphaned = false;
+
+    // --- Chargob panic and control (see ChargobPanic / ChargobForces / ChargobHandlerAI) ---
+    // beastDetached: the beast started charging and left its unit for good.
+    this.beastDetached = false;
+    // panic 0..100, personal threshold bias, HP seen last tick, ticks without
+    // damage, whether its death was already counted.
+    this.panic = 0;
+    this.panicBias = 0;
+    this.panicHp = this.hp;
+    this.panicCalmTicks = 0;
+    this.panicSeenDead = false;
+    // Herd state: strayed from its place, has to go to its place, handlers
+    // wanted, whether it is pulled (not pushed), resistance of enemy push +
+    // walk home, velocity of this tick.
+    this.beastStray = false;
+    this.herdNeed = false;
+    this.herdPullWanted = false;
+    this.herdWanted = 0;
+    this.herdResist = 0;
+    this.herdVx = 0;
+    this.herdVz = 0;
+    // Handler: index among the handlers of its beast.
+    this.herdSlotIdx = 0;
+    // Idle wandering: ticks to the next walk, distance and direction left.
+    this.wanderTicks = 0;
+    this.wanderLeft = 0;
+    this.wanderDirX = 0;
+    this.wanderDirZ = 0;
+    // Tick until which a charging beast cannot throw this soldier again.
+    this.trampleUntil = 0;
+    // Goaded beast: turning to the unit's direction before the charge starts.
+    this.chargeAimTicks = 0;
+    this.chargeAimDone = false;
+    // Facing a standing beast keeps (FacingSystem must not turn it to the orders).
+    this.beastKeepFacing = facing;
+    // Handler works (herds or goads) and therefore runs.
+    this.herdRunSet = false;
+
     // --- Blood Thrall fields ---
     // Raised by the Blood Thrall champion skill from a dead enemy. Thralls
     // are half-statted, morale-immune, and expire after a fixed lifetime.
@@ -289,8 +391,28 @@ export class Soldier {
     // skill. 0 = ready.
     this.bloodFuryCooldownUntil = 0;
 
-    this.currentSpeed = 0;
-    this.movedThisTick = false;
+    this.currentSpeed = 0; this.movedThisTick = false;
+
+    // --- Locomotion / terrain ---
+    // Gait is the future walk/run switch. Everything reads it through
+    // gaitSpeedMult and the terrain LUT, so adding 'run' later = set this
+    // field + change gaitSpeedMult + (optionally) add fatigue cost.
+    this.gait = 'walk';
+    // Written each tick by MovementSystem from the terrain under the soldier.
+    this.terrainSpeedMult = 1.0;
+    // Last position known to be outside blocked terrain (TerrainCollisionSystem).
+    this.terrainSafeX = x;
+    this.terrainSafeZ = z;
+    // Slope handling, written by MovementSystem. slopeSpeedMult is the factor
+    // for the direction walked last tick; climbSlope > 0 means uphill.
+    this.slopeSpeedMult = 1.0;
+    this.climbSlope = 0;
+    // Direct-march (double-click) progress through Unit._directPath.
+    this.pathStamp = 0;
+    this.pathIdx = 0;
+    // Router steering around obstacles (see RouterSteering).
+    this.fleeSteer = 0;
+    this.fleeSteerSign = (this.id & 1) ? 1 : -1;
 
     // Set true by any system that moves this soldier by external force
     // — collision push, throw integration, anything that is not the
@@ -322,6 +444,17 @@ export class Soldier {
     // 0..1, purely for rendering the mesh tilt. FacingSystem is the only
     // writer.
     this.spearRaiseAmount = 0;
+
+    // Terrain-driven spear wall state. Written ONLY by SpearWallSystem,
+    // read through SpearWall.js. Non-spearmen stay at the defaults.
+    // Integrity: 1 = intact wall, 0 = fully disrupted. See SpearWallConfig.
+    this.spearWallIntegrity = 1;
+    this.spearWallOwn = 1;
+    this.spearWallTarget = 1;
+    this.spearWallBroken = false;
+    // Fixed per-soldier buckling direction, filled lazily by SpearWall.
+    this.spearWallDirX = 0;
+    this.spearWallDirZ = 0;
 
     // Body style is picked here, once per soldier, and read by
     // SoldierModelComposer at render time. Delegated to a resolver so
@@ -359,6 +492,9 @@ export class Soldier {
     if (this.isChampion && this.unitTypeDef.championBodyVariant) {
       return this.unitTypeDef.championBodyVariant;
     }
+    if (this.crewRole === 'carrier' && this.unitTypeDef.crew?.carrierBodyVariant) {
+      return this.unitTypeDef.crew.carrierBodyVariant;
+    }
     if (this.unitTypeDef.bodyVariant) return this.unitTypeDef.bodyVariant;
     if (this.unitTypeDef.race === 'goblin') return 'goblin';
     return 'blob';
@@ -390,6 +526,15 @@ export class Soldier {
     this.bodyVariant = this._resolveBodyVariant();
   }
 
+  // Sets the crew role and re-resolves the body model (carriers render with
+  // the type's carrierBodyVariant). Idempotent.
+  setCrewRole(role) {
+    const next = role || null;
+    if (next === this.crewRole) return;
+    this.crewRole = next;
+    this.bodyVariant = this._resolveBodyVariant();
+  }
+
 get effectiveMass() {
     const base = this.unitTypeDef.mass;
     let mass = this.isUndead ? base * CombatConfig.skeleton.massMult : base;
@@ -399,6 +544,7 @@ get effectiveMass() {
     if (typeof this._thrallMassMultiplier === 'number') {
       mass *= this._thrallMassMultiplier;
     }
+    if (this.chargeActive) mass *= CombatConfig.chargob.chargeMassMult;
     return mass;
   }
 
@@ -448,10 +594,41 @@ get effectiveMass() {
     if (this.isUndead && !isCavalry(this.unitTypeDef)) {
       speed *= CombatConfig.skeleton.moveSpeedMultiplier;
     }
+    // Terrain-disrupted spear wall: men re-dress the line instead of
+    // advancing. Unit._computeAnchorSpeed follows the slowest soldier, so
+    // the whole block moves at the pace of its worst-off file.
+    speed *= SpearWall.moveSpeedMult(this);
+    if (this.chargeActive) speed *= CombatConfig.chargob.chargeSpeedMult;
+    if (this.herdRunSet) speed *= CombatConfig.chargob.handlerSpeedMult;
     return speed;
   }
 
-  // Multiplier applied to every fatigue DRAIN this soldier incurs.
+get isMountedType() {
+    if (this._isMountedType === undefined) this._isMountedType = isMounted(this.unitTypeDef);
+    return this._isMountedType;
+  }
+
+// Speed factor of the current gait. 1.0 for walking. When running exists:
+  // return this.gait === 'run' ? CombatConfig.movement.runSpeedMult : 1.0;
+  get gaitSpeedMult() {
+    return 1.0;
+  }
+
+// Equipment/race speed * gait * terrain under the feet. Every system that
+  // asks "how fast can this soldier go right now" should read this.
+  get actualMoveSpeed() {
+    // Slope applies only while actually walking, so a soldier standing on a
+    // hillside does not hold the formation anchor back with a stale factor.
+    return this.surfaceMoveSpeed * (this.movedThisTick ? this.slopeSpeedMult : 1.0);
+  }
+
+  // Equipment/race speed * gait * terrain surface. No slope: MovementSystem
+  // applies slope per step, once the walking direction is known.
+  get surfaceMoveSpeed() {
+    return this.effectiveMoveSpeed * this.gaitSpeedMult * this.terrainSpeedMult;
+  }
+
+// Multiplier applied to every fatigue DRAIN this soldier incurs.
   // Race-level — a goblin (RaceConfig.goblin.fatigueDrainMultiplier 1.5)
   // tires 1.5x as fast as a human on every swing, block attempt, arrow
   // loosed, and walking tick. Does NOT affect regen: a goblin resting
@@ -606,8 +783,11 @@ get effectiveMass() {
     // Two hashes, not one, because the two axes need to vary
     // independently — a single hash used for both would produce a 1-D
     // diagonal wobble, which reads as a wave, not scatter.
-    const hx = hash32(this.id);
-    const hz = hash32((this.id ^ 0x9E3779B9) >>> 0);
+    // Crew soldiers share their cell's seed, so a shooter/carrier pair
+    // wobbles as one body (see CrewFormation).
+    const seed = this.crewCellSeed ?? this.id;
+    const hx = hash32(seed);
+    const hz = hash32((seed ^ 0x9E3779B9) >>> 0);
     const rx = (hx / 4294967295) * 2 - 1;
     const rz = (hz / 4294967295) * 2 - 1;
 
@@ -623,7 +803,8 @@ get effectiveMass() {
   get effectiveTurnRateRadPerSec() {
     const t = CombatConfig.turning;
     let rate = t.baseTurnRateRadPerSec;
-    if (this.currentSpeed >= toSimSpeed(CombatConfig.charge.speedThreshold)) {
+    if (this.currentSpeed >= toSimSpeed(CombatConfig.charge.speedThreshold)
+        && this.unitTypeDef.noChargeImpact !== true) {
       rate *= t.chargingTurnRateMult;
     } else if (this.state === 'engaged') {
       rate *= t.engagedTurnRateMult;

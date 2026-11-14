@@ -11,10 +11,14 @@ import { ProjectileSystem } from './ProjectileSystem.js';
 import { MoraleSystem } from './MoraleSystem.js';
 import { CollisionSystem } from './CollisionSystem.js';
 import { BoundsSystem } from './BoundsSystem.js';
+import { TerrainCollisionSystem } from './TerrainCollisionSystem.js';
 import { ContactAttackSystem } from './ContactAttackSystem.js';
 import { RoutingExtractionSystem } from './RoutingExtractionSystem.js';
 import { BloodThrallSystem } from './BloodThrallSystem.js';
 import { OrphanedMountSystem } from './OrphanedMountSystem.js';
+import { SpearWallSystem } from './SpearWallSystem.js';
+import { HoundSystem } from './HoundSystem.js';
+import { ChargobSystem } from './ChargobSystem.js';
 import { CombatConfig } from '../config/CombatConfig.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
 
@@ -75,6 +79,19 @@ export class BattleSimulation {
     this.moraleSystem.proximity = this.proximityMap;
     this.collisionSystem = new CollisionSystem(this.spatialGrid);
     this.boundsSystem = new BoundsSystem();
+    // Terrain spear-wall integrity. Writes Soldier.spearWall* each tick
+    // (only while terrain exists); read through SpearWall.js by movement,
+    // formation layout, combat and the cavalry AI.
+    this.spearWallSystem = new SpearWallSystem();
+    // Goblin hounds (unit.companions). Runs before TargetingSystem.
+    this.houndSystem = new HoundSystem(this.spatialGrid);
+    // Chargob beasts (unit.companions of chargob units). Runs before TargetingSystem.
+    this.chargobSystem = new ChargobSystem(this.spatialGrid);
+
+    // Terrain (optional). Null = flat ground, exactly the old behaviour.
+    this.terrain = null;
+    this.terrainCollisionSystem = new TerrainCollisionSystem(null);
+    if (options.terrain) this.setTerrain(options.terrain);
     // Passing-attack detection. Runs after CollisionSystem so all
     // position changes for the tick are final before contacts are
     // read, and before CombatResolutionSystem which consumes the
@@ -124,7 +141,20 @@ export class BattleSimulation {
     this.tickProfile = null;
   }
 
-  getAllSoldiers() {
+setTerrain(terrain) {
+    this.terrain = terrain || null;
+    this.movementSystem.terrain = this.terrain;
+    this.terrainCollisionSystem.terrain = this.terrain;
+    // Arrows need the terrain for two things: launch/landing heights at
+    // spawn (so arcs sit above the local ground), and per-tick ground
+    // collision plus a ground-relative defender body band. See
+    // ProjectileSystem.
+    this.projectileSystem.terrain = this.terrain;
+    // Deployment moves settle onto free ground (see Unit.issueInstantMoveOrder).
+    for (const unit of this.units) unit.placementTerrain = this.terrain;
+}
+
+getAllSoldiers() {
     // Preallocate and fill directly. The spread in push(...unit.soldiers)
     // goes through the arguments object and, on units with hundreds of
     // soldiers, can approach engine argument-count limits. Both problems
@@ -132,13 +162,17 @@ export class BattleSimulation {
     // same references, no behavioural difference. Called once per frame
     // by main.js for the renderer sync, so this is on the render hot path.
     let total = 0;
-    for (const unit of this.units) total += unit.soldiers.length;
+    for (const unit of this.units) total += unit.soldiers.length + unit.companions.length;
     const all = new Array(total);
     let idx = 0;
     for (const unit of this.units) {
       const soldiers = unit.soldiers;
       for (let i = 0; i < soldiers.length; i++) {
         all[idx++] = soldiers[i];
+      }
+      const companions = unit.companions;
+      for (let i = 0; i < companions.length; i++) {
+        all[idx++] = companions[i];
       }
     }
     return all;
@@ -166,8 +200,19 @@ export class BattleSimulation {
 
     // AI runs before the systems so any orders it issues are honoured by
     // movement/targeting within the same tick.
-    if (this.battleAI) this.battleAI.tick();
+    if (this.battleAI) {
+      this.battleAI.setTerrain(this.terrain);
+      this.battleAI.tick();
+    }
     if (prof) prof.mark('ai');
+
+    // Spear wall integrity first: Unit.update reads it for the march
+    // anchor speed and slot buckling, MovementSystem for walking speed and
+    // combat for the frontal penalty and the brace. Needs terrain; on flat
+    // ground every soldier keeps the constructor default of 1.
+    if (this.terrain) {
+      this.spearWallSystem.update(allSoldiers, this.terrain, this._tick, this.deltaSeconds);
+    }
 
     // Advance each unit's marching formation anchor BEFORE targeting/
     // movement read soldier state this tick — this is what makes a moving
@@ -176,7 +221,7 @@ export class BattleSimulation {
     // from the anchor's current position before anyone paths toward it.
     for (const unit of this.units) {
       unit.reflowIfCasualties();
-      unit.update(this.deltaSeconds, this.unitsById);
+      unit.update(this.deltaSeconds, this.unitsById, this.terrain);
     }
     if (prof) prof.mark('unitUpdate');
 
@@ -187,17 +232,22 @@ export class BattleSimulation {
     soldiersById.clear();
     for (const s of allSoldiers) soldiersById.set(s.id, s);
     if (prof) prof.mark('grid');
+    this.houndSystem.update(this.units, this.unitsById, soldiersById);
+    this.chargobSystem.update(this.units, this.unitsById, soldiersById, this.combatResolutionSystem);
     this.targetingSystem.update(allSoldiers, this.unitsById);
     if (prof) prof.mark('targeting');
     this.movementSystem.update(allSoldiers, this.unitsById, this.deltaSeconds);
     if (prof) prof.mark('movement');
     this.collisionSystem.update(allSoldiers);
+    this.terrainCollisionSystem.update(allSoldiers);
     if (prof) prof.mark('collision');
     this.contactAttackSystem.update(allSoldiers);
     if (prof) prof.mark('contact');
     this.threatFacingSystem.update(allSoldiers);
     if (prof) prof.mark('threatFacing');
     this.facingSystem.update(allSoldiers, this.unitsById);
+    // Beasts keep the herd's own facing instead of the unit's.
+    this.chargobSystem.afterFacing(this.units);
     if (prof) prof.mark('facing');
     if ((this._tick % POWER_CACHE_INTERVAL_TICKS) === 0) {
       this._updateSoldierPowerCache();
@@ -228,6 +278,8 @@ export class BattleSimulation {
     this.proximityMap.rebuild(allSoldiers);
     this.moraleSystem.update(allSoldiers, this.unitsById, this.debugHistoryEnabled);
     if (prof) prof.mark('morale');
+    // Late pass: melee shoves and knockback may have moved soldiers into terrain.
+    this.terrainCollisionSystem.update(allSoldiers);
     this.boundsSystem.update(allSoldiers);
     if (prof) prof.mark('bounds');
     this.extractionSystem.update(allSoldiers, this.unitsById);
@@ -312,7 +364,7 @@ export class BattleSimulation {
   _updateSoldierPowerCache() {
     for (const unit of this.units) {
       const fighters = unit.getNonRoutingAliveCount();
-      const aliveCount = unit.getAliveSoldiers().length;
+      const aliveCount = unit.getAliveCount();
 
       // Nobody left alive at all — clean zero, no XP accrual from
       // swinging at corpses.
@@ -373,19 +425,30 @@ export class BattleSimulation {
   // champion-dead condition in handleBattleEnded and converts it into a
   // campaign-game-over. Ordering matters: this runs FIRST so a champion
   // death on the same tick as a wipe still reports the death.
-  isBattleOver() {
-    for (const unit of this.units) {
-      const champ = unit.championSoldier;
+isBattleOver() {
+    const units = this.units;
+    for (let i = 0; i < units.length; i++) {
+      const champ = units[i].championSoldier;
       if (champ && champ.state === 'dead') return true;
     }
 
-    const teamIds = new Set(this.units.map(u => u.teamId));
-    for (const teamId of teamIds) {
-      const teamUnits = this.units.filter(u => u.teamId === teamId);
-      const teamHasFighters = teamUnits.some(u =>
-        u.getAliveSoldiers().some(s => s.state !== 'shattered')
-      );
-      if (!teamHasFighters) return true;
+    // teamId -> has a soldier that is alive and not shattered.
+    const hasFighters = new Map();
+    for (let i = 0; i < units.length; i++) {
+      const unit = units[i];
+      if (!hasFighters.has(unit.teamId)) hasFighters.set(unit.teamId, false);
+      if (hasFighters.get(unit.teamId)) continue;
+      const soldiers = unit.soldiers;
+      for (let j = 0; j < soldiers.length; j++) {
+        const s = soldiers[j];
+        if (s.isAlive() && s.state !== 'shattered') {
+          hasFighters.set(unit.teamId, true);
+          break;
+        }
+      }
+    }
+    for (const alive of hasFighters.values()) {
+      if (!alive) return true;
     }
     return false;
   }

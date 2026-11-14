@@ -10,6 +10,7 @@ import { computeUnitPrice } from './UnitPreview.js';
 import { layoutRoster } from '../scenarios/RosterLayout.js';
 import { CampaignArmy } from './CampaignArmy.js';
 import { AIRosterCap } from './AIRosterCap.js';
+import { HoundRoster } from './HoundRoster.js';
 
 // Builds a scenario object for main.js's startScenario from a campaign state,
 // plus the AI roster generator used when a battle begins. The scenario's
@@ -356,6 +357,9 @@ function buildUnits(state) {
     playerRoster, 'blue', CampaignConfig.playerBaseZ, FACE_SOUTH
   );
   units.push(...playerUnits);
+
+  // Goblin hound packs persist between battles (see HoundRoster).
+  HoundRoster.applyToUnits(playerUnits, playerRoster);
 
   // Unit-level bonuses first. Each player unit whose roster entry is
   // above level 1 gets its level-derived bonuses applied across every

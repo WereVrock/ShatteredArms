@@ -90,8 +90,16 @@ export class LocalMultiplayerSetup {
   }
 
   // Called by main.js when the sub CustomBattleSetup fires onStart.
-  setCustomRosters(blueRoster, redRoster, playerTeamId) {
-    this.customRosters = { blueRoster, redRoster, playerTeamId };
+  // biome and ruinType travel with the roster set so a Restart of a
+  // same-device battle rebuilds the same terrain. Both default to their
+  // generator defaults when a caller omits them (older callers that
+  // never passed them still work).
+  setCustomRosters(blueRoster, redRoster, playerTeamId, biome, ruinType) {
+    this.customRosters = {
+      blueRoster, redRoster, playerTeamId,
+      biome: (typeof biome === 'string' && biome.length > 0) ? biome : 'auto',
+      ruinType: (typeof ruinType === 'string' && ruinType.length > 0) ? ruinType : 'random'
+    };
     this.forceSource = 'custom';
     this.show();
   }

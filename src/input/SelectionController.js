@@ -1,5 +1,6 @@
 // ===== SelectionController.js =====
 import * as THREE from 'three';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
 
 // Left-click: selects a single unit (or deselects on empty ground).
 // Left-click-drag: rectangle-select (only when RMB is NOT also held — LMB+RMB
@@ -139,15 +140,20 @@ export class SelectionController {
       if (alive.length === 0) continue;
 
       for (const s of alive) {
+        // Ground height under the soldier. Picking must match where the
+        // soldier is DRAWN (SoldierView offsets by terrain height too),
+        // otherwise a click on a hilltop projects to empty screen space.
+        const gy = ActiveTerrain.heightAt(s.pos.x, s.pos.z);
+
         // Foot point at ground level.
-        v.set(s.pos.x, 0, s.pos.z).project(camera);
+        v.set(s.pos.x, gy, s.pos.z).project(camera);
         if (v.z < -1 || v.z > 1) continue;
         const footX = canvasRect.left + (v.x * 0.5 + 0.5) * canvasRect.width;
         const footY = canvasRect.top  + (-v.y * 0.5 + 0.5) * canvasRect.height;
         const footZ = v.z;
 
         // Head point at approximate soldier-top height.
-        v.set(s.pos.x, PICK_HEAD_Y, s.pos.z).project(camera);
+        v.set(s.pos.x, gy + PICK_HEAD_Y, s.pos.z).project(camera);
         if (v.z < -1 || v.z > 1) continue;
         const headX = canvasRect.left + (v.x * 0.5 + 0.5) * canvasRect.width;
         const headY = canvasRect.top  + (-v.y * 0.5 + 0.5) * canvasRect.height;
@@ -325,7 +331,8 @@ export class SelectionController {
     for (const unit of this.units) {
       if (!this.isControllable(unit)) continue;
       for (const soldier of unit.getAliveSoldiers()) {
-        const screenPos = this._worldToScreen(soldier.pos.x, 0.5, soldier.pos.z, canvasRect);
+        const gy = ActiveTerrain.heightAt(soldier.pos.x, soldier.pos.z);
+        const screenPos = this._worldToScreen(soldier.pos.x, gy + 0.5, soldier.pos.z, canvasRect);
         if (screenPos.x >= rect.left && screenPos.x <= rect.right &&
             screenPos.y >= rect.top && screenPos.y <= rect.bottom) {
           hitUnits.add(unit);

@@ -4,8 +4,8 @@
 //   name   — human-readable product name (matches the main-menu title)
 //   number — semantic version string, rendered as `v<number>`
 export const VERSION = {
-  name: ' Horde Edition',
-  number: '0.5.3',
+  name: ' Columbus Edition',
+  number: '0.6.0',
   // Balance version. Bump when unit stats, prices, AI gold schedules,
   // difficulty modifiers, or scoring rules change in a way that makes
   // old high scores incomparable. High-score boards are partitioned by

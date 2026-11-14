@@ -63,6 +63,7 @@
 // whole 60 ticks instead of the view clamping at the static 35).
 import { CombatConfig } from '../config/CombatConfig.js';
 import { getRangedRange } from '../config/UnitClasses.js';
+import { CrewPairing } from './CrewPairing.js';
 
 export class RangedCombatSystem {
   constructor(projectileSystem) {
@@ -112,6 +113,10 @@ export class RangedCombatSystem {
       if (!attacker.isAlive()) continue;
       if (attacker.state === 'routing' || attacker.state === 'shattered') continue;
       if (attacker.state !== 'ranged') continue;
+
+      // Crew-served weapons: only a shooter with a living carrier close by
+      // can fire. Carriers and unpaired shooters never do.
+      if (attacker.unitTypeDef.crew && !CrewPairing.canFire(attacker, byId)) continue;
 
       // Fire-at-will gate. FAW off means the unit does not fire at enemies
       // on its own — the player has to select the unit and click an enemy
@@ -179,12 +184,25 @@ export class RangedCombatSystem {
           // base 35 with a slack-string tail. Read by SoldierView; no
           // sim system consults it.
           attacker.bowDrawMaxTicks = windUp;
+          this._stampHolder(attacker, byId, windUp);
         }
         continue;
       }
 
       const cd = this.volleyCooldownByUnit.get(unitId) ?? 0;
-      if (cd > 0) continue;
+      if (cd > 0) {
+        // A crew pair that finished setting up after the unit's cycle began
+        // has no draw stamped yet. Give it the remaining cycle so its carrier
+        // visibly draws instead of firing from a slack string.
+        for (const { attacker } of shooters) {
+          if (attacker.unitTypeDef.crew && attacker.attackCooldownTicks <= 0) {
+            attacker.attackCooldownTicks = cd;
+            attacker.bowDrawMaxTicks = cd;
+            this._stampHolder(attacker, byId, cd);
+          }
+        }
+        continue;
+      }
 
       // Cadence to the NEXT volley, scaled by the shooters' average
       // fatigue. Computed BEFORE the shooter loop pays this volley's
@@ -195,7 +213,7 @@ export class RangedCombatSystem {
       const nextCd = this._volleyCooldownFor(shooters);
 
       for (const { attacker, defender } of shooters) {
-        this._spawnArrow(attacker, defender, unitsById);
+        this._spawnArrow(attacker, defender, unitsById, byId);
         attacker.fatigue = Math.max(0,
           attacker.fatigue
           - CombatConfig.fatigue.drainPerAttack * attacker.fatigueDrainMultiplier);
@@ -215,6 +233,7 @@ export class RangedCombatSystem {
         // clamping the numerator at 35 and leaving the string slack for
         // the first 25. See SoldierView._applyBowDraw.
         attacker.bowDrawMaxTicks = nextCd;
+        this._stampHolder(attacker, byId, nextCd);
       }
       this.volleyCooldownByUnit.set(unitId, nextCd);
 
@@ -238,7 +257,23 @@ export class RangedCombatSystem {
   // disc's center — the archer is aiming at the formation, not
   // uniformly covering its footprint, and a center-biased scatter keeps
   // well-aimed volleys reading as well-aimed.
-  _spawnArrow(attacker, defender, unitsById) {
+  // Crew-served weapon: the CARRIER holds the bow, so the draw animation
+  // (driven by attackCooldownTicks / bowDrawMaxTicks, see SoldierView) is
+  // stamped on the carrier as well as on the shooter.
+  _stampHolder(shooter, byId, ticks) {
+    if (!shooter.unitTypeDef.crew || shooter.crewPartnerId === null) return;
+    const holder = byId.get(shooter.crewPartnerId);
+    if (!holder) return;
+    holder.attackCooldownTicks = ticks;
+    holder.bowDrawMaxTicks = ticks;
+  }
+
+  _spawnArrow(attacker, defender, unitsById, byId) {
+    // Crew-served weapon: the carrier holds it, so the bolt leaves from the
+    // carrier's position. The shooter still owns the shot (kill credit).
+    const holder = (attacker.unitTypeDef.crew && byId && attacker.crewPartnerId !== null)
+      ? (byId.get(attacker.crewPartnerId) || attacker)
+      : attacker;
     const targetUnit = unitsById.get(defender.unitId);
     if (!targetUnit) return;
 
@@ -250,8 +285,8 @@ export class RangedCombatSystem {
     // long-range ones. See CombatConfig.arrow.accuracyAtMinRangeMult /
     // accuracyAtMaxRangeMult. Distance is measured shooter-to-target-
     // center, matching the disc the scatter is drawn in.
-    const dxC = targetCenter.x - attacker.pos.x;
-    const dzC = targetCenter.z - attacker.pos.z;
+    const dxC = targetCenter.x - holder.pos.x;
+    const dzC = targetCenter.z - holder.pos.z;
     const shotDist = Math.sqrt(dxC * dxC + dzC * dzC);
     // Per-unit max range: a shorter-ranged unit reaches its full spread
     // at its OWN max range, not the global archer envelope. Without this,
@@ -273,9 +308,10 @@ export class RangedCombatSystem {
       teamId: attacker.teamId,
       shooterUnitId: attacker.unitId,
       shooterSoldierId: attacker.id,
-      weaponType: attacker.unitTypeDef.weaponType,
-      fromX: attacker.pos.x,
-      fromZ: attacker.pos.z,
+      holderSoldierId: holder.id,
+      weaponType: attacker.unitTypeDef.rangedWeaponType ?? attacker.unitTypeDef.weaponType,
+      fromX: holder.pos.x,
+      fromZ: holder.pos.z,
       toX,
       toZ
     });
@@ -298,11 +334,15 @@ export class RangedCombatSystem {
   //   - the ceiling is not declared or is not above the base (a config
   //     that opts out of fatigue-scaled ranged cadence).
   _volleyCooldownFor(shooters) {
-    const base = CombatConfig.rangedCooldownTicks;
-    if (!shooters || shooters.length === 0) return base;
+    const globalBase = CombatConfig.rangedCooldownTicks;
+    if (!shooters || shooters.length === 0) return globalBase;
 
-    const ceiling = CombatConfig.fatigue.maxRangedCooldownAtZeroFatigue ?? base;
-    if (ceiling <= base) return base;
+    // A unit type may declare its own draw time (rangedCooldownTicks); the
+    // fatigue ceiling scales by the same ratio as the global one.
+    const base = shooters[0].attacker.unitTypeDef.rangedCooldownTicks ?? globalBase;
+    const globalCeiling = CombatConfig.fatigue.maxRangedCooldownAtZeroFatigue ?? globalBase;
+    if (globalCeiling <= globalBase) return base;
+    const ceiling = base * (globalCeiling / globalBase);
 
     const maxFatigue = CombatConfig.fatigue.max;
     if (!(maxFatigue > 0)) return base;

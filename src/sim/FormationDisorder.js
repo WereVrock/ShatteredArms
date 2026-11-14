@@ -111,22 +111,27 @@ export class FormationDisorder {
   static forSoldier(soldier, ctx) {
     if (!ctx.active) return ZERO;
 
-    const off = soldier.formationOffset;
+    // Crew pairs wobble as one body: both members use their cell's seed
+    // and slot (see CrewFormation).
+    const off = soldier.crewCellOffset || soldier.formationOffset;
+    const jid = soldier.crewCellSeed ?? soldier.id;
     let c = soldier._disorderCache;
     if (c
         && c.count === ctx.count
         && c.spacing === ctx.spacing
         && c.seed === ctx.seed
+        && c.id === jid
         && c.ox === off.x
         && c.oz === off.z) {
       return c;
     }
 
-    const o = FormationDisorder.offsetFor(ctx, soldier.id, off.x, off.z);
+    const o = FormationDisorder.offsetFor(ctx, jid, off.x, off.z);
     if (!c) c = soldier._disorderCache = {};
     c.count = ctx.count;
     c.spacing = ctx.spacing;
     c.seed = ctx.seed;
+    c.id = jid;
     c.ox = off.x;
     c.oz = off.z;
     c.x = o.x;

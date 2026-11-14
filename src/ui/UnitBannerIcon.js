@@ -117,11 +117,29 @@ function clubLayer() {
   `;
 }
 
+function shortSpearLayer() {
+  return `
+    <rect x="33" y="44" width="6" height="46" fill="${SIL}"/>
+    <polygon points="36,20 45,44 36,52 27,44" fill="${SIL}"/>
+  `;
+}
+
+function crossbowLayer() {
+  return `
+    <rect x="12" y="45" width="66" height="10" fill="${SIL}"/>
+    <path d="M 58 10 Q 84 50 58 90" fill="none"
+          stroke="${SIL}" stroke-width="7" stroke-linecap="round"/>
+    <polygon points="96,50 82,43 82,57" fill="${SIL}"/>
+  `;
+}
+
 const WEAPON_LAYERS = {
   sword: swordLayer,
   spear: spearLayer,
   bow:   bowLayer,
-  lance: lanceLayer
+  lance: lanceLayer,
+  shortSpear: shortSpearLayer,
+  crossbow: crossbowLayer
 };
 
 // --- cavalry --------------------------------------------------------------
@@ -194,7 +212,9 @@ const WEAPON_CENTERS = {
   spear: { cx: 36, cy: 46 },
   lance: { cx: 36, cy: 47 },
   bow:   { cx: 61, cy: 50 },
-  club:  { cx: 36, cy: 51 }
+  club:  { cx: 36, cy: 51 },
+  shortSpear: { cx: 36, cy: 56 },
+  crossbow:   { cx: 54, cy: 50 }
 };
 
 // The horse head alone spans roughly x 66..96, y 22..70, so its center is
@@ -217,7 +237,8 @@ const SKELETON_HORSE_SCALE_WITH_SHIELD = 0.68;
 
 function weaponTypeKey(unitTypeDef) {
   if (!unitTypeDef) return 'spear';
-  if (unitTypeDef.bodyVariant === 'goblinSlave') return 'club';
+  if (unitTypeDef.bodyVariant === 'goblinSlave' || unitTypeDef.clubWeapon === true) return 'club';
+  if (unitTypeDef.rangedWeaponType === 'crossbow') return 'crossbow';
   return WEAPON_LAYERS[unitTypeDef.weaponType] ? unitTypeDef.weaponType : 'spear';
 }
 

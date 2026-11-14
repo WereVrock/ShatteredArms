@@ -57,13 +57,15 @@ const PRESETS = Object.freeze({
     grass: false,
     fieldEdge: false,
     fog: false,
+    waterEffects: false,
     lodEnabled: true,
     modelDetail: 3,          // Simplified at closest range
     minModelDetail: 4,       // Abstracted at distance
     disableAnimations: true,
     antialias: false,
     soldierShadowRange: '40',
-    lodDistanceScale: '0.5'
+    lodDistanceScale: '0.5',
+    cullDistantObstacles: true
   },
   low: {
     shadowQuality: 'none',
@@ -72,13 +74,15 @@ const PRESETS = Object.freeze({
     grass: false,
     fieldEdge: false,
     fog: false,
+    waterEffects: false,
     lodEnabled: true,
     modelDetail: 1,          // Detailed at closest range
     minModelDetail: 4,       // Abstracted at distance
     disableAnimations: false,
     antialias: false,
     soldierShadowRange: '60',
-    lodDistanceScale: '0.7'
+    lodDistanceScale: '0.7',
+    cullDistantObstacles: true
   },
   medium: {
     shadowQuality: 'medium',
@@ -93,7 +97,12 @@ const PRESETS = Object.freeze({
     disableAnimations: false,
     antialias: true,
     soldierShadowRange: 'all',
-    lodDistanceScale: '1'
+    lodDistanceScale: '1',
+    // Explicit false — a player arriving here from low/ultraLow must see
+    // the checkbox untick. Without this entry the preset leaves whatever
+    // the previous tier set, which broke getMatchingPreset() (returned
+    // null → "Custom") and left the perf shortcut silently enabled.
+    cullDistantObstacles: false
   },
   max: {
     shadowQuality: 'high',
@@ -108,7 +117,10 @@ const PRESETS = Object.freeze({
     disableAnimations: false,
     antialias: true,
     soldierShadowRange: 'all',
-    lodDistanceScale: '1'
+    lodDistanceScale: '1',
+    // Explicit false — see medium preset. Max must never carry a perf
+    // shortcut the player did not opt into.
+    cullDistantObstacles: false
   }
 });
 
@@ -135,6 +147,14 @@ const DEFAULTS = Object.freeze({
   grass: true,
   fieldEdge: true,
   fog: true,
+  // Water surface effects on lakes: animated ripples, caustics, sun
+  // glints and shore foam. When false, water renders as a flat static
+  // tint and the animated shader is never compiled. Read by
+  // TerrainWaterView, which subscribes to the store and swaps material
+  // live (no restart needed). Default on; the ultraLow and low presets
+  // turn it off since the fragment shader is a real fill-rate cost on
+  // weak GPUs.
+  waterEffects: true,
   // When true, a right-click double-click commits its move order with
   // directMarch — soldiers walk straight to their new formation slots
   // instead of the block assembling en route. Read by
@@ -322,6 +342,18 @@ const DEFAULTS = Object.freeze({
   // through set() so a manual tweak made afterwards survives until the
   // next explicit preset switch.
   lodDistanceScale: '1',
+  // OPT-IN performance toggle. When true, obstacle buckets (trees,
+  // rocks, ruins, scenery) whose spatial centre is more than ~400 world
+  // units from the camera target stop rendering. Buckets are already
+  // frustum-culled (see TerrainObstacleView.OBSTACLE_CHUNK_SIZE), so
+  // this is a second, coarser cut that trims the far ring — usually
+  // fog-covered — from the per-frame draw call list.
+  //
+  // Default OFF: full quality, no culling. A player on a struggling GPU
+  // turns it on for more FPS; the far battlefield will look sparser.
+  // ultraLow and low presets enable it as part of their perf budget;
+  // medium and max leave it off.
+  cullDistantObstacles: false,
   // Hardware multisampling (MSAA). Smooths edges on small high-contrast
   // parts such as helmets. Only read when the WebGL context is created, so
   // a change applies after the next battle start / Restart. Costs GPU
@@ -343,7 +375,21 @@ const DEFAULTS = Object.freeze({
   // Campaign camp backdrop. true = animated 3D camp (about 30 fps);
   // false = a still snapshot of the camp. Toggled by the tick shown on
   // every campaign screen that has the camp backdrop.
-  campView3d: true
+  campView3d: true,
+  // Main-menu battle backdrop. true = animated cinematic battle scene
+  // (heavy unit charges and throws a lighter one, ~30 fps); false = static
+  // menu. Toggled by the "Battle background" checkbox pinned to the
+  // bottom-right of the main menu. Orthogonal to every graphics preset —
+  // no preset writes this key.
+  menuBattleView: true,
+  // Background music. Master switch and volume multiplier (0..1).
+  // MusicManager subscribes to this store so a change applies live.
+  // The settings UI has no audio section yet; these can still be set
+  // from the console:
+  //   SettingsStore.set('musicEnabled', false)
+  //   SettingsStore.set('musicVolume', 0.3)
+  musicEnabled: true,
+  musicVolume: 0.55
 });
 
 export class SettingsStore {

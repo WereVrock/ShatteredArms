@@ -61,7 +61,13 @@ import { GuestController } from './net/GuestController.js';
 import { VersionBadge } from './ui/VersionBadge.js';
 import { FullscreenButton } from './ui/FullscreenButton.js';
 import { TickProfiler } from './sim/TickProfiler.js';
-import { RenderBisect } from './render/RenderBisect.js';
+import { FrameDiagnostics } from './render/FrameDiagnostics.js';
+import { MainMenuBattleView } from './render/MainMenuBattleView.js';
+import { MenuBattleToggle } from './ui/MenuBattleToggle.js';
+import { TerrainSession } from './session/TerrainSession.js';
+import { setupBattleTerrain } from './session/BattleTerrainSetup.js';
+import { LoadingScreen } from './ui/LoadingScreen.js';
+import { MusicManager } from './audio/MusicManager.js';
 
 // Boot flow: build the menu stack, then either resume whatever was running
 // before the last reload, or show the top-level menu.
@@ -147,6 +153,12 @@ const armyBarElement = document.getElementById('armyBar');
 const commandBarElement = document.getElementById('commandBar');
 
 let isPaused = false;
+
+// True while this module is still evaluating, i.e. while any battle started
+// is a resume after a reload. Cleared in a microtask, which runs right after
+// the synchronous boot code and before any user click.
+let bootInProgress = true;
+Promise.resolve().then(() => { bootInProgress = false; });
 let _pausedBeforePauseMenu = false;
 
 // True only for the first startScenario call after a Restart-button
@@ -295,6 +307,12 @@ document.addEventListener('contextmenu', (e) => {
 
 UiFontScale.init();
 
+// Background music. Registers the first-gesture unlocker and starts
+// loading music/manifest.json in the background. No track plays until
+// the player's first click anywhere on the page (browser autoplay
+// policy) — after that, category switches are instant.
+MusicManager.init();
+
 // Fantasy-themed cursor set + the themed tooltip stylesheet. Cursors
 // apply page-wide, so this must run at boot regardless of whether a
 // battle has started (menus use the same cursor theme).
@@ -364,6 +382,43 @@ function openProfilePicker({ required = false, onReady = null } = {}) {
 
 const highScoresView = new HighScoresView(menuElement);
 
+// Cinematic battle background on the main menu. Gated by the
+// SettingsStore.menuBattleView key (default on). The view attaches to
+// #mainMenu (like the campaign camp) and shows itself only while a
+// .main-menu-panel is a child of that element — so submenus get a clean
+// background without extra plumbing.
+const mainMenuBattle = new MainMenuBattleView();
+mainMenuBattle.attachTo(menuElement);
+
+const menuBattleToggle = new MenuBattleToggle({
+  // Delegate to MainMenuBattleView.onUserToggle: it records that the
+  // user has made an explicit choice (permanently disabling the FPS
+  // auto-disable for the rest of the session), then routes through
+  // refresh() to show() (animated) or showStill() (still image
+  // fallback). Any user toggle — on or off — counts as an explicit
+  // choice.
+  onChange: (enabled) => mainMenuBattle.onUserToggle(enabled)
+});
+// Show the toggle only while the main menu is on screen. The
+// MutationObserver in MainMenuBattleView already decides that for the
+// background; mirror it for the toggle so the two stay in sync.
+(function watchToggleVisibility() {
+  const sync = () => {
+    if (menuElement.querySelector('.main-menu-panel')) menuBattleToggle.show();
+    else menuBattleToggle.hide();
+  };
+  new MutationObserver(sync).observe(menuElement, {
+    attributes: true,
+    attributeFilter: ['class'],
+    childList: true,
+    subtree: false
+  });
+  sync();
+})();
+
+// Apply the persisted setting on boot.
+if (SettingsStore.get().menuBattleView === false) mainMenuBattle.hide();
+
 const menu = new MainMenu(menuElement, {
   onScenarios: () => scenarioMenu.show(),
   onCampaign: () => campaignFlow.startNewCampaign(),
@@ -429,16 +484,27 @@ const campaignFlow = new CampaignFlow({
 });
 
 const customBattleSetup = new CustomBattleSetup(menuElement, {
-  onStart: (blueRoster, redRoster, playerTeamId, aiTierByTeamId) => {
+  onStart: (blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) => {
     ActiveScenario.clear();
     // aiTierByTeamId is accepted by the persistence layer as a 4th arg;
     // an older ActiveCustomBattle that ignores it degrades gracefully —
     // the tier map still reaches buildCustomScenario below, so the
     // current battle is unaffected and only cross-reload persistence is
     // lost until the store is extended.
-    ActiveCustomBattle.set(blueRoster, redRoster, playerTeamId, aiTierByTeamId);
-    ActiveCustomBattle.setLastSetup(blueRoster, redRoster, playerTeamId, aiTierByTeamId);
-    const scenario = buildCustomScenario(blueRoster, redRoster, playerTeamId, aiTierByTeamId);
+    //
+    // biome is the terrain override picked in the setup screen: 'auto'
+    // (hybrid mosaic) or a specific biome id. Persisted so a Restart
+    // resumes the same terrain; forwarded to buildCustomScenario so the
+    // current battle gets it as scenario.terrainBiome.
+    //
+    // ruinType is the ruin archetype override ('random' or a type id).
+    // Only matters when the biome is 'ruins', but is persisted regardless
+    // so switching biome back and forth keeps the last choice.
+    ActiveCustomBattle.set(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType);
+    ActiveCustomBattle.setLastSetup(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType);
+    const scenario = buildCustomScenario(
+      blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType
+    );
     menuElement.classList.add('hidden');
     startScenario(scenario);
   },
@@ -449,9 +515,9 @@ const customBattleSetup = new CustomBattleSetup(menuElement, {
   // setup into player-vs-AI on the next visit. Writing the empty-but-
   // role-preserving payload keeps both halves of the button's contract:
   // rosters go away, role survives.
-  onReset: (blueRoster, redRoster, playerTeamId, aiTierByTeamId) => {
+  onReset: (blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) => {
     ActiveCustomBattle.setLastSetup(
-      blueRoster, redRoster, playerTeamId, aiTierByTeamId
+      blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType
     );
   },
   onBack: () => menu.show(),
@@ -484,14 +550,16 @@ mpLobby.setCustomBuilder(buildCustomScenario);
 let localMultiplayerSetup = null;
 
 const customBattleSetupForLocalMP = new CustomBattleSetup(menuElement, {
-  onStart: (blueRoster, redRoster, playerTeamId) => {
-    localMultiplayerSetup.setCustomRosters(blueRoster, redRoster, playerTeamId);
+  onStart: (blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) => {
+    localMultiplayerSetup.setCustomRosters(
+      blueRoster, redRoster, playerTeamId, biome, ruinType
+    );
   },
   // Same reasoning as the SP Custom Battle setup's onReset above:
   // persist the post-reset payload so the role survives a reopen.
-  onReset: (blueRoster, redRoster, playerTeamId, aiTierByTeamId) => {
+  onReset: (blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) => {
     ActiveCustomBattle.setLastSetup(
-      blueRoster, redRoster, playerTeamId, aiTierByTeamId
+      blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType
     );
   },
   onBack: () => localMultiplayerSetup.show(),
@@ -734,7 +802,20 @@ function launchCampaignBattle(state) {
 //     line; the player can then rearrange their own team inside their own
 //     zone, hidden from the opponent, until both sides Ready or the timer
 //     expires.
-function startScenario(scenario, onBattleEnded, mpOptions) {
+async function startScenario(scenario, onBattleEnded, mpOptions) {
+  MusicManager.play('battle');
+  // Show the loading overlay immediately, before any of the synchronous
+  // scene + terrain work below runs. It stays up until the render loop
+  // draws its first frame (see the loadingDone check inside loop()).
+  LoadingScreen.show();
+
+  // Captured BEFORE the await below. The boot microtask that clears
+  // bootInProgress has run by the time this function resumes; without
+  // this snapshot, `reuse: bootInProgress` at the terrain seed call would
+  // always see `false` and a Restart reload would roll a fresh seed
+  // instead of reusing the previous page's.
+  const wasBootInProgress = bootInProgress;
+
   // A previous battle may have left the timing buffer populated if the
   // diag was toggled off mid-session. Clear it here so a fresh battle
   // (diag off) cannot keep pushing into a stale object.
@@ -754,7 +835,10 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   isPaused = false;
   localTurnBasedActive = false;
   if (currentLocalController) { currentLocalController.dispose(); currentLocalController = null; }
-  battleActive = true;
+  // battleActive is set AFTER the paint-frame await below, so Escape
+  // pressed while the loading overlay is up cannot open an empty pause
+  // menu behind it. The synchronous resets above stay synchronous: the
+  // first loop() frame reads isPaused and must see the reset value.
 
   // The Fast-coin toggle is a turn-based local-MP control. Show it for
   // that mode only; every other battle leaves it hidden.
@@ -786,6 +870,15 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
 
   battleResultView.hide();
   unitInfoPanel.close();
+
+  // Give the browser two paint frames to actually display the loading
+  // overlay. Without this, the synchronous SceneSetup + terrain build
+  // below runs in the SAME frame the overlay was appended, so the user
+  // never sees it — the browser is blocked before it can paint. Two rAFs
+  // is the standard idiom: the first yields, the second gives the paint
+  // a chance to be committed to the screen.
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  battleActive = true;
 
   // In MP (networked or same-device) the scenario object must be treated
   // as local-only: we are about to change its playerTeamId and aiTeamIds,
@@ -824,7 +917,16 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   // silent. Nothing outside the block reads either the wrappers or the
   // window global, so gating the IIFE on the flag is sufficient.
   const RENDER_DIAG_ENABLED = false;
-  if (RENDER_DIAG_ENABLED) (() => {
+  if (RENDER_DIAG_ENABLED) {
+    const frameDiag = FrameDiagnostics.attach({
+      sceneSetup,
+      battleRenderer,
+      getSimulation: () => simulation
+    });
+    _diagLoopTimings = frameDiag.loopTimings;
+  }
+  // Legacy inline copy of the profiler. Dead code, see the delete note.
+  if (false) (() => {
     if (window.__diag && typeof window.__diag.off === 'function') {
       try { window.__diag.off(); } catch (e) { /* previous renderer gone */ }
     }
@@ -1113,6 +1215,8 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   });
   if (activeCampaignBattle) activeCampaignBattle.simulation = simulation;
 
+
+
   if (isGuest) simulation.tickEnabled = false;
   if (RENDER_DIAG_ENABLED) simulation.tickProfile = new TickProfiler();
 
@@ -1174,6 +1278,9 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
   let deploymentPhase = null;      // SP + local MP — passed to OrderDragController
   let mpDeploymentPhase = null;    // Networked MP only
 
+  // Zones the terrain generator keeps open (no trees, water or mud).
+  const terrainClearZones = [];
+
   // Turn-based local MP handles deployment in two gated sub-phases, each
   // driven by the local controller's own HUD (a per-player End Deploy
   // button). It must NOT create the default DeploymentPanel — that panel
@@ -1208,6 +1315,10 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
       }
     });
     simulation.deploymentPhase = deploymentPhase;
+    for (const zoneTeamId of ['blue', 'red']) {
+      const zone = deploymentPhase.getZone(zoneTeamId);
+      if (zone) terrainClearZones.push(zone);
+    }
 
     for (const teamId of playerTeams) {
       const zone = deploymentPhase.getZone(teamId);
@@ -1232,6 +1343,9 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
 
     const myPlan = planner.plan(myUnits, peerUnits);
     const peerPlan = planner.plan(peerUnits, myUnits);
+    // Both peers derive the same two zones, so both clear identical terrain.
+    if (myPlan.zone) terrainClearZones.push(myPlan.zone);
+    if (peerPlan.zone) terrainClearZones.push(peerPlan.zone);
 
     for (const p of myPlan.placements) p.unit.issueInstantMoveOrder(p.x, p.z, p.facing);
     for (const p of peerPlan.placements) p.unit.issueInstantMoveOrder(p.x, p.z, p.facing);
@@ -1271,6 +1385,41 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
       }
     }
   }
+
+  // --- Terrain: hills, obstacles, pathfinding ---
+  // Seed sources: host via lobby (MP), saved snapshot (campaign resume),
+  // previous page load (Ctrl+R / Restart), else random. Built BEFORE the
+  // snapshot is applied so restored soldiers stand on the right ground.
+  const snapshotTerrain = scenario.resumeSnapshot
+    ? SnapshotCodec.peekTerrainMeta(scenario.resumeSnapshot)
+    : null;
+  const terrainPreset = (mp && mp.terrainPreset)
+    || (snapshotTerrain && snapshotTerrain.preset)
+    || scenario.terrainPreset
+    || 'normal';
+  // wasBootInProgress, not bootInProgress: the paint-frame await above
+  // has already let the boot microtask clear the flag. The snapshot
+  // captured at the top of startScenario is what the Restart-reuse
+  // contract actually needs.
+  const terrainSeed = TerrainSession.resolve({
+    reuse: wasBootInProgress,
+    mpSeed: mp ? mp.terrainSeed : null,
+    snapshotSeed: snapshotTerrain ? snapshotTerrain.seed : null
+  });
+  const battleTerrain = setupBattleTerrain({
+    simulation,
+    sceneSetup,
+    units,
+    zones: terrainClearZones,
+    biome: scenario.terrainBiome || 'auto',
+    ruinType: scenario.terrainRuinType || 'random',
+    seed: terrainSeed,
+    preset: terrainPreset
+  });
+  const terrainView = battleTerrain.view;
+  SnapshotCodec.setTerrainMeta(battleTerrain.terrain
+    ? { seed: terrainSeed, preset: terrainPreset }
+    : null);
 
   // Resume-from-snapshot: if the campaign builder attached a mid-battle
   // snapshot (easy difficulty + Save & Exit), skip the deployment phase
@@ -1442,6 +1591,7 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
     const intentInfo = findIntentInfo(simulation.battleAI, unit);
     hudView.setDebugInfo(unit ? { unit, intentInfo } : null);
     battleRenderer.setDebugPathUnit(unit);
+    if (terrainView) terrainView.setDebugPaths(!!unit);
     battleRenderer.setDebugCorridorUnit(unit);
     battleRenderer.setDebugModeOn(
       !!unit,
@@ -1567,6 +1717,42 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
       const ids = Array.from(selectionController.selectedUnits).map(u => u.id);
       if (ids.length) mpGuest.sendOrder('stop', ids, {});
     };
+    // Crew run toggle. The local flag is mirrored too so the guest's button
+    // shows the new state at once; the host stays authoritative.
+    commandBarView.onSetCrewDontWait = (newState) => {
+      const ids = [];
+      for (const u of selectionController.selectedUnits) {
+        const lead = u.soldiers && u.soldiers[0];
+        if (lead && lead.unitTypeDef && lead.unitTypeDef.crew) {
+          u.setCrewDontWait(newState);
+          ids.push(u.id);
+        }
+      }
+      if (ids.length) mpGuest.sendOrder('crewDontWait', ids, { value: newState });
+    };
+    // Leave battle. leavingBattle is mirrored locally so the button cannot
+    // be armed twice for the same unit.
+    // The host does not know the charge order yet (HostController), so a
+    // click on the guest must not change the mirrored unit.
+    commandBarView.onAdjustCharge = () => {};
+    commandBarView.onAbandonBeasts = () => {};
+    commandBarView.onRecallHounds = () => {
+      const ids = [];
+      for (const u of selectionController.selectedUnits) {
+        if (u.companions && u.companions.length > 0 && u.companionKind !== 'chargob') ids.push(u.id);
+      }
+      if (ids.length) mpGuest.sendOrder('recallHounds', ids, {});
+    };
+    commandBarView.onLeaveBattle = () => {
+      const ids = [];
+      for (const u of selectionController.selectedUnits) {
+        if (u.canLeaveBattle && u.canLeaveBattle()) {
+          u.leavingBattle = true;
+          ids.push(u.id);
+        }
+      }
+      if (ids.length) mpGuest.sendOrder('leaveBattle', ids, {});
+    };
   } else {
     commandBarView.onSetFireAtWill = (newState) => {
       for (const u of selectionController.selectedUnits) {
@@ -1601,6 +1787,12 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
       }
     }
   });
+
+  // Loading overlay stays up until the renderer has actually drawn once.
+  // The terrain build above is synchronous and completed before this
+  // point, but the FIRST frame is what paints the battlefield — hiding
+  // earlier just swaps the overlay for a blank canvas.
+  let loadingDone = false;
 
   const tickIntervalMs = 1000 / CombatConfig.tickRateHz;
   let lastTickTime = performance.now();
@@ -1789,13 +1981,25 @@ function startScenario(scenario, onBattleEnded, mpOptions) {
     // panel's per-unit registry diffs and text build are not free, and
     // nothing the player can see would change.
     if (hudToggle.style.display !== 'none') {
-      const allSoldiersById = new Map(allSoldiers.map(s => [s.id, s]));
+      // Reuse the sim's per-tick id map when it covers the same soldiers (not in
+      // guest mirror mode, not while a team is hidden). Building a fresh Map of
+      // every soldier each frame is a big allocation with 1k soldiers.
+      const simById = simulation._soldiersById;
+      const allSoldiersById = simById.size === allSoldiers.length
+        ? simById
+        : new Map(allSoldiers.map(s => [s.id, s]));
       hudView.update(simulation.units, allSoldiersById, selectionController.selectedUnits);
     }
     armyBarView.update(simulation.units);
     if (armyBarRedView) armyBarRedView.update(simulation.units);
     commandBarView.update(selectionController.selectedUnits);
+    if (terrainView) terrainView.syncPaths(simulation.unitsById);
     battleRenderer.render();
+
+    if (!loadingDone) {
+      loadingDone = true;
+      LoadingScreen.hide();
+    }
 
     const _tD = _diagLoopTimings ? performance.now() : 0;
     _recordLoopTimings(_tB - _tA, _tC - _tB, _tD - _tC);
@@ -1821,7 +2025,10 @@ function startLocalMultiplayerBattle(config) {
     scenario = buildCustomScenario(
       config.customRosters.blueRoster,
       config.customRosters.redRoster,
-      config.customRosters.playerTeamId || 'blue'
+      config.customRosters.playerTeamId || 'blue',
+      config.customRosters.aiTierByTeamId || null,
+      config.customRosters.biome || 'auto',
+      config.customRosters.ruinType || 'random'
     );
   } else {
     scenario = PlayableScenarios.find(s => s.id === config.scenarioId);
@@ -1872,6 +2079,8 @@ function startMultiplayerBattle(info) {
     scenario,
     deploymentSeconds,
     pauseMode,
+    terrainSeed,
+    terrainPreset,
     playerTeamId,
     otherTeamId: peerTeamId
   } = info;
@@ -1886,6 +2095,8 @@ function startMultiplayerBattle(info) {
     session,
     playerTeamId,
     otherTeamId: peerTeamId,
+    terrainSeed,
+    terrainPreset,
     deploymentSeconds,
     pauseMode
   });
@@ -1969,10 +2180,25 @@ if (campaign && !campaignPaused) {
       customBattle.blueRoster,
       customBattle.redRoster,
       customBattle.playerTeamId,
-      customBattle.aiTierByTeamId || null
+      customBattle.aiTierByTeamId || null,
+      // Terrain override survives a Restart. Older payloads predate this
+      // field; 'auto' is the correct default for them.
+      customBattle.biome || 'auto',
+      // Ruin archetype override. Same reasoning as biome above; older
+      // payloads fall back to 'random' (seed-derived archetype).
+      customBattle.ruinType || 'random'
     ));
   } else {
     if (activeScenarioId) ActiveScenario.clear();
     menu.show();
   }
+}
+
+// Boot complete. The battle-resume path has already removed #bootLoading
+// synchronously inside LoadingScreen._ensure() (called from
+// startScenario's first line). The menu path did not touch it — remove
+// the placeholder now so the main menu is visible underneath it.
+{
+  const boot = document.getElementById('bootLoading');
+  if (boot && boot.parentNode) boot.parentNode.removeChild(boot);
 }

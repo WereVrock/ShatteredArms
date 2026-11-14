@@ -32,6 +32,7 @@ import { UnitTypes } from '../config/UnitTypes.js';
 
 const FAMILIES = {
   spear:    { shielded: 'spearman',   unshielded: 'spearmanNoShield' },
+  shortSpear: { shielded: 'shortSpearman', unshielded: 'shortSpearmanNoShield' },
   sword:    { shielded: 'swordsman',  unshielded: 'swordsmanNoShield' },
   archer:   { shielded: 'archer',     unshielded: 'archer' },
   horsemen: { shielded: 'horsemen',   unshielded: 'horsemenNoShield' }
@@ -59,7 +60,12 @@ const GOBLIN_TYPE_IDS = [
   'goblinSlave',
   'goblinSpearman',
   'goblinSpearmanNoShield',
-  'goblinArcher'
+  'goblinShortSpearman',
+  'goblinShortSpearmanNoShield',
+  'goblinArcher',
+  'goblinMegabowman',
+  'goblinHoundHandler',
+  'goblinChargob'
 ];
 
 // Campaign sides and the UnitTypes flag that gates each one.

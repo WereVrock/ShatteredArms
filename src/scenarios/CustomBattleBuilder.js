@@ -23,7 +23,10 @@ const FACE_NORTH = Math.PI;
 
 const ALL_TEAM_IDS = ['blue', 'red'];
 
-export function buildCustomScenario(blueRoster, redRoster, playerTeamId = 'blue', aiTierByTeamId = null) {
+export function buildCustomScenario(
+  blueRoster, redRoster, playerTeamId = 'blue',
+  aiTierByTeamId = null, biome = 'auto', ruinType = 'random'
+) {
   // Normalise: only 'blue', 'red', or null are valid. Anything else falls
   // back to 'blue' so a stale persisted value can't produce a scenario
   // with no recognised player.
@@ -58,6 +61,13 @@ export function buildCustomScenario(blueRoster, redRoster, playerTeamId = 'blue'
     // Emitted even when the roster is player-vs-player; harmless and
     // keeps the scenario shape uniform.
     aiTierByTeamId: tiers,
+    // Terrain biome override. 'auto' lets the generator build a hybrid
+    // mosaic; any other id forces that biome on the whole map. Read by
+    // setupBattleTerrain in main.js via scenario.terrainBiome.
+    terrainBiome: (typeof biome === 'string' && biome.length > 0) ? biome : 'auto',
+    // Ruin archetype override, only meaningful when the biome is 'ruins'
+    // (or contains ruins patches). 'random' picks one from the seed.
+    terrainRuinType: (typeof ruinType === 'string' && ruinType.length > 0) ? ruinType : 'random',
     cameraTarget: { x: 0, z: 0 },
     cameraDistance: 44,
     cameraPitch: 0.95,

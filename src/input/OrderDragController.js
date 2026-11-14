@@ -1,6 +1,7 @@
 // ===== OrderDragController.js =====
 import * as THREE from 'three';
 import { CombatConfig } from '../config/CombatConfig.js';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
 import { SettingsStore } from '../ui/settings/SettingsStore.js';
 import { setAttackCursor } from '../ui/MedievalTheme.js';
 
@@ -191,8 +192,7 @@ export class OrderDragController {
         }
       }
 
-      const groundPoint = new THREE.Vector3();
-      this.selectionController.raycaster.ray.intersectPlane(this.groundPlane, groundPoint);
+      const groundPoint = this._groundPickFromEvent(e);
       if (!groundPoint) return;
 
       this.anchorPoint = { x: groundPoint.x, z: groundPoint.z };
@@ -269,9 +269,7 @@ export class OrderDragController {
       const selected = this._orderedSelection;
       if (!selected || selected.length === 0) return;
 
-      this.selectionController.aimRaycasterFromEvent(e);
-      const groundPoint = new THREE.Vector3();
-      this.selectionController.raycaster.ray.intersectPlane(this.groundPlane, groundPoint);
+      const groundPoint = this._groundPickFromEvent(e);
       if (!groundPoint) return;
 
       const realDx = groundPoint.x - this.anchorPoint.x;
@@ -387,7 +385,46 @@ export class OrderDragController {
     this.orderPreviewView.hide();
   }
 
-  // --- enemy-hover attack cursor -------------------------------------------
+// Aims the shared raycaster at the click and returns the world (x, z)
+  // where the ray hits the ground, or null on a miss. Elevation-aware:
+  // when the battle has terrain, this calls into TerrainRayQuery.groundPick
+  // and walks the heightfield. On flat maps (or no terrain) it falls back
+  // to the pre-elevation ray-plane intersect against y = 0.
+  //
+  // The previous inline `intersectPlane` had a latent miss bug: it passed
+  // a Vector3 target, which three.js MUTATES to the hit point on success
+  // and leaves untouched on miss, returning either `target` or null. The
+  // caller checked `if (!groundPoint)` against the Vector3 itself — always
+  // truthy — so on a miss the anchor was silently (0, 0, 0). That made
+  // off-map right-clicks issue orders to world origin. This helper returns
+  // null explicitly on a miss so the caller can bail cleanly.
+  _groundPickFromEvent(e) {
+    this.selectionController.aimRaycasterFromEvent(e);
+    const ray = this.selectionController.raycaster.ray;
+    const terrain = ActiveTerrain.get();
+
+    if (terrain && terrain.hasElevation) {
+      // maxDist: comfortably longer than any plausible camera-to-ground
+      // ray at the game's zoom range. groundPick steps at 1.0 world units
+      // and refines with 8 bisections, so a generous bound costs a few
+      // extra no-op iterations on a miss and nothing on a hit.
+      const out = { x: 0, y: 0, z: 0 };
+      if (terrain.rays.groundPick(
+          ray.origin.x, ray.origin.y, ray.origin.z,
+          ray.direction.x, ray.direction.y, ray.direction.z,
+          2000, out)) {
+        return out;
+      }
+      return null;
+    }
+
+    // Flat ground: original ray-plane intersect. Same return shape.
+    const v = new THREE.Vector3();
+    if (!ray.intersectPlane(this.groundPlane, v)) return null;
+    return { x: v.x, y: v.y, z: v.z };
+  }
+
+// --- enemy-hover attack cursor -------------------------------------------
 
   // Schedules an attack-cursor check for the next animation frame.
   //

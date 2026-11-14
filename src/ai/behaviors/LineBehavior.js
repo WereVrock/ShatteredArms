@@ -30,7 +30,8 @@
 // are with an explicit refreshed order.
 import { AIConfig } from '../../config/AIConfig.js';
 import { nearestUnit, centerTowardUnit, unitTypeOf } from '../behaviorUtils.js';
-import { isSwordsmen, isRanged } from '../../config/UnitClasses.js';
+import { isSwordsmen, isRanged, isSpearmen } from '../../config/UnitClasses.js';
+import { TerrainSense } from '../TerrainSense.js';
 import { AIDebugLog } from '../AIDebugLog.js';
 import { LineAssault } from './LineAssault.js';
 
@@ -138,7 +139,7 @@ export class LineBehavior {
     // archers are back inside the tether, rangedOverextended clears and
     // this hold resumes.
     if (worldCtx && worldCtx.stance === 'defence' && !worldCtx.rangedOverextended) {
-      return this._holdInPlace(unit, context);
+      return this._holdInPlace(unit, context, worldCtx);
     }
 
     // Line-cohesion approach. While still far from the nearest enemy,
@@ -536,11 +537,25 @@ export class LineBehavior {
   // explicit hold order (rather than returning null) refreshes the
   // formationSlot every cycle so the unit doesn't drift toward a stale
   // destination from an earlier move order.
-  _holdInPlace(unit, context) {
+_holdInPlace(unit, context, worldCtx) {
     const center = unit.getCenter();
     const facing = context
       ? Math.atan2(context.forward.x, context.forward.z)
       : unit.formationFacing;
+
+    // Standing on poor ground (mud, forest floor, rocky or sloped ground that
+    // breaks a spear wall, rocks and trees all round)? Move to clearly better
+    // ground nearby, never toward the enemy. TerrainSense remembers the choice
+    // per unit, so this settles once instead of drifting.
+    const terrain = worldCtx ? worldCtx.terrain : null;
+    if (terrain && context) {
+      const type = unitTypeOf(unit);
+      const spot = TerrainSense.holdSpot(
+        terrain, unit, center, context.forward, !!(type && isSpearmen(type))
+      );
+      if (spot) return { x: spot.x, z: spot.z, facing };
+    }
+
     return { x: center.x, z: center.z, facing };
   }
 }

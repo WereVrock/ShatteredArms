@@ -27,6 +27,7 @@ const HUMAN_BASELINE_SIZE = 15;
 export function baseSizeFor(typeDef) {
   const configured = CampaignConfig.defaultSizes[typeDef.id];
   if (configured) return configured;
+  if (typeof typeDef.baseUnitSize === 'number') return typeDef.baseUnitSize;
   const raceMult = raceOf(typeDef).unitSizeMultiplier ?? 1;
   return Math.max(1, Math.round(HUMAN_BASELINE_SIZE * raceMult));
 }

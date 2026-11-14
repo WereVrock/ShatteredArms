@@ -37,6 +37,7 @@
 // would not draw while instancing is on.
 import * as THREE from 'three';
 import { computeLegPoseParts } from './SoldierModelComposer.js';
+import { computeKneelPoseParts } from './KneelPose.js';
 
 const INITIAL_CAPACITY = 32;
 
@@ -233,8 +234,15 @@ export class SoldierInstancer {
       const group = view.group;
       if (!group.visible) continue;
 
+      // Cull sphere centred CULL_CENTER_Y above the soldier's FEET, not at
+      // a fixed world Y. group.position.y now carries the terrain height
+      // under the soldier, so a fixed y=1 sphere on a hilltop would sit
+      // below the actual model and cull visible soldiers (or, on a slope,
+      // cull them outright as the camera pans and the frustum boundary
+      // sweeps their real Y). The XZ cull and shadow-range logic below are
+      // unaffected — they only compare x and z.
       const p = group.position;
-      sphere.center.set(p.x, CULL_CENTER_Y, p.z);
+      sphere.center.set(p.x, p.y + CULL_CENTER_Y, p.z);
       // Hysteresis on the per-soldier frustum-cull decision.
       //
       // The raw intersectsSphere check flips frame-to-frame for a
@@ -468,14 +476,19 @@ export class SoldierInstancer {
   // Expands a walk-pose leg mesh into its thigh / shin parts for the pose
   // SoldierView last selected. The per-pose local matrices are computed
   // once per rig (shared by every soldier of the same variant and tier).
-  _emitLegs(mesh, rig, material, soldierCast) {
+_emitLegs(mesh, rig, material, soldierCast) {
     const idx = mesh.userData.poseIdx | 0;
     let parts = rig.local[idx];
     if (!parts) {
-      parts = computeLegPoseParts(
-        rig.left, rig.right,
-        idx === 0 ? -1 : (idx - 1) / rig.poseCount
-      );
+      if (idx > rig.poseCount) {
+        // Kneel poses live after the walk poses: poseCount + 1 + stage.
+        parts = computeKneelPoseParts(rig.left, rig.right, idx - rig.poseCount - 1);
+      } else {
+        parts = computeLegPoseParts(
+          rig.left, rig.right,
+          idx === 0 ? -1 : (idx - 1) / rig.poseCount
+        );
+      }
       rig.local[idx] = parts;
     }
 

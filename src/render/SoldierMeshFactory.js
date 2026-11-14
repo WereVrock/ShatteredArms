@@ -44,13 +44,17 @@ import {
   createWarlordShield
 } from './mesh/ShieldBuilder.js';
 import { createSpear, createGoblinSpear } from './mesh/SpearBuilder.js';
+import { createShortSpear } from './mesh/ShortSpearBuilder.js';
 import { createBow, createGoblinShortbow } from './mesh/BowBuilder.js';
+import { createMegabow } from './mesh/MegabowBuilder.js';
+import { createMegabowHarness } from './mesh/MegabowHarnessBuilder.js';
 import { createLance } from './mesh/LanceBuilder.js';
 import { createSword, createCrudeSword } from './mesh/SwordBuilder.js';
 import { createClub } from './mesh/ClubBuilder.js';
 import { createHorseBase } from './mesh/HorseBuilder.js';
 import { createSkeletonHorseBase } from './mesh/SkeletonHorseBuilder.js';
 import { createBeastMount } from './mesh/BeastMountBuilder.js';
+import { createHoundBase } from './mesh/HoundBuilder.js';
 import { createSwordScythe } from './mesh/SwordScytheBuilder.js';
 import { createHorseHead } from './mesh/HorseHeadBuilder.js';
 import { createSkull } from './mesh/SkullBuilder.js';
@@ -175,6 +179,12 @@ export const SoldierMeshFactory = {
   createHobgoblinShield: pick(createHobgoblinShield, createHobgoblinShield, createHobgoblinShield, createHobgoblinShield),
   createWarlordShield: pick(createWarlordShield, createWarlordShield, createWarlordShield, createWarlordShield),
   createSpear: pick(createSpear, createMediumSpear, createSimpleSpear, createUltraSimpleSpear),
+  // Short spear. Single-tier for now — the user asked for a model and an
+  // animation, not four LOD variants. Falls through to the detailed build
+  // at every tier (same pattern as createClub / createSwordScythe). LOD
+  // variants can be added later by importing Medium/Simple/Ultra builders
+  // and swapping the corresponding pick() slots.
+  createShortSpear: pick(createShortSpear, createShortSpear, createShortSpear, createShortSpear),
   // Dothraki-style sword scythe (arakht). Only the detailed builder exists
   // — the weapon is unique to the beast-mounted hobgoblins, and lower LOD
   // tiers fall through to the same geometry. The mesh is a handful of
@@ -183,6 +193,15 @@ export const SoldierMeshFactory = {
   createGoblinSpear: pick(createGoblinSpear, createMediumGoblinSpear, createSimpleGoblinSpear, createUltraSimpleGoblinSpear),
   createBow: pick(createBow, createMediumBow, createSimpleBow, createUltraSimpleBow),
   createGoblinShortbow: pick(createGoblinShortbow, createMediumGoblinShortbow, createSimpleGoblinShortbow, createUltraSimpleGoblinShortbow),
+  // Crew-served megabow (triple-prod arbalest). Only the detailed
+  // builder exists — the model is large enough to read at every LOD
+  // range the game supports, and the instancer collapses every visible
+  // megabow into one bucket per mesh. Falls through to detailed at
+  // every tier, same pattern BeastMountBuilder uses.
+  createMegabow: pick(createMegabow, createMegabow, createMegabow, createMegabow),
+  // Carrier's vest / rods / head hinge for the megabow. Single tier, same
+  // reasoning as createMegabow.
+  createMegabowHarness: pick(createMegabowHarness, createMegabowHarness, createMegabowHarness, createMegabowHarness),
   createLance: pick(createLance, createMediumLance, createSimpleLance, createUltraSimpleLance),
   createSword: pick(createSword, createMediumSword, createSimpleSword, createUltraSimpleSword),
   // Club: single-tier weapon. One merged mesh, already minimal, so every
@@ -198,6 +217,12 @@ export const SoldierMeshFactory = {
   // the same shape. A dedicated modeller pass will add real LOD variants
   // if the beast survives into production — see BeastMountBuilder.js.
   createBeastMount: pick(createBeastMount, createBeastMount, createBeastMount, createBeastMount),
+  // Goblin war hound. Only the detailed builder exists — hounds are a
+  // small companion creature with one distinct silhouette, and the
+  // instancer collapses identical geometry across every hound on the
+  // field into one bucket. Same "fall through to detailed" choice
+  // BeastMountBuilder made.
+  createHoundBase: pick(createHoundBase, createHoundBase, createHoundBase, createHoundBase),
   createHorseHead: pick(createHorseHead, createMediumHorseHead, createSimpleHorseHead, createUltraSimpleHorseHead),
   createSkull: pick(createSkull, createMediumSkull, createSimpleSkull, createUltraSimpleSkull),
   // Arrow: no ultra variant. Tier 4 falls through to simple — an arrow at

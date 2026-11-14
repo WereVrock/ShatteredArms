@@ -159,6 +159,14 @@ export const CampaignConfig = {
     goblinSpearman: 30,
     goblinSpearmanNoShield: 30,
     goblinArcher: 24,
+    shortSpearman: 15,
+    shortSpearmanNoShield: 15,
+    goblinShortSpearman: 30,
+    goblinShortSpearmanNoShield: 30,
+    // Crew-served: 8 weapons (8 carriers + 8 shooters). Keep the number even.
+    goblinMegabowman: 16,
+    // Handlers only; each owns 2 hounds that are built with the unit.
+    goblinHoundHandler: 12,
     archer: 12,
     horsemen: 15,
     horsemenNoShield: 15,

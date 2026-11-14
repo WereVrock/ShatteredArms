@@ -4,7 +4,12 @@ import { isCavalry } from '../config/UnitClasses.js';
 import { raceOfSoldier, soldierHasProperty } from '../config/RaceConfig.js';
 import { Property } from '../config/Properties.js';
 import { ShieldBlockCalculator } from './ShieldBlockCalculator.js';
+import { SpearWall } from './SpearWall.js';
+import { SpearBrace } from './SpearBrace.js';
+import { SecondRankSupport } from './SecondRankSupport.js';
+import { SpearWallConfig } from '../config/SpearWallConfig.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
+import { ChargobCharge } from './ChargobCharge.js';
 
 // Fraction of a blood guard's combat XP that is additionally credited to
 // the champion they guard. See CombatResolutionSystem._accrueChampionXp.
@@ -145,7 +150,23 @@ export class CombatResolutionSystem {
         continue;
       }
 
+      // A raised spearman in the SECOND rank or deeper does not attack at
+      // all. His role in the formation is wall depth, not contact — if he
+      // cannot plant his shaft he adds nothing to the fight and, unlike a
+      // front-rank man whose target is right in front of him, he has no
+      // fallback swing. Front-rank raised spearmen still swing (at 0.65×
+      // damage via _resolveAttack); they are the ones face-to-face with
+      // the enemy, and a pole swung as a staff is still dangerous at
+      // contact range.
+      if (SpearWall.isSpearRaised(attacker) && (attacker.formationRank || 0) >= 1) {
+        continue;
+      }
+
+      const evStart = this.events.length;
       this._resolveAttack(attacker, defender, unitsById);
+      if (attacker.unitTypeDef.chargobBeast === true) {
+        ChargobCharge.afterAttack(attacker, this.events, evStart);
+      }
       attacker.fatigue = Math.max(0,
         attacker.fatigue
         - CombatConfig.fatigue.drainPerAttack * attacker.fatigueDrainMultiplier);
@@ -154,7 +175,7 @@ export class CombatResolutionSystem {
     this._regenerateIdleFatigue(allSoldiers);
   }
 
-_resolveAttack(attacker, defender, unitsById) {
+_resolveAttack(attacker, defender, unitsById, isOpportunistic = false) {
     // -------------------------------------------------------------------
     // TOOLTIP MIRROR
     //
@@ -261,16 +282,44 @@ _resolveAttack(attacker, defender, unitsById) {
       sideThresholdDeg = CombatConfig.spearHandling.wallBrokenArcDeg;
     }
 
+    // Note: no !SpearWall.isBroken(defender) check here any more. That was
+    // a legacy gate from the pre-local-wall system, where isBroken tracked
+    // a unit-average integrity curve. Under the local topology model, a
+    // soldier whose own ground disrupts his footing raises his spear, and
+    // isWallLocal (below) excludes him via isSpearRaised. A soldier whose
+    // NEIGHBOURS are on bad ground has those neighbours raised, and
+    // isWallLocal excludes him via the raised-neighbour rule. The old
+    // isBroken check was doing the same job less accurately AND had a
+    // hysteresis bug — a soldier who recovered from mud still had
+    // spearWallBroken = true for ~6 s after leaving the mud, and so was
+    // denied the anti-sword bonus even when he was back in a proper wall.
     const frontalVsSpearman =
       isSword && defenderIsSpearman && angleForFlank < sideThresholdDeg;
+
+    // Local spear wall (see SpearWall.isWallLocal). The wall is now a
+    // TOPOLOGY property, not a per-soldier blend: the defender is "in a
+    // wall" only when his own shaft is down AND his existing left/right/
+    // behind neighbours' shafts are also down. Attacking a wall from the
+    // front then earns the anti-sword penalty; attacking a soldier whose
+    // local wall is broken (or who is isolated) is ordinary combat.
+    const wallStrength =
+      (frontalVsSpearman && SpearWall.isWallLocal(defender, unitsById)) ? 1 : 0;
+
+    // A short spearman attacking the front of a functioning local wall
+    // swings slower (CombatConfig.shortSpear.frontalWallAttackSpeedMult).
+    const attackerIsShortSpear = attacker.unitTypeDef.weaponType === 'shortSpear';
+    const shortSpearIntoWall = attackerIsShortSpear
+      && defenderIsSpearman
+      && angleForFlank < sideThresholdDeg
+      && SpearWall.isWallLocal(defender, unitsById);
 
     // Attacker combat mods. Generic: both the champion and the champion's
     // bodyguards (and any future captain) carry a combatMods object with
     // the same vocabulary. null means no mods.
     const championMods = attacker.combatMods || null;
     const championSpeedMult = championMods?.attackSpeedMult ?? 1;
-    const baseSpeedMult = frontalVsSpearman
-      ? 1
+const baseSpeedMult = frontalVsSpearman
+      ? 1 + ((attacker.unitTypeDef.attackSpeedMultiplier ?? 1) - 1) * (1 - wallStrength)
       : (attacker.unitTypeDef.attackSpeedMultiplier ?? 1);
     // Fatigue-based slowdown. A fresh soldier (fatigue 100) has a
     // multiplier of 1.0 and swings at full speed; a fully exhausted
@@ -287,13 +336,24 @@ _resolveAttack(attacker, defender, unitsById) {
     // shared with the weapon and champion multipliers, and a slower
     // weapon with fatigue cannot produce a cooldown below 1.
     const fatigueSpeedMult = attacker.fatigueAttackSpeedMultiplier ?? 1.0;
-    const speedMult = baseSpeedMult * championSpeedMult * fatigueSpeedMult;
+    const shortSpearMult = shortSpearIntoWall
+      ? CombatConfig.shortSpear.frontalWallAttackSpeedMult
+      : 1;
+    const speedMult = baseSpeedMult * championSpeedMult * fatigueSpeedMult * shortSpearMult;
     attacker.attackCooldownTicks = Math.max(
       1,
       Math.round(CombatConfig.baseMeleeCooldownTicks / speedMult)
     );
 
     this.events.push({ type: 'attack', attackerId: attacker.id, defenderId: defender.id });
+
+    // Second-rank spearmen get a chance to strike whoever just attacked
+    // the man in front of them. Opportunistic strikes never trigger
+    // further ones. A supporter who kills the attacker stops his swing.
+    if (!isOpportunistic) {
+      this._resolveSupportStrikes(attacker, defender, unitsById);
+      if (!attacker.isAlive()) return;
+    }
 
     const chargeCfg = CombatConfig.charge;
     // Passing attackers (marching/impetuous with a live contact) get
@@ -310,6 +370,7 @@ _resolveAttack(attacker, defender, unitsById) {
     // DESIGN. See src/config/SpeedScale.js for the contract.
     const isCharging =
       attacker.currentSpeed >= toSimSpeed(chargeCfg.speedThreshold)
+      && attacker.unitTypeDef.noChargeImpact !== true
       && (!isPassingAttack || !attacker.contactChargeBonusSpent);
     const massRatio = attacker.effectiveMass / defender.effectiveMass;
     const isChargingCavalry = isCavalry(attacker.unitTypeDef) &&
@@ -318,13 +379,16 @@ _resolveAttack(attacker, defender, unitsById) {
 
     if (isChargingCavalry) {
       const angleOffForLog = ShieldBlockCalculator.computeAngleOffShield(defender, attacker.pos);
-      const wouldBrace = this._isBracedSpearman(defender, attacker.pos);
+      const wouldBrace = SpearBrace.assess(defender, attacker.pos, unitsById) > 0;
       AIDebugLog.braceOutcome(0, attacker.id, defender.id, wouldBrace, angleOffForLog);
     }
 
-    const defenderBraced = isChargingCavalry && this._isBracedSpearman(defender, attacker.pos);
+    const braceStrength = isChargingCavalry
+      ? SpearBrace.assess(defender, attacker.pos, unitsById)
+      : 0;
+    const defenderBraced = braceStrength > 0;
     if (defenderBraced) {
-      this._applyBraceCounter(defender, attacker);
+      this._applyBraceCounter(defender, attacker, braceStrength);
       this.events.push({ type: 'brace', attackerId: attacker.id, defenderId: defender.id });
       if (!attacker.isAlive()) return;
     }
@@ -415,6 +479,15 @@ _resolveAttack(attacker, defender, unitsById) {
     // --- Base damage -----------------------------------------------------
     let damage = matchup.damage;
 
+    // A raised spearman fights as an individual, not as a wall: swinging
+    // the shaft rather than thrusting it. All wall bonuses (brace,
+    // second-rank support, frontal anti-sword) already require the spear
+    // to be down and fail earlier in the resolution; this is only the
+    // damage penalty on his own strikes. See SpearWallConfig.raisedDamageMult.
+    if (SpearWall.isSpearRaised(attacker)) {
+      damage *= SpearWallConfig.raisedDamageMult;
+    }
+
     // Race: attacker-side outgoing damage multiplier, applied to the base
     // weapon damage. The matchup table remains the authority on a weapon's
     // BASE damage; the race scales it. Applied before the additive charge
@@ -455,7 +528,16 @@ _resolveAttack(attacker, defender, unitsById) {
     }
 
     if (frontalVsSpearman) {
-      damage *= 1 / 3;
+      damage *= 1 - (1 - 1 / 3) * wallStrength;
+    }
+
+    // Short spearmen hunt cavalry that has bogged down: x1.5 against
+    // cavalry below the full-speed threshold. 'shortSpear' has no entry in
+    // DefenderCategoryDamageModifiers, so the spear x1.75 never applies and
+    // fast cavalry takes no bonus.
+    if (attackerIsShortSpear && isCavalry(defender.unitTypeDef) &&
+        defender.currentSpeed < toSimSpeed(CombatConfig.shortSpear.cavalryFullSpeedThreshold)) {
+      damage *= CombatConfig.shortSpear.slowCavalryDamageMult;
     }
 
     const defenderCategory = isCavalry(defender.unitTypeDef) ? 'cavalry' : null;
@@ -663,7 +745,40 @@ _resolveAttack(attacker, defender, unitsById) {
     defender.pos.z += (dz / dist) * distance;
   }
 
-  // Charge throw: gives the defender a real velocity that MovementSystem
+// Second-rank spearmen strike back at an enemy who just attacked `defender`.
+  // Each eligible supporter rolls SpearWallConfig.supportStrike.chance. The roll
+  // spends his attack cooldown whether or not it succeeds, so he gets at most one
+  // opportunity per swing cadence. A success is an ordinary attack (blocks, flank
+  // rules and damage all apply) that cannot trigger further support strikes.
+  _resolveSupportStrikes(attacker, defender, unitsById) {
+    if (!this._supportBuf) this._supportBuf = [];
+    const supporters = SecondRankSupport.collect(defender, attacker, unitsById, this._supportBuf);
+    const chance = SpearWallConfig.supportStrike.chance;
+
+    for (let i = 0; i < supporters.length; i++) {
+      if (!attacker.isAlive()) break;
+      const s = supporters[i];
+      if (s.unitTypeDef.weaponType !== 'spear') continue;
+      if (s.attackCooldownTicks > 0) continue;
+
+      s.attackCooldownTicks = this._baseCooldownTicks(s);
+      if (Math.random() >= chance) continue;
+
+      this._resolveAttack(s, attacker, unitsById, true);
+      s.fatigue = Math.max(0,
+        s.fatigue - CombatConfig.fatigue.drainPerAttack * s.fatigueDrainMultiplier);
+    }
+  }
+
+  // Plain melee cooldown of a soldier (weapon speed and fatigue, none of the
+  // situational modifiers _resolveAttack adds).
+  _baseCooldownTicks(soldier) {
+    const speed = (soldier.unitTypeDef.attackSpeedMultiplier ?? 1) *
+      (soldier.fatigueAttackSpeedMultiplier ?? 1);
+    return Math.max(1, Math.round(CombatConfig.baseMeleeCooldownTicks / speed));
+  }
+
+// Charge throw: gives the defender a real velocity that MovementSystem
   // integrates over the next few ticks. Distance scales with attacker
   // momentum and inverse defender mass; skeletons fly further.
   _applyThrow(attacker, defender) {
@@ -711,18 +826,11 @@ _resolveAttack(attacker, defender, unitsById) {
   //     individual soldier's facing, so pivoting a single spearman does
   //     not restore the wall.
   // -------------------------------------------------------------------
-  _isBracedSpearman(spearman, chargerPos) {
-    if (spearman.unitTypeDef.weaponType !== 'spear') return false;
-    if (spearman.state === 'knockedDown') return false;
-    if (spearman.movedThisTick) return false;
-    // A spear whose tip is raised out of the sweep plane is not planted
-    // in the ground awaiting a charge — no brace regardless of facing.
-    if (spearman.spearRaiseAmount > 0.1) return false;
-    const angleOff = ShieldBlockCalculator.computeAngleOffShield(spearman, chargerPos);
-    return angleOff <= CombatConfig.brace.frontalArcDeg;
+_isBracedSpearman(spearman, chargerPos, unitsById) {
+    return SpearBrace.assess(spearman, chargerPos, unitsById) > 0;
   }
 
-  _applyBraceCounter(spearman, charger) {
+_applyBraceCounter(spearman, charger, braceStrength = 1) {
     const matchup = WeaponMatchup[spearman.unitTypeDef.weaponType];
     if (!matchup) return;
 
@@ -735,6 +843,9 @@ _resolveAttack(attacker, defender, unitsById) {
     }
 
     dmg *= CombatConfig.brace.counterDamageMult;
+    // Share of unraised spears in the front ranks around the struck man
+    // (see SpearBrace); a ragged or raised line punishes the charger less.
+    dmg *= braceStrength;
 
     charger.hp -= dmg;
     this.events.push({ type: 'braceCounter', attackerId: spearman.id, defenderId: charger.id });
@@ -747,7 +858,7 @@ _resolveAttack(attacker, defender, unitsById) {
       spearman.justKilled = true;
       spearman.killsThisBattle++;
       // A bracing spearman in the champion's retinue counts as a retinue
-      // kill — the roll runs through the same path as any other.
+      // kill - the roll runs through the same path as any other.
       this._maybeRaiseThrallFromKiller(spearman, charger);
     }
   }
@@ -1090,6 +1201,8 @@ _resolveAttack(attacker, defender, unitsById) {
     }
 
     if (defender.hp <= 0) {
+      // A charging chargob beast keeps charging for a moment after a lethal blow.
+      if (defender.chargeActive === true && ChargobCharge.deathThroes(defender)) return;
       // Orphaned Mount: intercept the death of a mounted blood guard
       // whose champion has the skill. On a successful roll the beast
       // survives its rider — the dying guard's mount is hidden (the

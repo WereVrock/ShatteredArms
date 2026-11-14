@@ -32,6 +32,7 @@ export class SnapshotCodec {
   static encode(units, tick) {
     return JSON.stringify({
       t: tick,
+      tm: SnapshotCodec._terrainMeta || undefined,
       u: units.map(u => ({
         i: u.id,
         f: r3(u.formationFacing),
@@ -46,7 +47,7 @@ export class SnapshotCodec {
         otz: u.orderTarget ? r3(u.orderTarget.z) : null,
         ft: u.focusTargetUnitId || null,
         ai: u.aiFocusTargetUnitId || null,
-        s: u.soldiers.map(s => ({
+        s: u.soldiers.concat(u.companions).map(s => ({
           i: s.id,
           x: r3(s.pos.x),
           z: r3(s.pos.z),
@@ -57,20 +58,43 @@ export class SnapshotCodec {
           mo: r3(s.morale),
           fa: r3(s.fatigue),
           sr: r3(s.spearRaiseAmount),
+          // Terrain spear wall state. Left undefined at the default (intact)
+          // so JSON.stringify drops the key and ordinary snapshots do not grow.
+          sw: s.spearWallIntegrity < 1 ? r3(s.spearWallIntegrity) : undefined,
+          sb: s.spearWallBroken ? 1 : undefined,
           ab: s.airborneTicksLeft,
-          ac: s.attackCooldownTicks
+          ac: s.attackCooldownTicks,
+          bd: s.bowDrawMaxTicks || undefined,
+          pn: s.panic > 0 ? r3(s.panic) : undefined,
+          cd: s.chargeActive ? 1 : undefined
         }))
       }))
     });
   }
 
-  static decode(json, unitsById) {
+// { seed, preset } of the running battle, or null. Included in every
+  // encoded snapshot so a saved campaign battle restores the same terrain.
+  static setTerrainMeta(meta) {
+    SnapshotCodec._terrainMeta = meta || null;
+  }
+
+  static peekTerrainMeta(json) {
+    try {
+      const data = typeof json === 'string' ? JSON.parse(json) : json;
+      return data && data.tm ? data.tm : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+static decode(json, unitsById) {
     const data = typeof json === 'string' ? JSON.parse(json) : json;
     if (!data || !Array.isArray(data.u)) return 0;
 
     const soldierById = new Map();
     for (const unit of unitsById.values()) {
       for (const s of unit.soldiers) soldierById.set(s.id, s);
+      for (const s of unit.companions) soldierById.set(s.id, s);
     }
 
     for (const ud of data.u) {
@@ -107,8 +131,18 @@ export class SnapshotCodec {
         soldier.morale = sd.mo;
         soldier.fatigue = sd.fa;
         soldier.spearRaiseAmount = sd.sr;
+        soldier.spearWallIntegrity = sd.sw ?? 1;
+        // Own and target follow the restored value so a resumed battle
+        // (which does tick) eases from here instead of snapping back to 1.
+        soldier.spearWallOwn = soldier.spearWallIntegrity;
+        soldier.spearWallTarget = soldier.spearWallIntegrity;
+        soldier.spearWallBroken = sd.sb === 1;
         soldier.airborneTicksLeft = sd.ab;
         soldier.attackCooldownTicks = sd.ac;
+        if (sd.bd) soldier.bowDrawMaxTicks = sd.bd;
+        soldier.panic = sd.pn ?? 0;
+        soldier.chargeActive = sd.cd === 1;
+        soldier.beastDetached = sd.cd === 1;
       }
     }
 

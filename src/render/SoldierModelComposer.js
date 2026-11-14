@@ -36,6 +36,8 @@ import { getTeamColor } from './TeamColors.js';
 import { isCavalry, isMounted } from '../config/UnitClasses.js';
 import { mergeGeometries } from './mesh/MeshMerge.js';
 import { cachedGeometry } from './mesh/MeshCache.js';
+import { computeKneelPoseParts, KNEEL_POSE_COUNT } from './KneelPose.js';
+import { layoutMegabowDeploy } from './mesh/MegabowBuilder.js';
 
 // Walk-cycle constants. MUST match SoldierView.js — the pose geometries
 // are baked at these amplitudes and phase offsets, and the view picks a
@@ -45,6 +47,15 @@ const WALK_POSE_COUNT = 16;
 const WALK_LEG_SWING_RAD = 0.55;
 const KNEE_BASE_RAD = 0.10;
 const KNEE_SWING_RAD = 0.80;
+
+// Run-cycle overrides. Same pose count and phase mapping as walk (so the
+// view's pose-index selection is unchanged) — only the baked amplitudes
+// differ. A running stride is roughly 1.5x a walking stride in both the
+// thigh swing and the knee flex, which is what visually distinguishes
+// running from "walking faster" at battle zoom. SoldierView picks between
+// the two pose arrays based on soldier.gaitRunning.
+const RUN_LEG_SWING_RAD = 0.85;
+const RUN_KNEE_SWING_RAD = 1.10;
 
 const SWORD_ARM_ANCHORS = {
   blob:          { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.22, handY: 0.65, handZ: 0    },
@@ -61,6 +72,7 @@ const BOW_ARM_ANCHORS = {
   skeleton:      { shoulderX: 0.15, shoulderY: 0.85, shoulderZ: 0,    handX: 0.20, handY: 0.68, handZ: 0.28 },
   goblin:        { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.42, handZ: 0.22 },
   goblinElite:   { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.42, handZ: 0.22 },
+  goblinSlave:   { shoulderX: 0.10, shoulderY: 0.52, shoulderZ: 0.05, handX: 0.14, handY: 0.42, handZ: 0.22 },
   hobgoblin:     { shoulderX: 0.16, shoulderY: 0.72, shoulderZ: 0.02, handX: 0.20, handY: 0.60, handZ: 0.30 },
   goblinWarlord: { shoulderX: 0.13, shoulderY: 0.62, shoulderZ: 0.04, handX: 0.18, handY: 0.52, handZ: 0.26 }
 };
@@ -75,6 +87,28 @@ const QUIVER_ANCHORS = {
 };
 
 const GOBLIN_WEAPON_SCALE = 0.7;
+// Crew-served megabow: the carrier's bow is drawn this much bigger.
+const CREW_BOW_SCALE = 1.9;
+// The carrier wears the megabow on his back; the shooter stands behind him.
+const CREW_CARRIER_BOW_ANCHOR = {
+  shoulderX: 0.0, shoulderY: 0.52, shoulderZ: 0.0,
+  handX: 0.0, handY: 0.42, handZ: -0.24
+};
+
+// Megabow scale multiplier. Sized for a "huge over-engineered crossbow,"
+// scaled 1.5x relative to standard goblin weapons.
+const CREW_MEGABOW_SCALE = 1.5;
+
+// The megabow anchors heavily onto the carrier's back. Unlike normal
+// crew bows (which are just slung backwards), the megabow is an
+// enormous machine — the heavy mechanism sticks out way behind the
+// carrier, while the long prods extend forward over the shoulder.
+// handZ: -0.15 pushes the grip behind the shoulder, letting the
+// stock span from the lower back to the front of the chest.
+const CREW_MEGABOW_ANCHOR = {
+  shoulderX: 0.0, shoulderY: 0.55, shoulderZ: 0.0,
+  handX: 0.10, handY: 0.50, handZ: -0.15
+};
 
 // A part casts a shadow only if its SECOND-largest bounding dimension is
 // at least this big. Rods and tubes (spear shafts, bow limbs, quivers,
@@ -117,6 +151,15 @@ const _staticLegsCacheKey = new WeakMap();
 // matrices the first time the instancer asks for each pose.
 const _legRigs = new Map();
 
+// Cached pose ARRAYS (walk + run) per variant. The individual geometries are
+// already shared through cachedGeometry(), but the array wrapper that holds
+// their references was being rebuilt on every soldier composition — 2000
+// allocations and 34000 pushes in a thousand-soldier battle for arrays that
+// never change after the first soldier of a variant composes. This cache
+// holds the assembled walk/run arrays so subsequent soldiers of the same
+// variant get them by reference lookup instead.
+const _staticLegsArraysCache = new Map();
+
 // Extracts the shape of one leg from its hip pivot. Handles the two layouts
 // LegBuilder and MediumModels produce:
 //   two-piece: hip pivot has a thigh mesh AND a knee group holding the shin
@@ -156,17 +199,21 @@ function extractLegSide(hip) {
 // as a distinct entry at index 0 and shifting the walk poses to indices
 // 1..N is what lets SoldierView pick "rest" when the walk amplitude
 // reaches zero.
-export function computeLegPoseParts(leftSide, rightSide, phase) {
+export function computeLegPoseParts(
+  leftSide, rightSide, phase,
+  swingRad = WALK_LEG_SWING_RAD,
+  kneeSwingRad = KNEE_SWING_RAD
+) {
   const isRest = phase < 0;
   const p = isRest ? 0 : phase * Math.PI * 2;
-  const swing = isRest ? 0 : Math.sin(p) * WALK_LEG_SWING_RAD;
+  const swing = isRest ? 0 : Math.sin(p) * swingRad;
   const cosP = isRest ? 0 : Math.cos(p);
   const leftKneeRot = isRest
     ? 0
-    : KNEE_BASE_RAD + KNEE_SWING_RAD * Math.max(0, -cosP);
+    : KNEE_BASE_RAD + kneeSwingRad * Math.max(0, -cosP);
   const rightKneeRot = isRest
     ? 0
-    : KNEE_BASE_RAD + KNEE_SWING_RAD * Math.max(0, cosP);
+    : KNEE_BASE_RAD + kneeSwingRad * Math.max(0, cosP);
 
   const parts = [];
 
@@ -201,8 +248,10 @@ export function computeLegPoseParts(leftSide, rightSide, phase) {
   return parts;
 }
 
-function buildLegPoseGeometry(leftSide, rightSide, phase) {
-  return mergeGeometries(computeLegPoseParts(leftSide, rightSide, phase));
+function buildLegPoseGeometry(leftSide, rightSide, phase, swingRad, kneeSwingRad) {
+  return mergeGeometries(
+    computeLegPoseParts(leftSide, rightSide, phase, swingRad, kneeSwingRad)
+  );
 }
 
 // Replaces the body's animated leg pivots with a single mesh that carries
@@ -229,26 +278,78 @@ function attachStaticLegs(body, bodyVariant) {
     _staticLegsCacheKey.set(leftSide.mesh.geometry, cacheKey);
   }
 
-  const poseGeometries = [];
+  // Pose arrays are built ONCE per variant and reused for every soldier
+  // of that variant. The individual geometries are already deduped by
+  // cachedGeometry, but the array wrapper itself was previously rebuilt
+  // on every compose() call — two allocations and thirty-four pushes per
+  // soldier for objects that never change after the first soldier of a
+  // variant composes. The cache below holds the assembled arrays, so a
+  // thousand-soldier battle now builds them once per variant, not once
+  // per soldier.
+  //
+  // Only variants that actually appear in the current battle (or in the
+  // main menu background / army bar thumbnail, both of which also call
+  // compose()) ever reach this code — the cache is populated on first
+  // use, not eagerly at boot. A custom battle with three body variants
+  // bakes three sets, not every variant the game declares.
+  let poseArrays = _staticLegsArraysCache.get(cacheKey);
+  if (!poseArrays) {
+    const walk = [];
 
-  // Index 0: rest pose. Both legs straight, no knee flex. This is what
-  // an idle soldier stands in — selected by SoldierView whenever the
-  // walk amplitude is at zero.
-  poseGeometries.push(cachedGeometry(
-    `${cacheKey}.rest`,
-    () => buildLegPoseGeometry(leftSide, rightSide, -1)
-  ));
-
-  // Indices 1..N: the walk cycle. Shifted by one so the view can
-  // address the rest pose as a distinct entry without a conditional
-  // sentinel in the pose selection code.
-  for (let i = 0; i < WALK_POSE_COUNT; i++) {
-    const phase = i / WALK_POSE_COUNT;
-    poseGeometries.push(cachedGeometry(
-      `${cacheKey}.pose.${i}`,
-      () => buildLegPoseGeometry(leftSide, rightSide, phase)
+    // Index 0: rest pose. Both legs straight, no knee flex. This is what
+    // an idle soldier stands in — selected by SoldierView whenever the
+    // walk amplitude is at zero.
+    walk.push(cachedGeometry(
+      `${cacheKey}.rest`,
+      () => buildLegPoseGeometry(leftSide, rightSide, -1)
     ));
+
+    // Indices 1..N: the walk cycle. Shifted by one so the view can
+    // address the rest pose as a distinct entry without a conditional
+    // sentinel in the pose selection code.
+    for (let i = 0; i < WALK_POSE_COUNT; i++) {
+      const phase = i / WALK_POSE_COUNT;
+      walk.push(cachedGeometry(
+        `${cacheKey}.pose.${i}`,
+        () => buildLegPoseGeometry(leftSide, rightSide, phase)
+      ));
+    }
+
+    // Run pose array. Same shape (rest + N walk-cycle entries) as the
+    // walk array above, but baked at the wider amplitude in
+    // RUN_LEG_SWING_RAD / RUN_KNEE_SWING_RAD. SoldierView picks between
+    // the two arrays based on the soldier's gaitRunning flag.
+    const run = [];
+    run.push(cachedGeometry(
+      `${cacheKey}.runRest`,
+      () => buildLegPoseGeometry(leftSide, rightSide, -1)
+    ));
+    for (let i = 0; i < WALK_POSE_COUNT; i++) {
+      const phase = i / WALK_POSE_COUNT;
+      run.push(cachedGeometry(
+        `${cacheKey}.runPose.${i}`,
+        () => buildLegPoseGeometry(
+          leftSide, rightSide, phase, RUN_LEG_SWING_RAD, RUN_KNEE_SWING_RAD)
+      ));
+    }
+
+    // Kneel poses (megabow carrier). Appended AFTER the walk poses, so they
+    // sit at indices poseCount + 1 + stage. Both arrays get the same entries
+    // because SoldierView may be holding either one.
+    for (let k = 0; k < KNEEL_POSE_COUNT; k++) {
+      const kneel = cachedGeometry(
+        `${cacheKey}.kneel.${k}`,
+        () => mergeGeometries(computeKneelPoseParts(leftSide, rightSide, k))
+      );
+      walk.push(kneel);
+      run.push(kneel);
+    }
+
+    poseArrays = { walk, run };
+    _staticLegsArraysCache.set(cacheKey, poseArrays);
   }
+  const poseGeometries = poseArrays.walk;
+  const runPoseGeometries = poseArrays.run;
 
   // The single leg mesh. Starts at the rest pose (index 0). Shares the
   // body's per-instance material so the legs HP-tint in lockstep with
@@ -282,10 +383,13 @@ function attachStaticLegs(body, bodyVariant) {
 
   body.userData.staticLegsMesh = staticLegsMesh;
   body.userData.staticLegsPoseGeometries = poseGeometries;
+  body.userData.staticLegsRunPoseGeometries = runPoseGeometries;
   body.userData.staticLegsActive = true;
   // Count of WALK poses (not counting the rest pose at index 0). The
   // view adds 1 when addressing into the array — see _applyWalkCycle.
+  // Run array has the same shape, so one count covers both.
   body.userData.staticLegsPoseCount = WALK_POSE_COUNT;
+  body.userData.staticLegsRunPoseCount = WALK_POSE_COUNT;
 
   // Detach the pivots. They never draw for a walking soldier, yet as
   // scene-graph nodes they still cost matrix updates every frame (eight
@@ -296,7 +400,7 @@ function attachStaticLegs(body, bodyVariant) {
 }
 
 export class SoldierModelComposer {
-static compose(unitTypeDef, teamId, bodyVariant) {
+static compose(unitTypeDef, teamId, bodyVariant, crewRole = null) {
     const group = new THREE.Group();
     const rider = new THREE.Group();
     group.add(rider);
@@ -352,7 +456,12 @@ static compose(unitTypeDef, teamId, bodyVariant) {
 
     let horseBase = null;
     if (isMounted(unitTypeDef)) {
-      if (unitTypeDef.mountType === 'beast') {
+      if (unitTypeDef.mountType === 'hound') {
+        // Goblin war hound (see UnitTypes.goblinHound). Riderless by
+        // design — the empty body path above makes the hound model the
+        // soldier's entire visual.
+        horseBase = SoldierMeshFactory.createHoundBase();
+      } else if (unitTypeDef.mountType === 'beast') {
         horseBase = SoldierMeshFactory.createBeastMount();
       } else if (isSkeleton) {
         horseBase = SoldierMeshFactory.createSkeletonHorseBase();
@@ -381,11 +490,24 @@ static compose(unitTypeDef, teamId, bodyVariant) {
     // type's weapon table, but no mesh is drawn.
     let weapon = null;
     let weaponArm = null;
-    if (!isRiderless) {
+    // Crew-served weapon: the SHOOTER carries nothing (the carrier holds
+    // the weapon). crewRole is null for every non-crew caller.
+    const crewShooter = crewRole === 'shooter';
+    if (!isRiderless && !crewShooter) {
       const useBeastScythe = unitTypeDef.mountType === 'beast';
+      // A megabowman CARRIER gets the dedicated triple-prod arbalest,
+      // not the standard bow. Distinguished by `rangedWeaponType ===
+      // 'crossbow'` — the only ranged type currently set to that, and
+      // the field the whole crew pipeline already keys on. If a future
+      // crew-served bow weapon is added, this check needs an additional
+      // discriminator.
+      const useMegabow = crewRole === 'carrier'
+        && unitTypeDef.rangedWeaponType === 'crossbow';
       weapon = useBeastScythe
         ? SoldierMeshFactory.createSwordScythe()
-        : WeaponViewFactory.createForWeaponType(unitTypeDef.weaponType, bodyVariant);
+        : useMegabow
+          ? SoldierMeshFactory.createMegabow()
+          : WeaponViewFactory.createForWeaponType(unitTypeDef.weaponType, bodyVariant, unitTypeDef.clubWeapon === true);
       weapon.rotation.order = 'YXZ';
 
       if (!useBeastScythe && unitTypeDef.weaponType === 'sword') {
@@ -396,13 +518,29 @@ static compose(unitTypeDef, teamId, bodyVariant) {
         weapon.position.sub(weaponArm.position);
         weaponArm.add(weapon);
         body.add(weaponArm);
+      } else if (useMegabow) {
+        // The carrier wears a vest; two rods from the shoulders hold a hinge
+        // above and behind the head; the bow hangs from that hinge. The hinge
+        // pivot is the weaponArm: SoldierView tilts it to aim over the head.
+        // The bow is authored at goblin scale, so no scaling happens here.
+        const harness = SoldierMeshFactory.createMegabowHarness(color);
+        body.add(harness.group);
+        harness.mount.add(weapon);
+        weaponArm = harness.hinge;
+        layoutMegabowDeploy(weapon, weaponArm, 0, 0, 0);
       } else if (!useBeastScythe && unitTypeDef.weaponType === 'bow') {
-        const anchor = BOW_ARM_ANCHORS[bodyVariant] || BOW_ARM_ANCHORS.blob;
+        const anchor = useMegabow
+          ? CREW_MEGABOW_ANCHOR
+          : (crewRole === 'carrier'
+            ? CREW_CARRIER_BOW_ANCHOR
+            : (BOW_ARM_ANCHORS[bodyVariant] || BOW_ARM_ANCHORS.blob));
         weapon.position.set(anchor.handX, anchor.handY, anchor.handZ);
         weaponArm = new THREE.Group();
         weaponArm.position.set(anchor.shoulderX, anchor.shoulderY, anchor.shoulderZ);
         weapon.position.sub(weaponArm.position);
         if (usesSmallScaleKit) weapon.scale.setScalar(GOBLIN_WEAPON_SCALE);
+        if (useMegabow) weapon.scale.multiplyScalar(CREW_MEGABOW_SCALE);
+        else if (crewRole === 'carrier') weapon.scale.multiplyScalar(CREW_BOW_SCALE);
         weaponArm.add(weapon);
         body.add(weaponArm);
 
@@ -411,7 +549,7 @@ static compose(unitTypeDef, teamId, bodyVariant) {
         quiver.position.set(quiverAnchor.x, quiverAnchor.y, quiverAnchor.z);
         quiver.rotation.z = quiverAnchor.tiltZ;
         if (usesSmallScaleKit) quiver.scale.setScalar(GOBLIN_WEAPON_SCALE);
-        body.add(quiver);
+        if (crewRole !== 'carrier') body.add(quiver);
       } else {
         if (usesSmallScaleKit) {
           weapon.scale.setScalar(GOBLIN_WEAPON_SCALE);

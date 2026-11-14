@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
 
 const ATTACK_FLASH_DURATION = 1.1;
 // One-shot formation-slot flash shown after a plain move order commits.
@@ -19,10 +20,11 @@ export class OrderPreviewView {
     this.group.visible = false;
 
     const ringGeo = new THREE.RingGeometry(0.9, 1.05, 24);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.85, depthTest: false });
     this.ring = new THREE.Mesh(ringGeo, ringMat);
     this.ring.rotation.x = -Math.PI / 2;
     this.ring.position.y = 0.03;
+    this.ring.renderOrder = 10;
     this.group.add(this.ring);
 
     const arrowShape = new THREE.Shape();
@@ -31,10 +33,11 @@ export class OrderPreviewView {
     arrowShape.lineTo(0.15, -0.1);
     arrowShape.closePath();
     const arrowGeo = new THREE.ShapeGeometry(arrowShape);
-    const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+    const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, depthTest: false });
     this.arrow = new THREE.Mesh(arrowGeo, arrowMat);
     this.arrow.rotation.x = -Math.PI / 2;
     this.arrow.position.set(0, 0.04, 1.3);
+    this.arrow.renderOrder = 10;
     this.group.add(this.arrow);
 
     scene.add(this.group);
@@ -62,9 +65,13 @@ export class OrderPreviewView {
     this._destinationMarkers = [];
   }
 
-show(x, z, facing) {
+  show(x, z, facing) {
     this.group.visible = true;
-    this.group.position.set(x, 0, z);
+    // Ring + facing arrow are group children; anchoring the group to the
+    // terrain keeps both above the surface. Pre-elevation this was flat
+    // y = 0; on a hill that put them inside the terrain mesh and read as
+    // "ghost marker invisible".
+    this.group.position.set(x, ActiveTerrain.heightAt(x, z), z);
     this.group.rotation.y = facing;
     // A live formation drag is starting. Cancel any lingering one-shot
     // ghost flash so the drag's persistent preview reads cleanly — two
@@ -86,7 +93,11 @@ show(x, z, facing) {
       const ring = this.unitHighlightRings[i];
       if (i < centers.length) {
         ring.visible = true;
-        ring.position.set(centers[i].x, 0.025, centers[i].z);
+        ring.position.set(
+          centers[i].x,
+          ActiveTerrain.heightAt(centers[i].x, centers[i].z) + 0.025,
+          centers[i].z
+        );
       } else {
         ring.visible = false;
       }
@@ -99,16 +110,20 @@ show(x, z, facing) {
     while (this.ghostMarkers.length < slots.length) {
       this.ghostMarkers.push(this._createGhostMarker());
     }
-    for (let i = 0; i < this.ghostMarkers.length; i++) {
-      const marker = this.ghostMarkers[i];
-      if (i < slots.length) {
-        marker.visible = true;
-        marker.position.set(slots[i].x, 0.05, slots[i].z);
-        marker.rotation.y = facing;
-      } else {
-        marker.visible = false;
+      for (let i = 0; i < this.ghostMarkers.length; i++) {
+        const marker = this.ghostMarkers[i];
+        if (i < slots.length) {
+          marker.visible = true;
+          marker.position.set(
+            slots[i].x,
+            ActiveTerrain.heightAt(slots[i].x, slots[i].z) + 0.05,
+            slots[i].z
+          );
+          marker.rotation.y = facing;
+        } else {
+          marker.visible = false;
+        }
       }
-    }
   }
 
 // Persistent order-destination markers, shown while Ctrl is held.
@@ -141,7 +156,11 @@ show(x, z, facing) {
       if (i < markers.length) {
         const spec = markers[i];
         marker.visible = true;
-        marker.position.set(spec.x, 0.05, spec.z);
+        marker.position.set(
+          spec.x,
+          ActiveTerrain.heightAt(spec.x, spec.z) + 0.05,
+          spec.z
+        );
         marker.rotation.y = spec.facing;
         // Color per-marker, per-frame. Selected units read blue, all
         // other controllable units read pale cyan. Set every frame
@@ -211,7 +230,7 @@ show(x, z, facing) {
   // resources.
   _spawnFlash(x, z, colorHex) {
     const mesh = this._createFlashRing(colorHex);
-    mesh.position.set(x, 0.06, z);
+    mesh.position.set(x, ActiveTerrain.heightAt(x, z) + 0.06, z);
     this.scene.add(mesh);
     this.flashes.push({ mesh, timeLeft: ATTACK_FLASH_DURATION });
   }
@@ -225,17 +244,21 @@ show(x, z, facing) {
       m.visible = false;
       this._ghostFlashPool.push(m);
     }
-    for (let i = 0; i < this._ghostFlashPool.length; i++) {
-      const marker = this._ghostFlashPool[i];
-      if (i < slots.length) {
-        marker.visible = true;
-        marker.position.set(slots[i].x, 0.05, slots[i].z);
-        marker.rotation.y = facing;
-        marker.material.opacity = 0.75;
-      } else {
-        marker.visible = false;
+      for (let i = 0; i < this._ghostFlashPool.length; i++) {
+        const marker = this._ghostFlashPool[i];
+        if (i < slots.length) {
+          marker.visible = true;
+          marker.position.set(
+            slots[i].x,
+            ActiveTerrain.heightAt(slots[i].x, slots[i].z) + 0.05,
+            slots[i].z
+          );
+          marker.rotation.y = facing;
+          marker.material.opacity = 0.75;
+        } else {
+          marker.visible = false;
+        }
       }
-    }
     this._ghostFlashTimeLeft = GHOST_FLASH_DURATION;
   }
 
@@ -273,11 +296,18 @@ update(deltaSeconds) {
     }
   }
 
-  _createUnitRing() {
+_createUnitRing() {
     const geo = new THREE.RingGeometry(1.1, 1.25, 24);
-    const mat = new THREE.MeshBasicMaterial({ color: 0x4caf50, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x4caf50,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false
+    });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
+    mesh.renderOrder = 10;
     this.scene.add(mesh);
     return mesh;
   }
@@ -286,7 +316,7 @@ update(deltaSeconds) {
   // with its tip at +Y; the 'YXZ' rotation order lays it flat (X +90° maps
   // shape +Y to world +Z) and then spins it by mesh.rotation.y — matching the
   // codebase convention that forward = (sin(facing), cos(facing)).
-  _createGhostMarker(colorHex = 0xffffff) {
+_createGhostMarker(colorHex = 0xffffff) {
     const shape = new THREE.Shape();
     shape.moveTo(0, 0.16);
     shape.lineTo(-0.13, -0.12);
@@ -295,29 +325,37 @@ update(deltaSeconds) {
     shape.closePath();
 
     const geo = new THREE.ShapeGeometry(shape);
+    // depthTest: false so a ghost marker on a hill or behind a tree is
+    // still visible — the marker's entire purpose is to show WHERE the
+    // unit is going, so hiding it behind terrain defeats it. Same choice
+    // as the selection rings and range circle.
     const mat = new THREE.MeshBasicMaterial({
       color: colorHex,
       transparent: true,
       opacity: 0.75,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
+      depthTest: false
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.order = 'YXZ';
     mesh.rotation.x = Math.PI / 2;
+    mesh.renderOrder = 12;
     this.scene.add(mesh);
     return mesh;
   }
 
-  _createFlashRing(colorHex) {
+_createFlashRing(colorHex) {
     const geo = new THREE.RingGeometry(0.55, 0.75, 32);
     const mat = new THREE.MeshBasicMaterial({
       color: colorHex,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 1
+      opacity: 1,
+      depthTest: false
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
+    mesh.renderOrder = 14;
     return mesh;
   }
 }

@@ -19,26 +19,21 @@
 //     blueRoster:      [...],
 //     redRoster:       [...],
 //     playerTeamId:    'blue' | 'red' | null,
-//     aiTierByTeamId:  { blue: <tierId>, red: <tierId> } | undefined
+//     aiTierByTeamId:  { blue: <tierId>, red: <tierId> } | undefined,
+//     biome:           'auto' | <biomeId> | undefined
 //   }
 // with roster entries matching RosterLayout / CampaignBattleBuilder:
 //   { id, typeId, aliveCount, maxCount, isUndead }
 //
-// The two are deliberately separate. Clearing the active slot on Exit is
-// what makes the exit-to-menu flow work; clearing the last-setup slot on
-// Exit would discard the player's configuration just because they left a
-// battle — which is exactly what this module exists to prevent.
-//
 // Field history:
 //   playerTeamId    — added so a Restart-button reload of a custom battle
-//                     resumes with the same side selection. Earlier
-//                     versions stored only the rosters and relied on
-//                     main.js's `?? 'blue'` fallback, which silently
-//                     dropped a red-player setup on reload.
+//                     resumes with the same side selection.
 //   aiTierByTeamId  — per-team AI difficulty, added with the multi-tier
-//                     Custom Battle feature. Optional; when absent
-//                     (older saves) the reader falls through to the
-//                     current global AITierPreference.
+//                     Custom Battle feature. Optional.
+//   biome           — terrain biome override. 'auto' (or absent) keeps
+//                     the generator's hybrid mosaic; any other id forces
+//                     that biome on the whole map. Optional so older
+//                     saves continue to work.
 
 const ACTIVE_KEY = 'battle-prototype-active-custom-battle-v1';
 const LAST_SETUP_KEY = 'battle-prototype-last-custom-setup-v1';
@@ -46,10 +41,6 @@ const LAST_SETUP_KEY = 'battle-prototype-last-custom-setup-v1';
 // Shared load/validate logic. Both slots use the same shape and the same
 // corruption guard: both rosters must be arrays, or the whole payload is
 // treated as absent (matching CampaignState.load's behaviour).
-//
-// playerTeamId and aiTierByTeamId are passed through as-is when present,
-// left absent when not — callers (CustomBattleSetup.show,
-// buildCustomScenario) are the ones that know their defaults.
 function parsePayload(raw) {
   if (!raw) return null;
   try {
@@ -75,19 +66,29 @@ function readJson(storage, key) {
 
 // Builds the persisted payload from the loose arguments. Centralised so
 // set() and setLastSetup() cannot drift on which fields they carry.
-function makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId) {
+function makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) {
   const payload = { blueRoster, redRoster };
   // Preserve the explicit null case (spectator / both-AI battle) —
   // only omit the field when the caller did not supply it at all.
   if (playerTeamId !== undefined) payload.playerTeamId = playerTeamId;
   // Shallow-copy so a caller mutating its own tier map afterwards cannot
-  // retroactively change what was written. Omit when not supplied so an
-  // older save file is not given an empty object it never had.
+  // retroactively change what was written.
   if (aiTierByTeamId && typeof aiTierByTeamId === 'object') {
     payload.aiTierByTeamId = {
       blue: aiTierByTeamId.blue,
       red:  aiTierByTeamId.red
     };
+  }
+  // Terrain biome: only when the caller supplies one. Absence means 'auto'
+  // to the reader (same effect as the string but preserves older saves
+  // byte-for-byte).
+  if (typeof biome === 'string' && biome.length > 0) {
+    payload.biome = biome;
+  }
+  // Ruin archetype. Only meaningful when biome === 'ruins'; still stored
+  // for every save so a switch back to 'ruins' keeps the last choice.
+  if (typeof ruinType === 'string' && ruinType.length > 0) {
+    payload.ruinType = ruinType;
   }
   return payload;
 }
@@ -95,11 +96,11 @@ function makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId) {
 export const ActiveCustomBattle = {
   // --- currently active battle (Restart / resume) -------------------------
 
-  set(blueRoster, redRoster, playerTeamId, aiTierByTeamId) {
+  set(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) {
     writeJson(
       sessionStorage,
       ACTIVE_KEY,
-      makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId)
+      makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType)
     );
   },
 
@@ -113,11 +114,11 @@ export const ActiveCustomBattle = {
 
   // --- last configured setup (pre-populate the setup screen) --------------
 
-  setLastSetup(blueRoster, redRoster, playerTeamId, aiTierByTeamId) {
+  setLastSetup(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType) {
     writeJson(
       localStorage,
       LAST_SETUP_KEY,
-      makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId)
+      makePayload(blueRoster, redRoster, playerTeamId, aiTierByTeamId, biome, ruinType)
     );
   },
 

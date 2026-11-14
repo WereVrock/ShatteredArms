@@ -4,11 +4,24 @@
 //   FIRE AT WILL (toggle) — green when on, red when off. Enabled only when
 //     at least one selected unit is ranged; toggles every selected ranged
 //     unit's fireAtWill flag. Melee units in the selection are ignored.
+//   RUSH / ORDERLY — global movement mode.
+//   RUN (toggle) — runs the selected units that can run. Crew-served units
+//     (goblin megabowmen) are NOT handled by it: for them the crew run
+//     button replaces it (see below), and the Run button is hidden when
+//     only crew units are selected.
+//   CREW RUN (toggle) — shown while a crew unit is selected. It is the run
+//     switch of a crew unit: on = the shooters run ahead of their carriers
+//     (the carriers follow on foot). Forced on and disabled once every
+//     carrier is dead. See CrewPairing.
+//   LEAVE BATTLE — available for every selected unit, any time. Two clicks:
+//     the first arms the button (red), the second within LEAVE_CONFIRM_MS
+//     confirms. The unit withdraws off the nearest map edge and returns for
+//     the next campaign battle (see BattleWithdrawal).
 //   STOP — cancels any move/attack order and reforms the formation around
 //     the unit's current position. Engaged soldiers keep fighting (stop is
 //     not a retreat); only march/attack orders cancel.
 //
-// Both buttons are icon-only (inline SVG); the human-readable label lives
+// All buttons are icon-only (inline SVG); the human-readable label lives
 // in the button's title/tooltip.
 //
 // Responsiveness: all visual state lives in a stylesheet (injected once),
@@ -25,10 +38,16 @@
 // grows, wraps, or loses units.
 //
 // Pure UI. Reads a Set<Unit> passed in each frame; dispatches callbacks.
-// Sim-side mutations live on Unit (fireAtWill field, stopOrder method).
+// Sim-side mutations live on Unit (fireAtWill field, stopOrder method,
+// setCrewDontWait, leaveBattle).
 
 import { isRanged } from '../config/UnitClasses.js';
 import { SettingsStore } from './settings/SettingsStore.js';
+import { Gait } from '../sim/Gait.js';
+import { CrewPairing } from '../sim/CrewPairing.js';
+
+// Time (ms) the Leave battle button stays armed after its first click.
+const LEAVE_CONFIRM_MS = 2500;
 
 // --- icons -----------------------------------------------------------------
 // 22px line icons, currentColor so they inherit the button's text colour.
@@ -60,6 +79,46 @@ const ICON_ORDERLY = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidde
   <rect x="15" y="10" width="4" height="4" fill="currentColor"/>
   <rect x="5"  y="16" width="4" height="4" fill="currentColor"/>
   <rect x="15" y="16" width="4" height="4" fill="currentColor"/>
+</svg>`;
+
+// Run toggle: a running figure. Also used by the crew run button.
+const ICON_RUN = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+  <circle cx="15" cy="4.5" r="2.2" fill="currentColor"/>
+  <path d="M13 8 L9 12 L12 14 L10 20 M13 8 L16 12 L19 11 M12 14 L16 16 L16 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+
+// Recall hounds: a paw print.
+const ICON_HOUND = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+  <ellipse cx="12" cy="16" rx="5" ry="4" fill="currentColor"/>
+  <circle cx="5.5" cy="11" r="2" fill="currentColor"/>
+  <circle cx="9.5" cy="6.5" r="2" fill="currentColor"/>
+  <circle cx="14.5" cy="6.5" r="2" fill="currentColor"/>
+  <circle cx="18.5" cy="11" r="2" fill="currentColor"/>
+</svg>`;
+
+// Abandon chargob beasts: a broken chain.
+const ICON_ABANDON = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+  <path d="M9 7 H6.5 A4.5 4.5 0 0 0 6.5 16 H9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M15 7 H17.5 A4.5 4.5 0 0 1 17.5 16 H15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+  <line x1="12" y1="3" x2="12" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="2 3"/>
+</svg>`;
+
+// Units whose run switch is a button of their own: crew units (crew run
+// button) and chargob units until their beasts are abandoned (abandon button).
+function hasOwnRunSwitch(u) {
+  return CrewPairing.isCrewUnit(u) || (u.companionKind === 'chargob' && !u.chargobAbandoned);
+}
+
+// Chargob charge: three chevrons pointing forward.
+const ICON_CHARGE = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+  <path d="M3 8 L8 12 L3 16 M10 6 L16 12 L10 18 M17 4 L22 12 L17 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+
+// Leave battle: an arrow leaving a frame.
+const ICON_LEAVE = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+  <path d="M10 4 H5 V20 H10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="9" y1="12" x2="20" y2="12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+  <polyline points="16,8 20,12 16,16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
 
 // Injected once per page. Kept inline rather than a separate .css file so
@@ -126,9 +185,22 @@ const STYLE_TEXT = `
     border-color: #d07840;
     color: #ffffff;
   }
+  /* Run toggle (also the crew run button). Only the on state is coloured;
+     off is the plain button. */
+  .cmd-btn.run-on {
+    background: #6a3fa0;
+    border-color: #8a63c0;
+    color: #ffffff;
+  }
   .cmd-btn.rush-off {
     background: #3a5570;
     border-color: #5a7590;
+    color: #ffffff;
+  }
+  /* Leave battle, armed: the next click confirms. */
+  .cmd-btn.leave-armed {
+    background: #a02a2a;
+    border-color: #d05a5a;
     color: #ffffff;
   }
 `;
@@ -152,11 +224,18 @@ export class CommandBarView {
     this.root = rootElement;
     this._belowElement = belowElement;
 
-    // Callbacks assigned by main.js.
+    // Callbacks assigned by main.js. All optional: when absent, the
+    // built-in default applies the action to the selected units directly.
     //   onSetFireAtWill(newState:boolean) — apply to every selected ranged unit
     //   onStop()                          — apply stopOrder() to every selected unit
+    //   onSetRun(newState:boolean)        — run toggle (non-crew units)
+    //   onSetCrewDontWait(newState)       — crew run toggle
+    //   onLeaveBattle()                   — withdraw every selected unit
     this.onSetFireAtWill = null;
     this.onStop = null;
+    this.onSetRun = null;
+    this.onSetCrewDontWait = null;
+    this.onLeaveBattle = null;
 
     // Group FAW state — true when every selected ranged unit has
     // fireAtWill on. Only updated when it actually changes (see _syncState),
@@ -170,6 +249,22 @@ export class CommandBarView {
     this._lastFawActive = null;
     this._lastFawDisabled = null;
     this._lastStopDisabled = null;
+
+    this._selected = [];
+    this._runActive = false;
+    this._lastRunActive = null;
+    this._lastRunDisabled = null;
+    this._lastRunHidden = false;
+
+    this._crewToggleActive = false;
+    this._lastCrewShown = false;
+    this._lastCrewToggleDisabled = null;
+    this._lastCrewToggleActive = null;
+
+    this._leaveArmedUntil = 0;
+    this._leaveArmedKey = '';
+    this._lastLeaveDisabled = null;
+    this._lastLeaveArmed = null;
 
     // --- Root layout ---
     Object.assign(this.root.style, {
@@ -211,8 +306,102 @@ export class CommandBarView {
       SettingsStore.set('rushMode', !s.rushMode);
     });
 
+    this._runBtn = this._buildButton('Run: Off', ICON_RUN, () => {
+      if (this._runBtn.disabled) return;
+      this._setRun(!this._runActive);
+    });
+
+    // Crew run button. Replaces the Run button for crew-served units; hidden
+    // unless a crew unit is selected.
+    this._crewBtn = this._buildButton('Leave carrier', ICON_RUN, () => {
+      if (this._crewBtn.disabled) return;
+      this._setCrewDontWait(!this._crewToggleActive);
+    });
+    this._crewBtn.style.display = 'none';
+    this._crewBtn.disabled = true;
+
+    // Leave battle, any unit, two clicks (arm, then confirm).
+    this._leaveBtn = this._buildButton('Leave battle', ICON_LEAVE, () => {
+      if (this._leaveBtn.disabled) return;
+      const now = performance.now();
+      if (this._leaveArmedUntil > now) {
+        this._leaveArmedUntil = 0;
+        this._refreshLeave();
+        this._leaveBattle();
+      } else {
+        this._leaveArmedUntil = now + LEAVE_CONFIRM_MS;
+        this._leaveArmedKey = this._selectionKey(this._selected);
+        this._refreshLeave();
+      }
+    });
+    this._leaveBtn.disabled = true;
+
     this.root.appendChild(this._fawBtn);
     this.root.appendChild(this._rushBtn);
+    this.root.appendChild(this._runBtn);
+    this.root.appendChild(this._crewBtn);
+    // Recall hounds. Shown while a unit with hounds is selected; enabled
+    // while some of its hounds are attacking within recall range.
+    this.onRecallHounds = null;
+    this._lastHoundShown = false;
+    this._lastHoundDisabled = null;
+    this._houndBtn = this._buildButton('Recall hounds', ICON_HOUND, () => {
+      if (this._houndBtn.disabled) return;
+      this._recallHounds();
+    });
+    this._houndBtn.style.display = 'none';
+    this._houndBtn.disabled = true;
+
+    this.root.appendChild(this._houndBtn);
+
+    // Chargob charge. Shown while a chargob unit is selected. Left click: one
+    // more beast to goad into a charge; right click: one fewer. The badge
+    // shows how many are queued.
+    this.onAdjustCharge = null;
+    this._lastChargeShown = false;
+    this._lastChargeDisabled = null;
+    this._lastChargeKey = '';
+    this._chargeBtn = this._buildButton('Goad chargobs', ICON_CHARGE, () => {
+      if (this._chargeBtn.disabled) return;
+      this._adjustCharge(1);
+    });
+    this._chargeBtn.style.display = 'none';
+    this._chargeBtn.style.position = 'relative';
+    this._chargeBtn.disabled = true;
+    this._chargeBadge = document.createElement('span');
+    Object.assign(this._chargeBadge.style, {
+      position: 'absolute',
+      right: '3px',
+      top: '0',
+      fontSize: '11px',
+      fontWeight: '700',
+      color: '#ffd88a',
+      pointerEvents: 'none'
+    });
+    this._chargeBtn.appendChild(this._chargeBadge);
+    this._chargeBtn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (!this._chargeBtn.disabled) this._adjustCharge(-1);
+    });
+    this.root.appendChild(this._chargeBtn);
+
+    // Abandon chargob beasts. Replaces the Run button for chargob units until
+    // used. One-way: the beasts leave the player's control, the handlers may
+    // run afterwards.
+    this.onAbandonBeasts = null;
+    this._lastAbandonShown = false;
+    this._abandonBtn = this._buildButton(
+      'Abandon chargob beasts: they stop obeying and run wild once the handlers have moved away. Cannot be undone.',
+      ICON_ABANDON,
+      () => {
+        if (this._abandonBtn.disabled) return;
+        this._abandonBeasts();
+      }
+    );
+    this._abandonBtn.style.display = 'none';
+    this._abandonBtn.disabled = true;
+    this.root.appendChild(this._abandonBtn);
+    this.root.appendChild(this._leaveBtn);
     this.root.appendChild(this._stopBtn);
 
     // Keep the rush button in sync with the store. Fires on every
@@ -230,6 +419,12 @@ export class CommandBarView {
     this._applyFawState(false);
     this._lastFawDisabled = true;
     this._lastStopDisabled = true;
+    this._runBtn.disabled = true;
+    this._applyRunState(false);
+    this._lastRunDisabled = true;
+    this._lastRunActive = false;
+    this._lastLeaveDisabled = true;
+    this._refreshLeave();
 
     this._syncPosition();
   }
@@ -244,6 +439,7 @@ export class CommandBarView {
 
     const units = selectedUnits ? Array.from(selectedUnits) : [];
     const hasSelection = units.length > 0;
+    this._selected = units;
 
     // Partition by ranged capability. Unit has no unitTypeDef — the type
     // lives on each soldier (see ArmyBarView._installIcon for the same
@@ -261,6 +457,19 @@ export class CommandBarView {
     // available whenever there is any selection at all.
     const fawDisabled = rangedCount === 0;
     const stopDisabled = !hasSelection;
+
+    // Run applies to selected units that can run (foot skeletons cannot).
+    // Crew units are excluded: their run switch is the crew button.
+    let runCapable = 0;
+    let allRunOn = true;
+    for (const u of units) {
+      if (CrewPairing.isCrewUnit(u)) continue;
+      if (!Gait.unitCanRun(u)) continue;
+      runCapable++;
+      if (!u.runEnabled) allRunOn = false;
+    }
+    const runDisabled = runCapable === 0;
+    const runActive = runCapable > 0 && allRunOn;
     const fawActive = rangedCount > 0 && allRangedOn;
 
     // Only write to the DOM when something changed. Skipping the redundant
@@ -274,10 +483,24 @@ export class CommandBarView {
       this._stopBtn.disabled = stopDisabled;
       this._lastStopDisabled = stopDisabled;
     }
+    if (runDisabled !== this._lastRunDisabled) {
+      this._runBtn.disabled = runDisabled;
+      this._lastRunDisabled = runDisabled;
+    }
+    if (runActive !== this._lastRunActive) {
+      this._applyRunState(runActive);
+      this._lastRunActive = runActive;
+    }
     if (fawActive !== this._lastFawActive) {
       this._applyFawState(fawActive);
       this._lastFawActive = fawActive;
     }
+
+    this._updateCrewButton(units);
+    this._updateLeaveButton(units);
+    this._updateHoundButton(units);
+    this._updateChargeButton(units);
+    this._updateAbandonButton(units);
   }
 
   dispose() {
@@ -333,6 +556,244 @@ export class CommandBarView {
     this._rushBtn.innerHTML = rush ? ICON_RUSH : ICON_ORDERLY;
     this._rushBtn.classList.toggle('rush-on', rush);
     this._rushBtn.classList.toggle('rush-off', !rush);
+  }
+
+  _applyRunState(active) {
+    this._runActive = active;
+    this._runBtn.title = active
+      ? 'Run: On — units run on move orders. Tires troops faster; spearmen raise their spears.'
+      : 'Run: Off — units walk';
+    this._runBtn.classList.toggle('run-on', active);
+  }
+
+  // Crew run button. State comes from CrewPairing; this method only mirrors
+  // it into the DOM, and only when something changed. Also hides the plain
+  // Run button while only crew units are selected (the crew button replaces
+  // it).
+  _updateCrewButton(units) {
+    let crewCount = 0;
+    let canToggle = 0;
+    let allActiveToggleable = true;
+    let allActiveAny = true;
+    for (const u of units) {
+      if (!CrewPairing.isCrewUnit(u)) continue;
+      crewCount++;
+      const st = CrewPairing.dontWaitState(u);
+      if (!st.active) allActiveAny = false;
+      if (st.enabled) {
+        canToggle++;
+        if (!st.active) allActiveToggleable = false;
+      }
+    }
+
+    const showCrew = crewCount > 0;
+    const onlyCrew = units.length > 0 && units.every(hasOwnRunSwitch);
+    const toggleDisabled = canToggle === 0;
+    const toggleActive = showCrew && (canToggle > 0 ? allActiveToggleable : allActiveAny);
+    this._crewToggleActive = toggleActive;
+
+    if (showCrew !== this._lastCrewShown) {
+      this._crewBtn.style.display = showCrew ? '' : 'none';
+      this._lastCrewShown = showCrew;
+    }
+    if (onlyCrew !== this._lastRunHidden) {
+      this._runBtn.style.display = onlyCrew ? 'none' : '';
+      this._lastRunHidden = onlyCrew;
+    }
+    if (toggleDisabled !== this._lastCrewToggleDisabled) {
+      this._crewBtn.disabled = toggleDisabled;
+      this._lastCrewToggleDisabled = toggleDisabled;
+    }
+    if (toggleActive !== this._lastCrewToggleActive) {
+      this._crewBtn.classList.toggle('run-on', toggleActive);
+      this._crewBtn.title = toggleActive
+        ? 'Leave carrier: On — the shooters run ahead, the carriers follow on foot'
+        : 'Leave carrier: Off — the whole unit moves at the carriers\' pace';
+      this._lastCrewToggleActive = toggleActive;
+    }
+  }
+
+  // Leave battle button: enabled when at least one selected unit can leave.
+  // A pending confirmation is dropped when it expires, when the button gets
+  // disabled, or when the selection changes.
+  _updateLeaveButton(units) {
+    let canLeave = 0;
+    for (const u of units) {
+      if (u.canLeaveBattle && u.canLeaveBattle()) canLeave++;
+    }
+    const disabled = canLeave === 0;
+    let dirty = false;
+
+    if (disabled !== this._lastLeaveDisabled) {
+      this._leaveBtn.disabled = disabled;
+      this._lastLeaveDisabled = disabled;
+      if (disabled) this._leaveArmedUntil = 0;
+      dirty = true;
+    }
+
+    if (this._leaveArmedUntil > 0) {
+      const expired = this._leaveArmedUntil <= performance.now();
+      const changed = this._leaveArmedKey !== this._selectionKey(units);
+      if (expired || changed) {
+        this._leaveArmedUntil = 0;
+        dirty = true;
+      }
+    }
+
+    if (dirty) this._refreshLeave();
+  }
+
+  _updateHoundButton(units) {
+    let withHounds = 0;
+    let canRecall = 0;
+    for (const u of units) {
+      if (!u.companions || u.companions.length === 0 || u.companionKind === 'chargob') continue;
+      withHounds++;
+      if (u.canRecallHounds()) canRecall++;
+    }
+    const shown = withHounds > 0;
+    const disabled = canRecall === 0;
+    if (shown !== this._lastHoundShown) {
+      this._houndBtn.style.display = shown ? '' : 'none';
+      this._lastHoundShown = shown;
+    }
+    if (disabled !== this._lastHoundDisabled) {
+      this._houndBtn.disabled = disabled;
+      this._houndBtn.title = disabled
+        ? 'Recall hounds: no hound is attacking within recall range'
+        : 'Recall hounds: the attacking hounds in range return to their handlers';
+      this._lastHoundDisabled = disabled;
+    }
+  }
+
+  // Charge button: shown while a chargob unit is selected, enabled while a
+  // beast is left in the line. The numbers come from Unit.chargobInfo.
+  _updateChargeButton(units) {
+    let chargobUnits = 0;
+    let available = 0;
+    let wanted = 0;
+    for (const u of units) {
+      if (u.companionKind !== 'chargob') continue;
+      const info = u.chargobInfo();
+      chargobUnits++;
+      available += info.available;
+      wanted += info.wanted;
+    }
+
+    const shown = chargobUnits > 0;
+    const disabled = available === 0;
+    const key = wanted + '/' + available;
+
+    if (shown !== this._lastChargeShown) {
+      this._chargeBtn.style.display = shown ? '' : 'none';
+      this._lastChargeShown = shown;
+    }
+    if (disabled !== this._lastChargeDisabled) {
+      this._chargeBtn.disabled = disabled;
+      this._lastChargeDisabled = disabled;
+    }
+    if (key !== this._lastChargeKey) {
+      this._chargeBadge.textContent = wanted > 0 ? String(wanted) : '';
+      this._chargeBtn.classList.toggle('run-on', wanted > 0);
+      this._chargeBtn.title = 'Goad chargobs: left click sends one more beast charging '
+        + '(three handlers must prod it from behind for two seconds), right click cancels one. '
+        + 'Queued ' + wanted + ', beasts in line ' + available;
+      this._lastChargeKey = key;
+    }
+  }
+
+  // Shown while a selected chargob unit still has beasts to abandon.
+  _updateAbandonButton(units) {
+    let can = 0;
+    for (const u of units) {
+      if (u.canAbandonBeasts && u.canAbandonBeasts()) can++;
+    }
+    const shown = can > 0;
+    if (shown !== this._lastAbandonShown) {
+      this._abandonBtn.style.display = shown ? '' : 'none';
+      this._abandonBtn.disabled = !shown;
+      this._lastAbandonShown = shown;
+    }
+  }
+
+  _abandonBeasts() {
+    if (this.onAbandonBeasts) {
+      this.onAbandonBeasts();
+      return;
+    }
+    for (const u of this._selected) {
+      if (u.canAbandonBeasts && u.canAbandonBeasts()) u.abandonBeasts();
+    }
+  }
+
+  _adjustCharge(delta) {
+    if (this.onAdjustCharge) {
+      this.onAdjustCharge(delta);
+      return;
+    }
+    for (const u of this._selected) {
+      if (u.companionKind === 'chargob') u.adjustChargeCount(delta);
+    }
+  }
+
+  _recallHounds() {
+    if (this.onRecallHounds) {
+      this.onRecallHounds();
+      return;
+    }
+    for (const u of this._selected) {
+      if (u.recallHounds) u.recallHounds();
+    }
+  }
+
+  _selectionKey(units) {
+    let key = '';
+    for (const u of units) key += u.id + ',';
+    return key;
+  }
+
+  // Writes the Leave button's armed class and tooltip.
+  _refreshLeave() {
+    const armed = this._leaveArmedUntil > performance.now();
+    this._lastLeaveArmed = armed;
+    this._leaveBtn.classList.toggle('leave-armed', armed);
+    if (this._leaveBtn.disabled) {
+      this._leaveBtn.title = 'Leave battle: select a unit first';
+    } else if (armed) {
+      this._leaveBtn.title = 'Click again to confirm: the unit withdraws and is kept for the next battle';
+    } else {
+      this._leaveBtn.title = 'Leave battle: the unit withdraws off the nearest map edge and is kept for the next battle';
+    }
+  }
+
+  _setRun(newState) {
+    if (this.onSetRun) {
+      this.onSetRun(newState);
+      return;
+    }
+    for (const u of this._selected) {
+      if (!CrewPairing.isCrewUnit(u) && Gait.unitCanRun(u)) u.setRunEnabled(newState);
+    }
+  }
+
+  _setCrewDontWait(newState) {
+    if (this.onSetCrewDontWait) {
+      this.onSetCrewDontWait(newState);
+      return;
+    }
+    for (const u of this._selected) {
+      if (CrewPairing.isCrewUnit(u)) u.setCrewDontWait(newState);
+    }
+  }
+
+  _leaveBattle() {
+    if (this.onLeaveBattle) {
+      this.onLeaveBattle();
+      return;
+    }
+    for (const u of this._selected) {
+      if (u.canLeaveBattle && u.canLeaveBattle()) u.leaveBattle();
+    }
   }
 
   _buildButton(title, svgHtml, onClick) {

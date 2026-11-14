@@ -3,6 +3,9 @@ import * as THREE from 'three';
 import { GrassField } from './GrassField.js';
 import { CombatConfig } from '../config/CombatConfig.js';
 import { viewRangeFor, clampZoom, zoomStepScale } from './ViewRange.js';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
+import { BiomeVisuals } from '../config/BiomeVisuals.js';
+import { BiomeTint, DEFAULT_TREE_TINT } from '../config/BiomeTint.js';
 
 // Fog / sky colour. Used for scene.background and scene.fog — one constant
 // so the two can never drift.
@@ -60,6 +63,22 @@ const FIELD_EDGE_THICKNESS = 0.5;
 // Ground plane size. Must stay well beyond the map bounds plus the farthest
 // camera reach, so the plane's edge is never visible.
 const GROUND_EXTENT = 6000;
+
+// Extra world units the orbiting camera's world POSITION may extend past
+// CombatConfig.mapBounds on each side. The camera target is already
+// clamped to mapBounds in _updateCameraTransform, but the physical camera
+// floats behind the target by horizDist (up to cameraDistance at low
+// pitch), so at a corner the camera would otherwise sit tens of units
+// past the boundary. The overscan allows normal corner orbits to be
+// unobstructed while keeping the camera from wandering into the terrain
+// buffer that now extends 600 units past the playable field (see
+// TerrainConfig.region.minHalfExtent).
+//
+// 80 comfortably covers the max horizDist for the default camera ranges
+// (cameraDistance 30-80, pitch 0.35-1.4 => horizDist 25-75) with a
+// small margin. Raise it if the max zoom range is expanded; lower it
+// to make the boundary feel stricter.
+const CAMERA_BOUNDS_OVERSCAN = 80;
 
 // Builds the base 3D scene: camera, lights, ground, grass, field boundary.
 // No game logic.
@@ -140,6 +159,30 @@ export class SceneSetup {
     this.cameraDistance = options.cameraDistance ?? 14;
     this.cameraYaw = options.cameraYaw ?? 0;
     this.cameraPitch = options.cameraPitch ?? 0.9; // radians above horizontal; ~51deg gives a real 3D read
+
+    // Multiplier applied to fog.far when a biome fog density is active.
+    // Clamped to [0.85, 1.4] in applyBiomeVisuals — the tight window
+    // keeps fog from ever cutting into the map (0.85 floor) while still
+    // letting clear biomes push the fog wall further out (1.4 ceiling).
+    this._biomeFogScale = 1.0;
+
+    // Currently-active biome. Set by applyBiomeVisuals; read by
+    // _refreshGroundMaterial, _tintSkirt and applySettings so a
+    // settings-toggle never wipes the biome's base-plane tint.
+    this._currentBiomeId = null;
+
+    // Skirt (decorative tree/rock ring around the map). Built lazily
+    // in applyTerrain so we know the region extent at build time.
+    this._skirtGroup = null;
+    this._skirtTrees = null;
+    this._skirtRocks = null;
+    this._skirtPositions = null;
+
+    // Terrain region from the last applyTerrain call. Used by
+    // _updateViewRange to anchor fog to the actual generated terrain
+    // extent (which extends past CombatConfig.mapBounds) instead of
+    // the playable bounds. Null until a terrain is applied.
+    this._terrainRegion = null;
 
     this.sun = null;
     this.ground = null;
@@ -251,23 +294,57 @@ applySettings(settings) {
       this.fieldEdge.visible = !!settings.fieldEdge;
     }
 
-    if (this.ground) {
-      const mat = this.ground.material;
-      if (textureOn) {
-        mat.map = this._ensureGroundTexture();
-        // White base so the map shows its own colours unfiltered.
-        mat.color.setHex(0xffffff);
-      } else {
-        mat.map = null;
-        // Flat grass green when the texture is off — matches the texture's
-        // base fill so toggling reads as "remove detail", not "change biome".
-        mat.color.setHex(0x3f5528);
-      }
-      // Swapping map null<->texture changes the shader program, so the
-      // material must be told to recompile. This is a one-off hitch on
-      // toggle, not a per-frame cost.
-      mat.needsUpdate = true;
+    // Base plane material is refreshed by a dedicated helper because the
+    // biome tint and the texture setting both contribute to it. applySettings
+    // records the settings object so the helper can read textureOn on a
+    // biome change without a second argument.
+    this._lastSettings = settings;
+    this._refreshGroundMaterial();
+  }
+
+  // Reapplies the base plane's texture/colour from the current texture
+  // setting AND the current biome. Called from applySettings (settings
+  // toggle) and applyBiomeVisuals (biome change) so the two can never
+  // disagree: with a biome grass override, the plane is solid biome
+  // colour; without one, it follows the texture setting.
+  _refreshGroundMaterial() {
+    if (!this.ground) return;
+    const settings = this._lastSettings || {};
+    const textureOn = !!settings.groundTexture;
+    const biomeId = this._currentBiomeId;
+    const hasOverride = this._hasBiomeGrassOverride(biomeId);
+    const mat = this.ground.material;
+
+    if (hasOverride) {
+      // Biome-specific base colour. Texture is dropped because
+      // textureColor * biomeColor reads as muddy brown on any biome
+      // whose tint differs from the texture's green — a solid biome
+      // colour, mostly hidden behind the skirt + fog, is cleaner.
+      mat.map = null;
+      mat.color.setHex(this._biomeGrassColorHex(biomeId));
+    } else if (textureOn) {
+      mat.map = this._ensureGroundTexture();
+      mat.color.setHex(0xffffff);
+    } else {
+      mat.map = null;
+      mat.color.setHex(0x3f5528);
     }
+    mat.needsUpdate = true;
+  }
+
+  _hasBiomeGrassOverride(biomeId) {
+    if (!biomeId) return false;
+    const v = BiomeVisuals[biomeId];
+    return !!(v && v.ground && v.ground.grass && v.ground.grass.color);
+  }
+
+  _biomeGrassColorHex(biomeId) {
+    const v = biomeId ? BiomeVisuals[biomeId] : null;
+    const gc = v && v.ground && v.ground.grass;
+    if (gc && gc.color) {
+      return (gc.color[0] << 16) | (gc.color[1] << 8) | gc.color[2];
+    }
+    return 0x3f5528;
   }
 
   _addLights() {
@@ -346,52 +423,454 @@ applySettings(settings) {
   // depthWrite is off so the strips do not z-fight the ground plane. A
   // small Y offset (0.06) lifts them above the ground; render order places
   // them under the unit selection rings but above the ground decals.
+// Bright strips at CombatConfig.mapBounds — the same box
+  // RoutingExtractionSystem uses to decide when a routing soldier has left
+  // the field. This is the actual, rule-driven map edge, not a decorative
+  // approximation.
+  //
+  // Each side is a subdivided strip (SEGMENTS quads along its length) whose
+  // vertices sample the terrain height at their own world XZ. On the
+  // elevated terrain mesh the flat-quad version that preceded this was
+  // buried inside every hill above 0.06 units — the strips visibly
+  // disappeared into hillsides and reappeared on flat ground. Per-vertex
+  // sampling makes the strips hug the surface instead.
+  //
+  // The material draws through terrain (depthTest: false) so the boundary
+  // is always readable from any camera angle. Combined with the terrain-
+  // following Y values, it reads as a contour line on the landscape, not a
+  // UI element floating above it.
+  //
+  // Vertical Y values are updated by _updateFieldEdgeHeights whenever a new
+  // terrain is set (SceneSetup.applyTerrain) — this method only builds the
+  // geometry and does not itself sample terrain.
+// Bright strips at CombatConfig.mapBounds, projected onto the terrain.
+  // Each side is a subdivided strip whose vertices are lifted to the
+  // terrain height at their own world XZ, so the boundary climbs hills
+  // and drops into valleys instead of being buried by them.
+  //
+  // depthTest: false + renderOrder 996 keeps the boundary visible from
+  // every camera angle, even behind a hill between the camera and the
+  // strip — same HUD choice as RangeCircleView makes for the range ring.
+  //
+  // Terrain sampling is deferred to first render (see _addBoundaryStrip's
+  // onBeforeRender). The active terrain does not exist when this runs —
+  // it is set later via ActiveTerrain.set() — so we cannot sample here.
   _addFieldEdge() {
     const b = CombatConfig.mapBounds;
-    const y = 0.06;
     const thickness = FIELD_EDGE_THICKNESS;
-
-    const cx = (b.minX + b.maxX) / 2;
-    const cz = (b.minZ + b.maxZ) / 2;
-    const w = b.maxX - b.minX;
-    const d = b.maxZ - b.minZ;
+    const SEGMENTS = 64;
 
     const group = new THREE.Group();
-
     const mat = new THREE.MeshBasicMaterial({
       color: 0xffd060,
       transparent: true,
       opacity: 0.9,
       depthWrite: false,
+      depthTest: false,
       side: THREE.DoubleSide
     });
 
-    // Front and back edges run along the X axis (varying X, fixed Z).
+    this._fieldEdgeStrips = [];
+    // undefined = never sampled. First onBeforeRender sets this and samples;
+    // subsequent calls skip until ActiveTerrain changes (new battle).
+    this._fieldEdgeSampledTerrain = undefined;
+
     for (const z of [b.minZ, b.maxZ]) {
-      const geo = new THREE.PlaneGeometry(w, thickness);
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.position.set(cx, y, z);
-      mesh.renderOrder = 996;
-      group.add(mesh);
+      this._addBoundaryStrip(group, mat, 'x', b.minX, b.maxX, z, SEGMENTS, thickness);
     }
-
-    // Left and right edges run along the Z axis (varying Z, fixed X).
     for (const x of [b.minX, b.maxX]) {
-      const geo = new THREE.PlaneGeometry(thickness, d);
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.position.set(x, y, cz);
-      mesh.renderOrder = 996;
-      group.add(mesh);
+      this._addBoundaryStrip(group, mat, 'z', b.minZ, b.maxZ, x, SEGMENTS, thickness);
     }
 
-    // The whole group is only a handful of units; culling it as one unit
-    // would drop the far edges when only the near ones are visible. Disable
-    // frustum culling so every edge renders whenever any part is on-screen.
     group.frustumCulled = false;
     this.scene.add(group);
     this.fieldEdge = group;
+  }
+
+// One boundary edge as a subdivided strip. `axis === 'x'` means the
+  // strip runs along X (fixed Z = `fixed`); `axis === 'z'` means it runs
+  // along Z (fixed X = `fixed`). Initial Y values are flat; the terrain
+  // projection happens in onBeforeRender.
+  _addBoundaryStrip(parent, material, axis, from, to, fixed, segments, thickness) {
+    const halfT = thickness / 2;
+    const vertCount = (segments + 1) * 2;
+    const positions = new Float32Array(vertCount * 3);
+    const indices = new Uint16Array(segments * 6);
+
+    for (let i = 0; i < segments; i++) {
+      const base = i * 6;
+      const i0 = i * 2, o0 = i * 2 + 1, i1 = (i + 1) * 2, o1 = (i + 1) * 2 + 1;
+      indices[base + 0] = i0; indices[base + 1] = o0; indices[base + 2] = i1;
+      indices[base + 3] = i1; indices[base + 4] = o0; indices[base + 5] = o1;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.renderOrder = 996;
+    mesh.frustumCulled = false;
+
+    // Lazy terrain projection. Fires on first draw, samples the active
+    // terrain per vertex, and no-ops afterwards until ActiveTerrain
+    // changes. No external wiring needed — BattleTerrainSetup does not
+    // have to know about the field boundary at all.
+    mesh.onBeforeRender = () => {
+      const t = ActiveTerrain.get();
+      if (t === this._fieldEdgeSampledTerrain) return;
+      this._fieldEdgeSampledTerrain = t;
+      this._refreshFieldEdgeHeights();
+    };
+
+    parent.add(mesh);
+    this._fieldEdgeStrips.push({ mesh, axis, from, to, fixed, segments, thickness: halfT });
+  }
+
+// Re-samples terrain height at every vertex of every boundary strip and
+  // writes the new Y. Called once per battle when the active terrain
+  // becomes available (see _addBoundaryStrip's onBeforeRender). Null
+  // terrain leaves all Y values at the flat 0.06 baseline.
+  _refreshFieldEdgeHeights() {
+    const LIFT = 0.06;
+    const terrain = this._fieldEdgeSampledTerrain;
+
+    for (const s of this._fieldEdgeStrips) {
+      const pos = s.mesh.geometry.attributes.position.array;
+      for (let i = 0; i <= s.segments; i++) {
+        const t = i / s.segments;
+        const along = s.from + (s.to - s.from) * t;
+        let innerX, innerZ, outerX, outerZ;
+        if (s.axis === 'x') {
+          innerX = along; innerZ = s.fixed + s.thickness;
+          outerX = along; outerZ = s.fixed - s.thickness;
+        } else {
+          innerX = s.fixed + s.thickness; innerZ = along;
+          outerX = s.fixed - s.thickness; outerZ = along;
+        }
+        const p = i * 2 * 3;
+        pos[p + 0] = innerX;
+        pos[p + 1] = (terrain ? terrain.heightAt(innerX, innerZ) : 0) + LIFT;
+        pos[p + 2] = innerZ;
+        pos[p + 3] = outerX;
+        pos[p + 4] = (terrain ? terrain.heightAt(outerX, outerZ) : 0) + LIFT;
+        pos[p + 5] = outerZ;
+      }
+      s.mesh.geometry.attributes.position.needsUpdate = true;
+    }
+  }
+
+// (A) Decorative skirt: a ring of simple trees and rocks just OUTSIDE
+  // the generated terrain region. Fills the empty space between the
+  // terrain's hard edge and the fog wall with silhouettes, so the
+  // player never sees a sharp "map ends here" line.
+  //
+  // Built once per SceneSetup (which is once per battle) on the first
+  // applyTerrain call, because the terrain region defines where the
+  // skirt starts. Skirt meshes use plain Lampert materials with per-
+  // instance colours so a biome change only re-tints a small array,
+  // not rebuilds the mesh.
+  _ensureSkirt(terrain) {
+    if (this._skirtGroup) return;
+
+    const region = (terrain && terrain.region) ? terrain.region : CombatConfig.mapBounds;
+    const INNER = 15;   // gap between terrain edge and skirt tree line
+    const OUTER = 120;  // width of the skirt band
+    const TREE_COUNT = 640;
+    const ROCK_COUNT = 160;
+
+    const treeGeo = new THREE.ConeGeometry(1.2, 6, 5);
+    treeGeo.translate(0, 3, 0);   // pivot at base
+    const rockGeo = new THREE.IcosahedronGeometry(1, 0);
+
+    const treeMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
+    const rockMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
+
+    const trees = new THREE.InstancedMesh(treeGeo, treeMat, TREE_COUNT);
+    const rocks = new THREE.InstancedMesh(rockGeo, rockMat, ROCK_COUNT);
+    trees.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(TREE_COUNT * 3), 3);
+    rocks.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(ROCK_COUNT * 3), 3);
+    trees.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+    rocks.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+    trees.frustumCulled = false;
+    rocks.frustumCulled = false;
+    trees.castShadow = false; trees.receiveShadow = false;
+    rocks.castShadow = false; rocks.receiveShadow = false;
+
+    // Seeded RNG for determinism across reloads.
+    let seed = 0x5EEDF00D;
+    const rng = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+
+    const dummy = new THREE.Object3D();
+    const positions = [];
+
+    const perSide = Math.ceil((TREE_COUNT + ROCK_COUNT) / 4);
+    let treeIdx = 0;
+    let rockIdx = 0;
+    for (let i = 0; i < perSide * 4; i++) {
+      if (treeIdx >= TREE_COUNT && rockIdx >= ROCK_COUNT) break;
+
+      const sideIdx = i % 4;
+      const offset = rng() * (OUTER - INNER);
+      let x, z;
+      if (sideIdx === 0) {           // z+ edge
+        x = region.minX + rng() * (region.maxX - region.minX);
+        z = region.maxZ + INNER + offset;
+      } else if (sideIdx === 1) {    // z- edge
+        x = region.minX + rng() * (region.maxX - region.minX);
+        z = region.minZ - INNER - offset;
+      } else if (sideIdx === 2) {    // x+ edge
+        z = region.minZ + rng() * (region.maxZ - region.minZ);
+        x = region.maxX + INNER + offset;
+      } else {                        // x- edge
+        z = region.minZ + rng() * (region.maxZ - region.minZ);
+        x = region.minX - INNER - offset;
+      }
+
+      const isTree = (i % 3 !== 0) && treeIdx < TREE_COUNT;
+      if (isTree) {
+        const s = 0.7 + rng() * 0.6;
+        dummy.position.set(x, 0, z);
+        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+        dummy.scale.set(s, s * (0.9 + rng() * 0.4), s);
+        dummy.updateMatrix();
+        trees.setMatrixAt(treeIdx, dummy.matrix);
+        positions.push({ mesh: trees, index: treeIdx, isTree: true });
+        treeIdx++;
+      } else if (rockIdx < ROCK_COUNT) {
+        const s = 0.8 + rng() * 1.2;
+        dummy.position.set(x, 0.3, z);
+        dummy.rotation.set(rng() * 0.5, rng() * Math.PI * 2, rng() * 0.5);
+        dummy.scale.set(s, s * 0.7, s);
+        dummy.updateMatrix();
+        rocks.setMatrixAt(rockIdx, dummy.matrix);
+        positions.push({ mesh: rocks, index: rockIdx, isTree: false });
+        rockIdx++;
+      }
+    }
+    trees.count = treeIdx;
+    rocks.count = rockIdx;
+    trees.instanceMatrix.needsUpdate = true;
+    rocks.instanceMatrix.needsUpdate = true;
+
+    const group = new THREE.Group();
+    group.add(trees);
+    group.add(rocks);
+    this.scene.add(group);
+
+    this._skirtGroup = group;
+    this._skirtTrees = trees;
+    this._skirtRocks = rocks;
+    this._skirtPositions = positions;
+
+    // Default colour until applyBiomeVisuals fires.
+    this._tintSkirt(null);
+  }
+
+  // Tint the skirt trees/rocks for the given biome. Per-instance colour
+  // is written through InstancedBufferAttribute; a biome change updates
+  // every instance in one pass. Cheap — 800 instances total.
+  _tintSkirt(biomeId) {
+    if (!this._skirtPositions) return;
+
+    let treeColor;
+    const v = biomeId ? BiomeVisuals[biomeId] : null;
+    const gc = v && v.ground && v.ground.grass;
+    if (gc && gc.color) {
+      treeColor = [gc.color[0] * 0.65, gc.color[1] * 0.65, gc.color[2] * 0.65];
+    } else {
+      const tint = (biomeId && BiomeTint[biomeId])
+        ? BiomeTint[biomeId].tree : DEFAULT_TREE_TINT;
+      const c = new THREE.Color();
+      c.setHSL(tint.hue, tint.sat, tint.lit);
+      treeColor = [c.r * 255, c.g * 255, c.b * 255];
+    }
+    const rockColor = [0x6a, 0x62, 0x5a];
+
+    const col = new THREE.Color();
+    for (const p of this._skirtPositions) {
+      const c = p.isTree ? treeColor : rockColor;
+      col.setRGB(c[0] / 255, c[1] / 255, c[2] / 255);
+      p.mesh.setColorAt(p.index, col);
+    }
+    if (this._skirtTrees.instanceColor) this._skirtTrees.instanceColor.needsUpdate = true;
+    if (this._skirtRocks.instanceColor) this._skirtRocks.instanceColor.needsUpdate = true;
+  }
+
+// Called whenever a battle's terrain becomes active. Updates both the
+  // grass scatter (hides tufts on mud/water, lifts the rest onto hills) and
+  // the field boundary strips (lifts each vertex to the terrain height
+  // under it). Idempotent; safe to call again for a different battle.
+  //
+  // Replaces the direct sceneSetup.grassField.applyTerrain(terrain) call
+  // previously made by BattleTerrainSetup — the boundary needs the same
+  // update, and routing both through one method keeps the two in lockstep.
+  applyTerrain(terrain) {
+    if (terrain && terrain.region) {
+      this._terrainRegion = {
+        minX: terrain.region.minX, maxX: terrain.region.maxX,
+        minZ: terrain.region.minZ, maxZ: terrain.region.maxZ
+      };
+    } else {
+      this._terrainRegion = null;
+    }
+    if (this.grassField) this.grassField.applyTerrain(terrain);
+    this._updateFieldEdgeHeights(terrain);
+    // Skirt is DISABLED. TerrainConfig.region.minHalfExtent was raised so
+    // the terrain itself extends 120 units past CombatConfig.mapBounds —
+    // the same generation passes (height, ground, features, obstacles)
+    // fill the space that the decorative skirt used to fake. The methods
+    // (_ensureSkirt / _tintSkirt) are kept so this can be re-enabled
+    // cheaply if the extension ever needs to be reverted.
+    // this._ensureSkirt(terrain);
+    // Apply per-biome fog, sky, base-plane tint. Reads terrain.dominantBiome
+    // (set by TerrainGenerator) so a battle's ambient layer keys off the
+    // biome that owns most of its cells.
+    this.applyBiomeVisuals(terrain ? terrain.dominantBiome : null);
+  }
+
+  // Per-biome fog + sky. Null resets both to the defaults used before any
+  // terrain exists. Called from applyTerrain, so a Restart or a new
+  // battle automatically picks up the new biome's ambience.
+  applyBiomeVisuals(biomeId) {
+    this._currentBiomeId = biomeId;
+    const v = biomeId ? BiomeVisuals[biomeId] : null;
+
+    // Sky (scene background colour).
+    const skyColor = (v && v.sky !== undefined) ? v.sky : SKY_COLOR;
+    this.scene.background = new THREE.Color(skyColor);
+
+    // Fog: colour matches the biome's fog override, else follows sky.
+    if (this.scene.fog) {
+      const fogColor = (v && v.fog && v.fog.color !== undefined)
+        ? v.fog.color
+        : skyColor;
+      this.scene.fog.color = new THREE.Color(fogColor);
+    }
+
+    // Fog scale. Baseline density 0.003 = scale 1.0. Denser fog -> smaller
+    // scale -> shorter fog distance. Clamped to a NARROW window so the fog
+    // can never cut into the map itself:
+    //   floor 0.85  — map far edge always clear
+    //   ceiling 1.4 — clear biomes still fade at a plausible horizon
+    // _updateViewRange rebuilds fog.near/.far from this scale each frame.
+    if (v && v.fog && typeof v.fog.density === 'number' && v.fog.density > 0) {
+      this._biomeFogScale = Math.max(0.85, Math.min(1.4, 0.003 / v.fog.density));
+    } else {
+      this._biomeFogScale = 1.0;
+    }
+
+    // Base plane (B) — tint to the biome's grass colour, or fall back to
+    // the texture setting when this biome has no override (grassland).
+    this._refreshGroundMaterial();
+
+    // Skirt (A) — tint the tree/rock ring to match the biome.
+    this._tintSkirt(biomeId);
+  }
+
+  // Re-samples terrain height at every vertex of every field-edge strip and
+  // writes the new Y. Called from applyTerrain. Null terrain resets every
+  // vertex to the flat 0.06 baseline (used during scene construction,
+  // before any terrain exists).
+// Re-samples terrain height at every vertex of every field-edge strip
+  // and writes the new Y. Called from applyTerrain on every battle start.
+  //
+  // The strips are produced by _addBoundaryStrip, so their geometry lives
+  // on `strip.mesh.geometry` — NOT `strip.geometry`. An earlier draft of
+  // this method assumed the older inline-strip shape and crashed with
+  // "Cannot read properties of undefined (reading 'attributes')" the
+  // moment applyTerrain ran. The `s.mesh?.geometry` guard below prevents
+  // the same class of bug if the strip shape ever changes again.
+  //
+  // Accepts an optional terrain argument. When omitted, falls back to
+  // ActiveTerrain.get() so callers do not have to pass it explicitly.
+  _updateFieldEdgeHeights(terrain) {
+    if (!this._fieldEdgeStrips) return;
+    const t = terrain !== undefined ? terrain : ActiveTerrain.get();
+    const LIFT = 0.06;
+
+    for (const s of this._fieldEdgeStrips) {
+      const geo = s.mesh && s.mesh.geometry;
+      if (!geo || !geo.attributes || !geo.attributes.position) continue;
+      const pos = geo.attributes.position.array;
+
+      for (let i = 0; i <= s.segments; i++) {
+        const u = i / s.segments;
+        const along = s.from + (s.to - s.from) * u;
+        let innerX, innerZ, outerX, outerZ;
+        if (s.axis === 'x') {
+          innerX = along; innerZ = s.fixed + s.thickness;
+          outerX = along; outerZ = s.fixed - s.thickness;
+        } else {
+          innerX = s.fixed + s.thickness; innerZ = along;
+          outerX = s.fixed - s.thickness; outerZ = along;
+        }
+        const p = i * 2 * 3;
+        pos[p + 0] = innerX;
+        pos[p + 1] = (t ? t.heightAt(innerX, innerZ) : 0) + LIFT;
+        pos[p + 2] = innerZ;
+        pos[p + 3] = outerX;
+        pos[p + 4] = (t ? t.heightAt(outerX, outerZ) : 0) + LIFT;
+        pos[p + 5] = outerZ;
+      }
+      geo.attributes.position.needsUpdate = true;
+    }
+  }
+
+// One boundary strip, subdivided into `segments` quads along its length.
+  // Axis 'x' means the strip runs along X (at fixed Z = `fixed`); axis 'z'
+  // means it runs along Z (at fixed X = `fixed`). `from` / `to` are the
+  // endpoints along the run axis. All Y values start at the flat ground
+  // height; they are overwritten per-vertex by _updateFieldEdgeHeights when
+  // terrain arrives.
+  _buildEdgeStrip(axis, from, to, fixed, segments, thickness) {
+    const vertCount = (segments + 1) * 2;
+    const positions = new Float32Array(vertCount * 3);
+    const indices = new Uint16Array(segments * 6);
+    const halfT = thickness / 2;
+
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const along = from + (to - from) * t;
+      let innerX, innerZ, outerX, outerZ;
+      if (axis === 'x') {
+        innerX = along; innerZ = fixed + halfT;
+        outerX = along; outerZ = fixed - halfT;
+      } else {
+        innerX = fixed + halfT; innerZ = along;
+        outerX = fixed - halfT; outerZ = along;
+      }
+      const p = i * 2 * 3;
+      positions[p]     = innerX;
+      positions[p + 1] = 0.06;
+      positions[p + 2] = innerZ;
+      positions[p + 3] = outerX;
+      positions[p + 4] = 0.06;
+      positions[p + 5] = outerZ;
+    }
+
+    for (let i = 0; i < segments; i++) {
+      const base = i * 6;
+      const i0 = i * 2;
+      const o0 = i * 2 + 1;
+      const i1 = (i + 1) * 2;
+      const o1 = (i + 1) * 2 + 1;
+      indices[base + 0] = i0;
+      indices[base + 1] = o0;
+      indices[base + 2] = i1;
+      indices[base + 3] = i1;
+      indices[base + 4] = o0;
+      indices[base + 5] = o1;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+
+    return { geometry: geo, axis, from, to, fixed, segments, thickness };
   }
 
   // Lazily builds the ground texture on first request. Cached for the
@@ -564,27 +1043,73 @@ _createGroundTexture() {
   }
 
 _updateCameraTransform() {
+    // Clamp the target to CombatConfig.mapBounds. The camera orbits the
+    // target, so clamping the target is what stops the player panning
+    // past the edge of the playable field. Terrain generation extends
+    // 120 units past the bounds, so the moment the target hits the
+    // boundary the camera still sees fully-detailed terrain all the
+    // way out to the fog wall — no visible "edge of the world".
+    //
+    // Clamping here (not in panCamera) means every path that touches
+    // cameraTarget is covered: pan, initial scene construction, and
+    // any future direct assignment.
+    const mb = CombatConfig.mapBounds;
+    if (this.cameraTarget.x < mb.minX) this.cameraTarget.x = mb.minX;
+    else if (this.cameraTarget.x > mb.maxX) this.cameraTarget.x = mb.maxX;
+    if (this.cameraTarget.z < mb.minZ) this.cameraTarget.z = mb.minZ;
+    else if (this.cameraTarget.z > mb.maxZ) this.cameraTarget.z = mb.maxZ;
+
+    const tx = this.cameraTarget.x;
+    const tz = this.cameraTarget.z;
+    // Ground height under the target, lightly averaged so panning over
+    // bumps does not make the view jitter.
+    const gy = (ActiveTerrain.heightAt(tx, tz) * 2 +
+      ActiveTerrain.heightAt(tx + 5, tz) + ActiveTerrain.heightAt(tx - 5, tz) +
+      ActiveTerrain.heightAt(tx, tz + 5) + ActiveTerrain.heightAt(tx, tz - 5)) / 6;
+
     const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
     const height = this.cameraDistance * Math.sin(this.cameraPitch);
 
     this.camera.position.set(
-      this.cameraTarget.x + horizDist * Math.sin(this.cameraYaw),
-      height,
-      this.cameraTarget.z + horizDist * Math.cos(this.cameraYaw)
+      tx + horizDist * Math.sin(this.cameraYaw),
+      gy + height,
+      tz + horizDist * Math.cos(this.cameraYaw)
     );
-    this.camera.lookAt(this.cameraTarget.x, 0, this.cameraTarget.z);
+
+    // Limit the physical camera POSITION to mapBounds + a small overscan.
+    // The camera target is already clamped above, but the camera itself
+    // floats behind the target by horizDist along the orbit direction,
+    // so at a corner the camera can sit tens of units past the playable
+    // boundary. Capping it here keeps the player's camera inside the
+    // mental model of "the map", independent of zoom level or orbit
+    // angle. CAMERA_BOUNDS_OVERSCAN (see top of file) is generous enough
+    // that ordinary corner orbits at any default zoom are unaffected.
+    //
+    // The clamp runs BEFORE camera.lookAt so the view is derived from
+    // the clamped position — otherwise the camera would briefly point
+    // at the target from an unclamped pose, then "snap" once the clamp
+    // was applied on the next frame.
+    const camMinX = mb.minX - CAMERA_BOUNDS_OVERSCAN;
+    const camMaxX = mb.maxX + CAMERA_BOUNDS_OVERSCAN;
+    const camMinZ = mb.minZ - CAMERA_BOUNDS_OVERSCAN;
+    const camMaxZ = mb.maxZ + CAMERA_BOUNDS_OVERSCAN;
+    if (this.camera.position.x < camMinX) this.camera.position.x = camMinX;
+    else if (this.camera.position.x > camMaxX) this.camera.position.x = camMaxX;
+    if (this.camera.position.z < camMinZ) this.camera.position.z = camMinZ;
+    else if (this.camera.position.z > camMaxZ) this.camera.position.z = camMaxZ;
+
+    this.camera.lookAt(tx, gy, tz);
 
     // Keep the sun's shadow frustum centered on the camera target so a
     // scrolling battlefield stays lit and shadowed. Both the sun and its
-    // target move by the same delta, so the light direction - and therefore
-    // the shadow direction - is unchanged; only the frustum shifts.
+    // target move by the same delta, so the light direction is unchanged.
     if (this.sun) {
       this.sun.position.set(
-        this.cameraTarget.x + SUN_OFFSET.x,
-        SUN_OFFSET.y,
-        this.cameraTarget.z + SUN_OFFSET.z
+        tx + SUN_OFFSET.x,
+        gy + SUN_OFFSET.y,
+        tz + SUN_OFFSET.z
       );
-      this.sun.target.position.set(this.cameraTarget.x, 0, this.cameraTarget.z);
+      this.sun.target.position.set(tx, gy, tz);
       this.sun.target.updateMatrixWorld();
     }
 
@@ -646,9 +1171,45 @@ zoomCamera(amount) {
     }
 
     const fog = this.scene.fog;
-    if (fog) {
-      fog.near = r.fogNear;
-      if (fog.far < FOG_FAR_OFF * 0.5) fog.far = r.fogFar;
+    if (fog && fog.far < FOG_FAR_OFF * 0.5) {
+      const s = this._biomeFogScale || 1.0;
+
+      // (C) Aggressive OUTER fog. Compute the distance from the camera to
+      // the far corner of the playable map, then place the fog wall just
+      // past it. Guarantees: the whole map is always inside the clear
+      // window; the empty base plane beyond it always fades out.
+      //
+      // Without this, fog was scaled from the camera's distance to the
+      // TARGET — which is a zoom control, not a "how far is the map edge"
+      // measure. Zooming out pushed the fog wall past the base plane
+      // entirely, so the ground beyond the map stayed visible: the
+      // "empty boundaries" bug.
+      // Anchor fog to the ACTUAL terrain region — which extends past
+      // mapBounds by minHalfExtent (see BattleTerrainBuilder.regionFor).
+      // Falls back to mapBounds when no terrain has been applied yet.
+      // Without this, the fog wall sat at mapBounds while terrain ran
+      // past it, so the extended terrain stayed visible all the way to
+      // its hard edge.
+      const b = this._terrainRegion || CombatConfig.mapBounds;
+      const cam = this.camera.position;
+      const corners = [
+        { x: b.minX, z: b.minZ },
+        { x: b.minX, z: b.maxZ },
+        { x: b.maxX, z: b.minZ },
+        { x: b.maxX, z: b.maxZ }
+      ];
+      let maxD2 = 0;
+      for (const c of corners) {
+        const dx = c.x - cam.x;
+        const dy = 5 - cam.y;
+        const dz = c.z - cam.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > maxD2) maxD2 = d2;
+      }
+      const farCornerDist = Math.sqrt(maxD2);
+
+      fog.near = farCornerDist * 0.6 * s;
+      fog.far = farCornerDist * 1.15 * s;
     }
   }
 

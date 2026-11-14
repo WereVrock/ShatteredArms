@@ -36,8 +36,15 @@
 import { ArrowArc } from './ArrowArc.js';
 
 export class Projectile {
+  // fromGroundY / toGroundY: local terrain height under the launch point
+  // and under the target point at spawn time. Supplied by
+  // ProjectileSystem.spawn (0 on flat maps or no terrain). The whole arc
+  // is offset by these, so an arrow fired from a hilltop starts at bow
+  // height ABOVE the hilltop rather than bow height above the flat
+  // baseline — see the launchY / endY assignments below.
   constructor({ id, teamId, shooterUnitId, shooterSoldierId, weaponType,
-                fromX, fromZ, toX, toZ }) {
+                fromX, fromZ, toX, toZ,
+                fromGroundY = 0, toGroundY = 0 }) {
     this.id = id;
     this.teamId = teamId;
     this.shooterUnitId = shooterUnitId;
@@ -81,7 +88,15 @@ export class Projectile {
                         + ArrowArc.BOW_HAND_FORWARD * sinYaw;
     this.launchZ = fromZ - ArrowArc.BOW_HAND_LATERAL * sinYaw
                         + ArrowArc.BOW_HAND_FORWARD * cosYaw;
-    this.launchY = ArrowArc.BOW_HAND_Y;
+    // Elevation-aware launch and landing heights. On flat maps both
+    // ground offsets are 0 and these equal the pre-elevation constants,
+    // so behaviour is unchanged there. On hills the whole arc is shifted
+    // so the parabola peaks above the launch terrain and settles above
+    // the target terrain, instead of clipping through the slope.
+    this.fromGroundY = fromGroundY;
+    this.toGroundY = toGroundY;
+    this.launchY = ArrowArc.BOW_HAND_Y + fromGroundY;
+    this.endY = ArrowArc.END_Y + toGroundY;
 
     this.x = this.launchX;
     this.y = this.launchY;
@@ -109,7 +124,7 @@ export class Projectile {
     this.x = this.launchX + (this.toX - this.launchX) * t;
     this.z = this.launchZ + (this.toZ - this.launchZ) * t;
     this.y = this.launchY
-           + (ArrowArc.END_Y - this.launchY) * t
+           + (this.endY - this.launchY) * t
            + this.arcHeight * 4 * t * (1 - t);
 
     return t < 1;

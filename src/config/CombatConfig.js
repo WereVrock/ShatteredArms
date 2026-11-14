@@ -686,6 +686,269 @@ export const CombatConfig = {
     counterDamageMult: 1.5
   },
 
+  // --- Short spearmen ---
+  // Types with weaponType 'shortSpear' (UnitTypes.js). They share no
+  // mechanics with weaponType 'spear': no wall, no brace, no spear speed or
+  // turn penalty, no spear-vs-cavalry table. Their weakness is attacking
+  // INTO a wall; their strength is cavalry that has lost its speed.
+  shortSpear: {
+    // Multiplier on attack speed when a short spearman attacks the FRONT
+    // of a functioning local spear wall. 0.6 = 40% slower.
+    frontalWallAttackSpeedMult: 0.6,
+    // Damage multiplier against cavalry moving slower than the threshold
+    // below. 1.5 = +50%.
+    slowCavalryDamageMult: 1.5,
+    // DESIGN-space speed. Cavalry at or above this counts as "fully sped
+    // up" and gets no bonus taken. Converted with toSimSpeed at the
+    // point of use. A shielded horseman tops out near 2.47.
+    cavalryFullSpeedThreshold: 2.2
+  },
+
+  // --- Crew-served weapons (goblin megabowman) ---
+  crew: {
+    // A shooter fires only while its carrier is within this distance
+    // (world units).
+    maxPairDistance: 3.0,
+    // Distance between the carrier and the shooter of one cell.
+    pairGap: 0.7,
+    // Distance between rows of cells. The lateral cell pitch is the unit
+    // type's formationSpacing.
+    rowPitch: 2.4,
+    // A shooter this far from its formation slot runs to it.
+    catchUpDistance: 1.5
+  },
+
+  // --- Goblin hounds (HoundPack / HoundSystem) ---
+  hound: {
+    // Hounds within this distance of their handlers' centre obey a recall.
+    recallRange: 40,
+    // Distance between the hounds of one handler (they stand on both sides
+    // of it) and how far ahead of it they stand.
+    ownerSide: 1.9,
+    ownerForward: 0.3,
+    // A hound whose owner died stands this far apart from the hound it
+    // follows, and this far behind it.
+    buddySide: 1.4,
+    buddyBehind: 1.1,
+    // A leashed hound this far from its position runs to catch up.
+    catchUpDistance: 2.5,
+    // Rogue hounds (no handler left) bite anything within this distance.
+    rogueVictimRadius: 3.0,
+    // Rogue hounds leave the map once this close to its edge.
+    rogueEdgeMargin: 3.0,
+
+    // An enemy this close to a leashed hound (or a handler in melee)
+    // releases the leashed hounds at that enemy unit. After a recall the
+    // automatic release is off for this many ticks.
+    autoUnleashRadius: 5.0,
+    autoUnleashSuppressTicks: 150,
+
+    // Flanking. A hound circles to a point flankRadius from its target, at
+    // 135 degrees off the target's facing, unless it is already beyond
+    // flankMinAngleDeg, closer than flankCommitDistance, or another enemy
+    // stands within flankClearRadius of its path. Gives up after
+    // flankMaxTicks.
+    flankCommitDistance: 3.5,
+    flankMinAngleDeg: 90,
+    flankRadius: 2.6,
+    flankClearRadius: 1.3,
+    flankReach: 1.2,
+    flankMaxTicks: 90,
+    flankRecheckTicks: 5,
+
+    // Regeneration after a battle, per handler, per missing hound: the
+    // chance a missing hound returns is regenMaxRate when the handler kept
+    // regenLowFrac of its pack or less, regenMinRate at regenHighFrac or
+    // more, linear in between.
+    regenLowFrac: 0.3,
+    regenHighFrac: 0.7,
+    regenMaxRate: 0.5,
+    regenMinRate: 0.3
+  },
+
+  // --- Chargob (ChargobPack / ChargobCharge / ChargobPoke / ChargobSystem) ---
+  chargob: {
+    // Line of beasts in front of the handler block.
+    beastSpacing: 3.0,
+    rowPitch: 3.6,
+    frontGap: 2.2,
+    // Random per-beast offset of its place in the herd (world units).
+    looseJitter: 0.7,
+    // A beast within looseRadius of its place stays put; farther away it
+    // walks (never runs) to it and stops within settleRadius.
+    looseRadius: 1.2,
+    settleRadius: 0.5,
+
+    // Charge-through chance per attack: min at full HP, max near death.
+    throughMinChance: 0.05,
+    throughMaxChance: 0.15,
+
+    // A charge locks on the nearest enemy inside this half-angle cone (degrees)
+    // within chargeSearchRadius, and never changes course afterwards.
+    chargeConeHalfDeg: 10,
+    chargeSearchRadius: 40,
+    // A charging beast that moves less than stallMoveEps per tick for
+    // stallTicks gives up and fights where it stands.
+    stallMoveEps: 0.004,
+    stallTicks: 150,
+    // A charging beast this close to the map edge leaves the field.
+    edgeMargin: 2.0,
+
+    // Goading: pokersPerBeast different handlers must stand at the beast's
+    // rear (pokeDistance behind it, pokeSpacing apart, within pokeReach) for
+    // pokeSeconds, all at once.
+    pokersPerBeast: 3,
+    pokeSeconds: 2,
+    pokeDistance: 0.9,
+    pokeSpacing: 0.8,
+    pokeReach: 2.0,
+    // The beast to goad needs no other beast within this distance of its rear.
+    pokeClearRadius: 1.8,
+
+    // Handlers left <= beasts / wildThresholdDivisor: every second a
+    // (wildBasePct + (beasts / divisor - handlers)) percent chance that one
+    // beast charges in a random direction.
+    wildThresholdDivisor: 5,
+    wildBasePct: 1,
+
+    // Handlers fall back this far once the last beast is gone.
+    retreatDistance: 10,
+
+    // Turning of the herd (ChargobHerd): a facing change above turnStartDeg
+    // makes every row bunch up at its pivot end (turnBunchSpacing apart) first.
+    // Done when all arrived within turnArriveDist, or after turnMaxTicks.
+    turnStartDeg: 20,
+    turnBunchSpacing: 1.5,
+    turnArriveDist: 1.5,
+    turnMaxTicks: 450,
+
+    // After an abandon the beasts act as if every handler were dead once the
+    // handlers are this far away from them.
+    abandonRange: 10,
+
+    // A charging beast that is killed keeps charging this long first.
+    deathChargeSeconds: 1,
+
+    // Cosmetic scuffles in the herd: every scuffleMinTicks..scuffleMaxTicks a
+    // beast within scuffleReach snaps at one of the rearmost beasts.
+    scuffleMinTicks: 45,
+    scuffleMaxTicks: 150,
+    scuffleSwingTicks: 12,
+    scuffleReach: 5.0,
+
+    // Herding. A beast is driven when a handler is within driveRadius of it,
+    // or when it is within chainRadius of a driven beast (the beasts stand
+    // about beastSpacing / rowPitch apart, so chainRadius must be larger).
+    // A handler sent to a beast group stands `standoff` behind its anchor
+    // beast and walks round beasts within avoidRadius of its way (avoidClear
+    // beside them; beasts within endSkip of the target are ignored). It hits
+    // the beast within hitReach every hitMinTicks..hitMaxTicks (show only).
+    driveRadius: 2.5,
+    chainRadius: 5.5,
+    standoff: 1.7,
+    avoidRadius: 1.5,
+    avoidClear: 1.8,
+    endSkip: 1.05,
+    hitReach: 2.4,
+    hitMinTicks: 20,
+    hitMaxTicks: 50,
+
+    // --- Charge power (Soldier.effectiveMass / effectiveMoveSpeed while charging) ---
+    chargeSpeedMult: 1.3,
+    chargeMassMult: 1.5,
+    // A charging beast that cannot move for deflectStallTicks turns away by
+    // deflectMinDeg..deflectMaxDeg and runs on (the charge never ends).
+    deflectStallTicks: 30,
+    deflectMinDeg: 60,
+    deflectMaxDeg: 120,
+
+    // --- Trample (ChargobTrample): a charging beast throws everybody it touches ---
+    trampleRadius: 1.6,
+    trampleCooldownTicks: 45,
+    // Throw speed = trampleVelocityPerRatio * min(mass ratio, charge.maxThrowMassRatioScale),
+    // at least trampleMinVelocity, at most charge.maxKnockbackVelocity.
+    trampleVelocityPerRatio: 4,
+    trampleMinVelocity: 5,
+
+    // --- Handler control (ChargobForces / ChargobHandlerAI) ---
+    // Assigned handlers push beasts within pushRange and pull beasts within
+    // pullRange. n pushers give pushForce * (2 - 2^(1-n)); a pull is
+    // pullForceMult times as strong and ignores enemy push and the walk home.
+    pushRange: 3.0,
+    pullRange: 1.0,
+    pushForce: 1.0,
+    pullForceMult: 1.5,
+    // Beast speed = walk speed * driveSpeedFrac * min(maxDriveFrac, force).
+    driveSpeedFrac: 1.3,
+    maxDriveFrac: 1.5,
+    // A beast gets the smallest number of pushers (up to maxPushHandlers)
+    // that beat its resistance by resistMargin; beyond that one handler pulls.
+    maxPushHandlers: 3,
+    resistMargin: 1.15,
+    // Where handlers stand: pullStand in FRONT of a pulled beast, `standoff`
+    // behind a pushed one, extra handlers handlerLateral apart.
+    pullStand: 0.7,
+    handlerLateral: 0.9,
+    // A beast farther than strayDistance from its place is a stray (handlers
+    // fetch it) until it is within strayReturn.
+    strayDistance: 5.0,
+    strayReturn: 2.4,
+    // Nothing moves the beast: every ~wanderIntervalTicks (30 s) it walks
+    // wanderMinDist..wanderMaxDist at wanderSpeedFrac of the drive speed.
+    wanderIntervalTicks: 450,
+    wanderMinDist: 3,
+    wanderMaxDist: 4,
+    wanderSpeedFrac: 0.35,
+    // The herd's facing follows the unit's at most this fast (rad/s).
+    herdTurnRate: 2.0,
+
+    // --- Panic (ChargobPanic), 0..100 per beast ---
+    // Above panicFleeStart the resistance curve ((p-start)/(100-start))^exp
+    // scales the enemy push and the walk home. A beast charges at panic 100
+    // (90..100 with its personal bias of +-panicBiasRange).
+    panicFleeStart: 20,
+    panicResistExp: 1.5,
+    panicBiasRange: 10,
+    // Gains: damageScale * (hp lost / max hp); a beast death within
+    // panicBeastDeathRadius; a handler death within panicHandlerDeathRadius.
+    panicDamageScale: 120,
+    panicBeastDeath: 5,
+    panicBeastDeathRadius: 10,
+    panicHandlerDeath: 8,
+    panicHandlerDeathRadius: 8,
+    // Floor: panicLossFloor * (dead handlers / handlers).
+    panicLossFloor: 50,
+    // Decay per second after panicCalmTicks without damage; faster with a
+    // handler within pushRange.
+    panicCalmTicks: 45,
+    panicDecayCalm: 4,
+    panicDecayHandler: 6,
+    // Enemies within enemyPushRadius push a panicked beast away (weight
+    // 1 - d/radius, summed, capped at enemyPushCap); homeForce pulls it
+    // towards the unit's random home direction.
+    enemyPushRadius: 4,
+    enemyPushForce: 1.0,
+    enemyPushCap: 1.5,
+    homeForce: 1.2,
+
+    // --- Handlers run while they work (Soldier.effectiveMoveSpeed) ---
+    handlerSpeedMult: 1.6,
+    // Handlers fight instead of holding back once one of them is in melee or
+    // an enemy is within meleeContactReach of one.
+    meleeContactReach: 2.2,
+
+    // --- Turning (ChargobTurn): nothing turns instantly, rad/s ---
+    // A beast on foot turns to its way, a charging beast to its course.
+    beastTurnRate: 2.0,
+    chargeTurnRate: 3.5,
+    // A goaded beast turns to the unit's direction at aimTurnRate and charges
+    // once it is within aimToleranceDeg of it (or after aimMaxTicks). The
+    // charge then locks on the nearest enemy inside chargeConeHalfDeg (10).
+    aimTurnRate: 2.5,
+    aimToleranceDeg: 3,
+    aimMaxTicks: 90
+  },
+
   // --- Turning ---
   // Every soldier's FACING rotates toward a desired facing at a bounded
   // angular rate — no state (engaged, marching, idle, threat-reacting) gets
@@ -851,6 +1114,32 @@ export const WeaponMatchup = {
     staggerThreshold: 18,
     powerMultiplier: 1.21
   },
+  // Hound bite. No stagger; quick and light.
+  bite: {
+    toHitMod: 1.1,
+    damage: 9,
+    shieldDamage: 4,
+    staggerThreshold: 999,
+    powerMultiplier: 1.00
+  },
+  // Short spear. Its own entry so nothing keyed on 'spear' applies to it.
+  // powerMultiplier is neutral: no spear-wall bias in scoring.
+  shortSpear: {
+    toHitMod: 1.0,
+    damage: 12,
+    shieldDamage: 8,
+    staggerThreshold: 18,
+    powerMultiplier: 1.00
+  },
+  // Crew-served crossbow (goblin megabowman). Fired only by shooters with a
+  // carrier. High damage; scatter, range and draw time live on the unit type.
+  crossbow: {
+    toHitMod: 0.8,
+    damage: 26,
+    shieldDamage: 14,
+    staggerThreshold: 999,
+    powerMultiplier: 1.00
+  },
   bow: {
     toHitMod: 0.8,
     damage: 9,
@@ -878,6 +1167,8 @@ export const SkeletonDamageModifiers = {
   sword: 1.5,
   bow: 0.6,
   spear: 0.7,
+  shortSpear: 0.7,
+  crossbow: 0.6,
   lance: 1.0
 };
 

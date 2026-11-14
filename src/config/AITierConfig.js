@@ -59,6 +59,19 @@
 //                                    nearest by centroid instead of
 //                                    finishing wounded / unshielded units.
 
+// --- Terrain awareness ---
+//   terrainAware                  -> TeamAI. When false, worldCtx.terrain and
+//                                    the focus-fire terrain argument are null,
+//                                    so the tier plays as if on flat ground:
+//                                    no defensive hold-spot search, no
+//                                    charge-lane / route-speed reads, no archer
+//                                    ground or arrow-lane positioning, no
+//                                    arrow-lane filter in focus fire, no
+//                                    terrain term in WinPlanner. Goal snapping
+//                                    off water and walls stays on for every
+//                                    tier (a safety net, not a skill).
+//                                    Missing = true.
+
 export const AITierConfig = {
   best_possible: {
     qualityFloorFraction: 0.9,
@@ -104,6 +117,13 @@ export const AITierConfig = {
     // cav has no other valid non-routing target. Weakened uses 'simple'
     // so its router chases are uninformed and can be baited.
     routerChaseMode: 'smart',
+
+    // Reads terrain for positioning, charge lanes, objectives and arrow lanes.
+    terrainAware: true,
+
+    // Runs with judgement (RunDirector): conserves stamina, stops running
+    // before contact so spears are lowered, never runs on defence.
+    runSmart: true,
     // Empty: no advanced tactics yet. Retreat still fires because
     // PlanScheduler special-cases posture==='retreat' outside this list.
     enabledPlans: []
@@ -158,6 +178,15 @@ export const AITierConfig = {
     // the map to run down a router and be baited into archer fire doing
     // it — a real, exploitable weakness.
     routerChaseMode: 'simple',
+
+    // Plays as if on flat ground: parks archers in mud and behind ridges,
+    // holds spears in bogs, charges into bad lanes. Real, visible, exploitable
+    // weakness that needs no new decision logic.
+    terrainAware: false,
+
+    // Runs whenever the goal is far: ignores fatigue, ignores how close the
+    // enemy is. Arrives tired, loose and with spears still up.
+    runSmart: false,
     enabledPlans: [],
 
     // --- Posture overrides. Loosens the tier's caution a notch: an

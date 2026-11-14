@@ -33,10 +33,11 @@
 import { AIConfig } from '../config/AIConfig.js';
 import { EnemyLineAnalysis } from './EnemyLineAnalysis.js';
 import { AIDebugLog } from './AIDebugLog.js';
+import { TerrainSense } from './TerrainSense.js';
 
 export class WinPlanner {
   // Returns { objectiveUnit: Unit|null, supportingUnitIds: Set<number> }
-  static plan(teamUnits, enemyUnits, formation, teamIdForLog, tickForLog) {
+  static plan(teamUnits, enemyUnits, formation, teamIdForLog, tickForLog, terrain) {
     const eligibleEnemies = enemyUnits.filter(u => !u.isDefeated());
     if (eligibleEnemies.length === 0) {
       return { objectiveUnit: null };
@@ -50,7 +51,7 @@ export class WinPlanner {
     // contested/reachability check and fall through to the next-best,
     // rather than giving up on planning entirely.
     const scored = eligibleEnemies
-      .map(u => ({ unit: u, score: this._scoreCandidate(u, teamUnits) }))
+      .map(u => ({ unit: u, score: this._scoreCandidate(u, teamUnits, terrain) }))
       .filter(e => e.score !== null)
       .sort((a, b) => a.score - b.score);
 
@@ -75,22 +76,57 @@ export class WinPlanner {
   // a unit already fully engaged by us is a poor NEW objective (we're
   // already committed there; the point of WinPlanner is to pick where to
   // send UNCOMMITTED force, not re-describe an existing fight).
-  static _scoreCandidate(enemyUnit, teamUnits) {
+static _scoreCandidate(enemyUnit, teamUnits, terrain) {
     const soldiers = enemyUnit.getAliveSoldiers();
     if (soldiers.length === 0) return null;
 
-    const hpFracSum = soldiers.reduce((sum, s) => sum + s.hp / s.maxHp, 0);
+    // One pass: HP sum and the set of this enemy unit's soldier ids. The old
+    // engaged check scanned the unit's soldiers for every melee soldier of ours.
+    let hpFracSum = 0;
+    const ids = new Set();
+    for (let i = 0; i < soldiers.length; i++) {
+      const s = soldiers[i];
+      hpFracSum += s.hp / s.maxHp;
+      ids.add(s.id);
+    }
     const strength = soldiers.length * (0.5 + 0.5 * (hpFracSum / soldiers.length));
 
-    const alreadyEngagedByUs = teamUnits.some(t =>
-      !t.isDefeated() && t.getAliveSoldiers().some(s => s.isInMelee() && this._targetsUnit(s, enemyUnit))
-    );
-    // Slightly deprioritize (not exclude) already-engaged targets — still a
-    // valid objective to REINFORCE, just not the first choice for a fresh
-    // team-wide push when an untouched weak point might exist.
+    let alreadyEngagedByUs = false;
+    outer:
+    for (const t of teamUnits) {
+      if (t.isDefeated()) continue;
+      const mine = t.getAliveSoldiers();
+      for (let i = 0; i < mine.length; i++) {
+        const s = mine[i];
+        if (s.isInMelee() && ids.has(s.targetId)) {
+          alreadyEngagedByUs = true;
+          break outer;
+        }
+      }
+    }
+    // Slightly deprioritize (not exclude) already-engaged targets: still a
+    // valid objective to REINFORCE, just not the first choice for a fresh push.
     const engagementPenalty = alreadyEngagedByUs ? 0 : -0.5;
 
-    return strength + engagementPenalty;
+    // Terrain: an enemy standing on poor ground (broken spear wall, bog,
+    // clutter) is weaker than its headcount says; one on good or high ground
+    // is stronger. Lower score = more attractive, so poor ground lowers it.
+    let terrainMult = 1;
+    if (terrain && AIConfig.winPlannerTerrainWeight > 0) {
+      const c = enemyUnit.getCenter();
+      // Spear units: the wall's actual integrity right now (a bogged or
+      // buckled wall is a soft target), plus the height term. Everyone else:
+      // the ground-quality estimate under the unit's center.
+      const wall = TerrainSense.unitWallIntegrity(enemyUnit);
+      const quality = wall !== null
+        ? wall + TerrainSense.heightBonus(terrain, c.x, c.z)
+        : TerrainSense.groundQuality(terrain, c.x, c.z, false);
+      const cap = AIConfig.winPlannerTerrainCap;
+      const adj = (quality - 1) * AIConfig.winPlannerTerrainWeight;
+      terrainMult = 1 + Math.max(-cap, Math.min(cap, adj));
+    }
+
+    return strength * terrainMult + engagementPenalty;
   }
 
   static _targetsUnit(soldier, unit) {

@@ -53,7 +53,7 @@ import { Property } from './Properties.js';
 // Unit._advanceMarch / Unit.update.
 const spearman = {
   id: 'spearman',
-  displayName: 'Spearman',
+  displayName: 'Long Spearman',
   race: 'human',
   baseHp: 40,
   baseMoveSpeed: 1.2,
@@ -381,15 +381,58 @@ const goblinSlave = {
   excludesProperties: [Property.EXPENDABLE],
 };
 
-const goblinSpearman = goblinOf(spearman, 'goblinSpearman', 'Spearman', {
+const goblinSpearman = goblinOf(spearman, 'goblinSpearman', 'Long Spearman', {
   discipline: 'low'
 });
 
 const goblinSpearmanNoShield = withoutShield(
   goblinSpearman,
   'goblinSpearmanNoShield',
-  'Spearman (No Shield)',
+  'Long Spearman (No Shield)',
   'roundCap'
+);
+
+// Short spearman. Stats come from the swordsman minus its attack-speed
+// bonus. weaponType 'shortSpear' is its OWN weapon: every system keyed on
+// 'spear' (wall, brace, spear move/turn penalty, spear-vs-cavalry table,
+// ChargeReadiness) ignores it. Its few special rules live in
+// CombatResolutionSystem and CombatConfig.shortSpear. Class SWORDSMEN so
+// the AI treats it as ordinary infantry. The tactical idea: a valid charge
+// target for cavalry, but deadly to cavalry that has bogged down.
+const shortSpearman = {
+  id: 'shortSpearman',
+  displayName: 'Short Spearman',
+  race: 'human',
+  baseHp: 42,
+  baseMoveSpeed: 1.25,
+  mass: 1.0,
+  weaponType: 'shortSpear',
+  hasShield: true,
+  shieldSide: 'left',
+  spriteColor: '#c9a24b',
+  discipline: 'normal',
+  breakoffRange: 7.0,
+  unitClasses: [UnitClass.SWORDSMEN],
+  helmetType: 'nasalHelm',
+  description: 'Cannot form a spear wall or brace, so charging cavalry rides him down. Deals extra damage to cavalry that has lost its speed. Attacks slowly into a braced spear line.'
+};
+
+const shortSpearmanNoShield = withoutShield(
+  shortSpearman,
+  'shortSpearmanNoShield',
+  'Short Spearman (No Shield)',
+  'bandedHelm'
+);
+
+const goblinShortSpearman = goblinOf(shortSpearman, 'goblinShortSpearman', 'Short Spearman', {
+  discipline: 'low'
+});
+
+const goblinShortSpearmanNoShield = withoutShield(
+  goblinShortSpearman,
+  'goblinShortSpearmanNoShield',
+  'Short Spearman (No Shield)',
+  'bandedHelm'
 );
 
 // Goblin archer. Short-ranged and loose by design: the race fields twice
@@ -422,6 +465,33 @@ const goblinArcher = goblinOf(archer, 'goblinArcher', 'Archer', {
   // raceHasProperty (see RaceConfig.js), so the UI trait list and any
   // future consumer pick this up automatically.
   excludesProperties: [Property.DIRTY_FIGHTING]
+});
+
+// Goblin megabowman. A crew-served crossbow: two goblins per weapon, a
+// CARRIER (rendered with the slave body) and a SHOOTER. Only a shooter with
+// a living carrier nearby fires (see CrewPairing, RangedCombatSystem).
+// `crew` marks the type as crew-served.
+//
+// weaponType stays 'bow' so melee, rendering and the bow animation are
+// unchanged; `rangedWeaponType` swaps the PROJECTILE to the crossbow entry
+// of WeaponMatchup. rangedCooldownTicks is the per-type draw time (the
+// global value is 35); very slow by design.
+//
+// Not expendable: unlike other goblins its rout spreads panic normally.
+// Discipline 'normal' keeps the 2-row shooter-front / carrier-back layout
+// (low discipline would force 3+ rows).
+const goblinMegabowman = goblinOf(archer, 'goblinMegabowman', 'Megabowman', {
+  discipline: 'low',
+  rangedWeaponType: 'crossbow',
+  rangedRange: 45.0,
+  rangedAccuracy: 5.5,
+  rangedCooldownTicks: 90,
+  preferredRows: 4,
+  // Cell pitch of the crew formation (see CrewFormation).
+  formationSpacing: 2.0,
+  crew: { carrierBodyVariant: 'goblinSlave' },
+  excludesProperties: [Property.DIRTY_FIGHTING, Property.EXPENDABLE],
+  description: 'Crew-served crossbow, two goblins per weapon. Enormous range and heavy bolts, but slow and inaccurate. A weapon works only while both its shooter and its carrier live; without either the unit is useless.'
 });
 
 // Hobgoblin swordsman. A goblin body pushed toward the human template:
@@ -519,9 +589,128 @@ const goblinWarlordRetinue = {
   countsAsCavalry: true,
 };
 
+// Goblin hound handler. Carries a club (clubWeapon: club mesh on a sword
+// combat profile, no blade bonuses). Owns `hounds.perHandler` hounds, which
+// live in unit.companions (see HoundPack). Unlike other goblins it is NOT
+// expendable.
+const goblinHoundHandler = goblinOf(swordsman, 'goblinHoundHandler', 'Hound Handler', {
+  discipline: 'low',
+  hasShield: false,
+  shieldSide: null,
+  helmetType: 'roundCap',
+  attackSpeedMultiplier: 1.0,
+  clubWeapon: true,
+  noSwordSpecialistBonuses: true,
+  hounds: { typeId: 'goblinHound', perHandler: 2 },
+  // Loose formation: room for the hounds between the handlers.
+  formationSpacing: 3.0,
+  excludesProperties: [Property.EXPENDABLE],
+  description: 'Handlers with clubs and a pack of fast hounds. The hounds run ahead of the line; send them with an attack order and they run down the target on their own. Recall them while in range. If every handler dies the hounds go wild and bite anyone.'
+});
+
+// Goblin hound. A companion of a handler unit (never a roster unit).
+// weaponType 'bite'; no morale (noMorale); `beast` makes TargetingSystem
+// skip it (HoundSystem drives it). Rendered with the riderless-beast
+// placeholder model until a hound model exists. Walks at the handlers' pace
+// and RUNS (runSpeedMult 1.0 => baseMoveSpeed) only when sent or catching up.
+const goblinHound = {
+  id: 'goblinHound',
+  displayName: 'Hound',
+  race: 'goblin',
+  baseHp: 24,
+  baseMoveSpeed: 2.2,
+  mass: 0.25,
+  weaponType: 'bite',
+  // Never counts as a charge (no halved block chance, no slow charge turn
+  // rate). Only heavy units such as the chargob keep charge impact.
+  noChargeImpact: true,
+  attackSpeedMultiplier: 1.3,
+  hasShield: false,
+  shieldSide: null,
+  spriteColor: '#6a8a3a',
+  discipline: 'low',
+  breakoffRange: 6.0,
+  unitClasses: [UnitClass.SWORDSMEN],
+  helmetType: null,
+  collisionRadius: 0.35,
+  bodyVariant: 'riderlessBeast',
+  mounted: true,
+  // The hound model (HoundBuilder.createHoundBase) replaces the
+  // pre-patch beast-mount placeholder. `mountType: 'hound'` is what
+  // makes the composer route to that builder instead of the reptilian
+  // boar (createBeastMount). Riderless body path is unchanged —
+  // the hound model IS the entire visual.
+  mountType: 'hound',
+  runSpeedMult: 1.5,
+  noMorale: true,
+  beast: true,
+  campaignPlayerAvailable: false,
+  campaignAiAvailable: false,
+  campaignAvailable: false,
+  description: 'A fast, savage hound. Fights dirty and circles for flanks.'
+};
+
+// Chargob beast. A companion of the chargob unit (never a roster unit, see
+// ChargobPack). Savage, heavy and slow: walks at the unit's pace, runs only
+// when charging or catching up. Mass 3.5 (a charge throws and bowls over
+// infantry), no morale, weak to spears (race 'chargob'). The riderless-beast
+// model is a placeholder until a chargob model exists.
+const goblinChargobBeast = {
+  id: 'goblinChargobBeast',
+  displayName: 'Chargob Beast',
+  race: 'chargob',
+  baseHp: 400,
+  baseMoveSpeed: 1.4,
+  mass: 3.5,
+  weaponType: 'bite',
+  attackSpeedMultiplier: 0.7,
+  hasShield: false,
+  shieldSide: null,
+  spriteColor: '#6a8a3a',
+  discipline: 'normal',
+  breakoffRange: 6.0,
+  unitClasses: [UnitClass.SWORDSMEN],
+  helmetType: null,
+  collisionRadius: 0.7,
+  fatigueDrainMultiplier: 0.3,
+  bodyVariant: 'riderlessBeast',
+  mounted: true,
+  mountType: 'beast',
+  runSpeedMult: 1.6,
+  noMorale: true,
+  chargobBeast: true,
+  campaignPlayerAvailable: false,
+  campaignAiAvailable: false,
+  campaignAvailable: false,
+  description: 'A huge, savage beast forced to fight by its handlers. Bites hard and slowly, and bowls over infantry when it runs. Weak to spears. A beast that charges never returns to the line.'
+};
+
+// Chargob (the roster unit): the HANDLERS. Short spears, no shield, they
+// stand behind a line of beasts (one beast per `handlersPerBeast` handlers,
+// see ChargobPack) and do not fight while a beast stands in the line.
+// baseUnitSize is the base roster size (handlers), read by RosterScaling.
+// Closed to the campaign until CampaignConfig has a size entry for it.
+const goblinChargob = goblinOf(shortSpearman, 'goblinChargob', 'Chargob', {
+  discipline: 'low',
+  hasShield: false,
+  shieldSide: null,
+  helmetType: 'roundCap',
+  baseUnitSize: 36,
+  formationSpacing: 1.1,
+  preferredRows: 4,
+  chargob: { beastTypeId: 'goblinChargobBeast', handlersPerBeast: 3 },
+  excludesProperties: [Property.EXPENDABLE],
+  campaignPlayerAvailable: false,
+  campaignAiAvailable: false,
+  campaignAvailable: false,
+  description: 'Handlers with short spears drive savage chargob beasts, one beast to every three handlers. The beasts fight in the front line while the handlers hold back; once the last beast is gone the handlers fall back. Order the handlers to goad beasts into a charge: three of them must prod a beast from behind for two seconds. A badly mauled beast may also break through on its own, and with too few handlers left the beasts break loose. Beasts are replaced in full after the battle.'
+});
+
 export const UnitTypes = {
   spearman,
-  spearmanNoShield: withoutShield(spearman, 'spearmanNoShield', 'Spearman (No Shield)', 'roundCap'),
+  spearmanNoShield: withoutShield(spearman, 'spearmanNoShield', 'Long Spearman (No Shield)', 'roundCap'),
+  shortSpearman,
+  shortSpearmanNoShield,
 
   swordsman,
   swordsmanNoShield: withoutShield(swordsman, 'swordsmanNoShield', 'Swordsman (No Shield)', 'bandedHelm'),
@@ -533,11 +722,19 @@ export const UnitTypes = {
   goblinSpearman,
   goblinSpearmanNoShield,
 
+  goblinShortSpearman,
+  goblinShortSpearmanNoShield,
+
   hobgoblinSwordsman,
   goblinWarlordRetinue,
 
   archer,
   goblinArcher,
+  goblinMegabowman,
+  goblinHoundHandler,
+  goblinHound,
+  goblinChargob,
+  goblinChargobBeast,
 
   horsemen,
   horsemenNoShield: withoutShield(horsemen, 'horsemenNoShield', 'Horsemen (No Shield)', 'crestedHelm')

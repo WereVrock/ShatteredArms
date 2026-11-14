@@ -171,6 +171,9 @@ export class MPLobby {
       add('peerLeft', () => {
         this._paired = false;
         this._peerReady = false;
+        // A new opponent never saw our earlier Ready, so it must not stay set
+        // (it also left the Ready button disabled forever).
+        this._myReady = false;
         this._setStatus('Opponent disconnected.');
         this._render();
       });
@@ -245,7 +248,9 @@ export class MPLobby {
       mode: this._config.mode,
       scenarioId: this._config.scenarioId,
       deploymentSeconds: this._config.deploymentSeconds,
-      pauseMode: this._config.pauseMode
+      pauseMode: this._config.pauseMode,
+      terrainSeed: ((Math.random() * 0x7fffffff) | 0) || 1,
+      terrainPreset: 'normal'
     };
 
     this._send({ type: 'match-start', ...payload });
@@ -285,6 +290,8 @@ export class MPLobby {
       scenario,
       deploymentSeconds: payload.deploymentSeconds,
       pauseMode: payload.pauseMode,
+      terrainSeed: payload.terrainSeed,
+      terrainPreset: payload.terrainPreset,
       playerTeamId,
       otherTeamId
     });

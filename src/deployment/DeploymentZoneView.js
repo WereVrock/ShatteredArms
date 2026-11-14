@@ -1,18 +1,35 @@
+// ===== DeploymentZoneView.js =====
 // Ground overlay: draws the deployment zone for each team as a translucent
-// quad plus a border line. Purely visual — no sim state is read or written.
+// quad plus a border line. The zone is projected onto the terrain — both
+// the fill and the outline sample ActiveTerrain.heightAt per vertex, so on
+// hilly maps the zone drapes over the landscape like a laser projected
+// from above rather than floating as a flat billboard.
 //
-// One mesh pair per team, created lazily on first show() and reused. Zones
-// are static for the whole deployment phase, so the geometry is written once
-// per show() and then left alone.
+// Geometry is written lazily on first show() and re-written whenever the
+// active terrain changes (via mesh.onBeforeRender, same trick the field
+// boundary strips use in SceneSetup). Zones are static for the whole
+// deployment phase, so between terrain changes the buffers are left alone.
+//
+// One mesh pair per team, created on first show() and reused.
 import * as THREE from 'three';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
 
-const Y_FILL = 0.04;
-const Y_OUTLINE = 0.045;
+// Subdivisions for the terrain-following geometry. The fill is a
+// (GRID+1)^2 vertex mesh so its interior can drape over hills; the
+// outline is a LineLoop with GRID vertices per edge (4*GRID total).
+// 32 resolves hills down to a few world units while staying cheap.
+const GRID = 32;
+
+// Lift above terrain, in world units. High enough to clear the ground
+// plane / terrain surface, low enough that the zone reads as painted on
+// the ground rather than floating.
+const Y_FILL = 0.05;
+const Y_OUTLINE = 0.06;
 
 export class DeploymentZoneView {
   constructor(scene) {
     this.scene = scene;
-    this._entries = new Map(); // teamId -> { fill, outline }
+    this._entries = new Map(); // teamId -> { fill, outline, zone, sampledTerrain }
   }
 
   show(teamId, zone, color, fillOpacity, outlineOpacity) {
@@ -22,9 +39,9 @@ export class DeploymentZoneView {
       this._entries.set(teamId, entry);
     }
 
-    const corners = zone.getCornersWorld();
-    this._writeQuad(entry.fill.geometry, corners, Y_FILL);
-    this._writeQuad(entry.outline.geometry, corners, Y_OUTLINE);
+    entry.zone = zone;
+    this._writeGeometry(entry);
+    entry.sampledTerrain = ActiveTerrain.get();
 
     entry.fill.material.color.setHex(color);
     entry.fill.material.opacity = fillOpacity;
@@ -59,9 +76,27 @@ export class DeploymentZoneView {
   }
 
   _createEntry() {
+    const verts = (GRID + 1) * (GRID + 1);
     const fillGeo = new THREE.BufferGeometry();
-    fillGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
-    fillGeo.setIndex([0, 1, 2, 0, 2, 3]);
+    fillGeo.setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array(verts * 3), 3)
+    );
+
+    // Two triangles per grid cell.
+    const idx = new Uint16Array(GRID * GRID * 6);
+    let o = 0;
+    for (let j = 0; j < GRID; j++) {
+      for (let i = 0; i < GRID; i++) {
+        const v00 = j * (GRID + 1) + i;
+        const v10 = v00 + 1;
+        const v01 = v00 + (GRID + 1);
+        const v11 = v01 + 1;
+        idx[o++] = v00; idx[o++] = v10; idx[o++] = v11;
+        idx[o++] = v00; idx[o++] = v11; idx[o++] = v01;
+      }
+    }
+    fillGeo.setIndex(new THREE.BufferAttribute(idx, 1));
 
     const fillMat = new THREE.MeshBasicMaterial({
       color: 0x3a6ea5,
@@ -76,8 +111,13 @@ export class DeploymentZoneView {
     fill.renderOrder = 900;
     this.scene.add(fill);
 
+    const outVerts = GRID * 4;
     const outGeo = new THREE.BufferGeometry();
-    outGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
+    outGeo.setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array(outVerts * 3), 3)
+    );
+
     const outMat = new THREE.LineBasicMaterial({
       color: 0x3a6ea5,
       transparent: true,
@@ -90,17 +130,79 @@ export class DeploymentZoneView {
     outline.renderOrder = 901;
     this.scene.add(outline);
 
-    return { fill, outline };
+    const entry = { fill, outline, zone: null, sampledTerrain: undefined };
+
+    // Lazy terrain re-projection. Fires on every render but only re-writes
+    // the buffers when the active terrain has changed. Same pattern as
+    // SceneSetup's field-boundary strips.
+    fill.onBeforeRender = () => {
+      const t = ActiveTerrain.get();
+      if (t !== entry.sampledTerrain) {
+        entry.sampledTerrain = t;
+        this._writeGeometry(entry);
+      }
+    };
+
+    return entry;
   }
 
-  _writeQuad(geo, corners, y) {
-    const arr = geo.attributes.position.array;
-    for (let i = 0; i < 4; i++) {
-      arr[i * 3]     = corners[i].x;
-      arr[i * 3 + 1] = y;
-      arr[i * 3 + 2] = corners[i].z;
+  _writeGeometry(entry) {
+    const zone = entry.zone;
+    if (!zone) return;
+
+    // Fill: (GRID+1)^2 mesh sampled straight from zone-local coordinates
+    // so the mesh layout matches the rectangle, whatever the yaw.
+    const fillPos = entry.fill.geometry.attributes.position.array;
+    const stride = GRID + 1;
+    const depthSpan = zone.backDepth + zone.frontDepth;
+    for (let j = 0; j <= GRID; j++) {
+      const dj = j / GRID;
+      const depth = -zone.backDepth + dj * depthSpan;
+      for (let i = 0; i <= GRID; i++) {
+        const di = i / GRID;
+        const lateral = -zone.halfLateral + di * 2 * zone.halfLateral;
+        const p = zone.toWorld(lateral, depth);
+        const k = (j * stride + i) * 3;
+        fillPos[k]     = p.x;
+        fillPos[k + 1] = ActiveTerrain.heightAt(p.x, p.z) + Y_FILL;
+        fillPos[k + 2] = p.z;
+      }
     }
-    geo.attributes.position.needsUpdate = true;
-    geo.computeBoundingSphere();
+    entry.fill.geometry.attributes.position.needsUpdate = true;
+    entry.fill.geometry.computeBoundingSphere();
+
+    // Outline: LineLoop with GRID vertices per edge, walked back-left →
+    // back-right → front-right → front-left; LineLoop closes the loop
+    // automatically.
+    const outPos = entry.outline.geometry.attributes.position.array;
+    let v = 0;
+    const writeVert = (lateral, depth) => {
+      const p = zone.toWorld(lateral, depth);
+      outPos[v++] = p.x;
+      outPos[v++] = ActiveTerrain.heightAt(p.x, p.z) + Y_OUTLINE;
+      outPos[v++] = p.z;
+    };
+    // Back edge (depth = -backDepth), lateral low → high.
+    for (let i = 0; i < GRID; i++) {
+      const lateral = -zone.halfLateral + (i / GRID) * 2 * zone.halfLateral;
+      writeVert(lateral, -zone.backDepth);
+    }
+    // Right edge (lateral = +halfLateral), depth back → front.
+    for (let i = 0; i < GRID; i++) {
+      const depth = -zone.backDepth + (i / GRID) * depthSpan;
+      writeVert(zone.halfLateral, depth);
+    }
+    // Front edge (depth = +frontDepth), lateral high → low.
+    for (let i = 0; i < GRID; i++) {
+      const lateral = zone.halfLateral - (i / GRID) * 2 * zone.halfLateral;
+      writeVert(lateral, zone.frontDepth);
+    }
+    // Left edge (lateral = -halfLateral), depth front → back.
+    for (let i = 0; i < GRID; i++) {
+      const depth = zone.frontDepth - (i / GRID) * depthSpan;
+      writeVert(-zone.halfLateral, depth);
+    }
+    entry.outline.geometry.attributes.position.needsUpdate = true;
+    entry.outline.geometry.computeBoundingSphere();
   }
 }

@@ -1,8 +1,12 @@
 import * as THREE from 'three';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
 import { SoldierModelComposer } from './SoldierModelComposer.js';
 import { SoldierMeshFactory } from './SoldierMeshFactory.js';
 import { ArrowArc } from '../sim/ArrowArc.js';
+import { SpearWall } from '../sim/SpearWall.js';
 import { layoutBowString } from './mesh/BowBuilder.js';
+import { layoutMegabowDraw, layoutMegabowDeploy } from './mesh/MegabowBuilder.js';
+import { KNEEL_STAGE_CROUCH, KNEEL_STAGE_KNEEL, KNEEL_REAR_HIP_RAD } from './KneelPose.js';
 import { CombatConfig } from '../config/CombatConfig.js';
 import { isCavalry } from '../config/UnitClasses.js';
 import { GraphicsMode } from './GraphicsMode.js';
@@ -52,6 +56,59 @@ const SWORD_WRIST_SWING_MAX = Math.PI;
 const SWORD_STRIKE_FRACTION = 0.55;
 const SWORD_TWIST_MAX_RAD = 0.25;
 
+// Raised-spear swing. When a spearman's spear is up (a friendly in the
+// way, or bad footing), he can't thrust as part of a wall — he chops with
+// the shaft instead. The chop is ADDED on top of the weapon's resting
+// pitch (set by _applyWeaponPitch from spearRaiseAmount), so the arc
+// starts wherever the spear happens to be held.
+//
+//   WINDUP: spear rises a little further at the start (delta negative).
+//   DOWN:   total downward swing from the resting pitch, past horizontal.
+//
+// Strike occupies SPEAR_SWING_STRIKE_END - SPEAR_SWING_STRIKE_START of
+// the clip; the rest is windup and recovery. Same duration as the sword
+// swing so the arc reads at battle zoom.
+const SPEAR_SWING_DURATION = 0.30;
+const SPEAR_SWING_WINDUP = 0.35;
+const SPEAR_SWING_DOWN = 1.80;
+const SPEAR_SWING_STRIKE_START = 0.20;
+const SPEAR_SWING_STRIKE_END = 0.55;
+
+// Short spear. Distinct stance from the normal spear:
+//   - idle/marching: held at a FIXED diagonal-up angle, never raised or
+//     lowered. spearRaiseAmount is deliberately ignored — the visual is
+//     decoupled from the SpearWall brace state, and there is no walk-
+//     cycle bobbing on the weapon.
+//   - attack:        swings DOWN to horizontal and thrusts forward,
+//                    then returns to the diagonal-up stance.
+//
+// SHORT_SPEAR_IDLE_RAD is the fixed idle pitch. Negative = tip up (same
+// sign convention as the normal spear's raise: -amount * fullRaiseRad).
+// -0.9 rad ≈ 52° — clearly diagonal without being near-vertical, so the
+// tip clears the next rank's heads while the line is marching.
+//
+// The thrust duration is slightly longer than ATTACK_ANIM_DURATION (0.18)
+// because the tip has to travel from diagonal to horizontal, a larger
+// angular sweep than a normal thrust from the resting horizontal pose.
+const SHORT_SPEAR_IDLE_RAD = -0.9;
+const SHORT_SPEAR_THRUST_DURATION = 0.22;
+
+// Megabow carrier deployment (kneel + hinge tilt). _megabowDeploy runs 0..1.
+// The steps are per synced frame, like the other smoothing factors here.
+const MEGABOW_DEPLOY_STEP = 0.035;
+const MEGABOW_RETRACT_STEP = 0.05;
+// Leg pose thresholds: crouch pose above CROUCH_FROM, full kneel above KNEEL_FROM.
+const MEGABOW_CROUCH_FROM = 0.12;
+const MEGABOW_KNEEL_FROM = 0.60;
+// The string only starts drawing once the bow is mostly deployed.
+const MEGABOW_DRAW_FROM = 0.70;
+// Aim limits (radians) and smoothing of the aim values.
+const MEGABOW_DEFAULT_PITCH = 0.35;
+const MEGABOW_MIN_PITCH = 0.08;
+const MEGABOW_MAX_PITCH = 0.90;
+const MEGABOW_MAX_YAW = 1.10;
+const MEGABOW_AIM_SMOOTHING = 0.20;
+
 const LANCE_RANK_BASE_RAISE = [0.00, 0.75, 0.88, 0.95];
 
 const WALK_STRIDE_LENGTH = 1.2;
@@ -60,6 +117,15 @@ const WALK_SPEED_SMOOTHING = 0.15;
 const WALK_AMP_SMOOTHING = 0.12;
 const WALK_MIN_SPEED = 0.05;
 const WALK_IDLE_EPSILON = 0.001;
+
+// Forward pitch applied to the torso while running. Combined with the
+// wider leg swing from the run pose array, this is the classic "leaning
+// into the stride" silhouette that distinguishes a run from a fast walk
+// even at battle zoom. Small (8.6 degrees) so it reads as posture, not
+// as toppling. Smoothly ramped in _updateRunLean, not snapped, so a
+// gait toggle mid-march does not pop.
+const RUN_FORWARD_LEAN_RAD = 0.15;
+const RUN_LEAN_SMOOTHING = 0.15;
 
 const KNEE_BASE_RAD = 0.10;
 const KNEE_SWING_RAD = 0.80;
@@ -124,7 +190,24 @@ export class SoldierView {
     this._isBow = hasWeapon && !beastMounted && soldier.unitTypeDef.weaponType === 'bow';
     this._isSword = hasWeapon && !beastMounted && soldier.unitTypeDef.weaponType === 'sword';
     this._isLance = hasWeapon && !beastMounted && soldier.unitTypeDef.weaponType === 'lance';
+    this._isShortSpear = hasWeapon && !beastMounted && soldier.unitTypeDef.weaponType === 'shortSpear';
+    // A crew-served megabow's CARRIER carries the weapon and animates
+    // its draw; the SHOOTER (front cell) fires but has no weapon mesh.
+    // This flag routes the carrier's per-frame animation to
+    // _applyMegabowDraw instead of _applyBowDraw. Set once in the
+    // constructor — crewRole and rangedWeaponType never change for a
+    // soldier, and every LOD rebuild produces a weapon (or doesn't) the
+    // same way, so the flag stays correct across _buildModel.
+    this._isMegabowCarrier = hasWeapon
+      && !beastMounted
+      && soldier.crewRole === 'carrier'
+      && soldier.unitTypeDef.rangedWeaponType === 'crossbow';
     this._aimTarget = null;
+    // Megabow carrier: deployment progress and smoothed aim (see
+    // _applyMegabowDraw). Stay 0 / default for every other soldier.
+    this._megabowDeploy = 0;
+    this._megabowPitch = MEGABOW_DEFAULT_PITCH;
+    this._megabowYaw = 0;
     this._bowDrawProgress = 0;
 
     this._walkPhase = 0;
@@ -133,6 +216,14 @@ export class SoldierView {
     this._prevWalkX = soldier.pos.x;
     this._prevWalkZ = soldier.pos.z;
     this._lastLegPoseIdx = -1;
+    // Which pose array the last _applyLegPose call used. A gait change
+    // swaps the array reference without changing _lastLegPoseIdx, so the
+    // dirty check must compare both to detect a real change.
+    this._lastLegPoseGeometries = null;
+    // Current forward-pitch applied to the torso. Smoothed toward the
+    // target (RUN_FORWARD_LEAN_RAD while running, 0 otherwise) so a gait
+    // toggle does not pop the body upright in one frame.
+    this._runLean = 0;
 
     this._horsePhase = 0;
     this._horseAmplitude = 0;
@@ -167,7 +258,8 @@ export class SoldierView {
     const model = SoldierModelComposer.compose(
       this.soldier.unitTypeDef,
       this.soldier.teamId,
-      this.soldier.bodyVariant
+      this.soldier.bodyVariant,
+      this.soldier.crewRole
     );
     SoldierMeshFactory.setTier(LodTier.DETAILED);
 
@@ -184,6 +276,14 @@ export class SoldierView {
     this.weapon = model.weapon;
     this.weaponArm = model.weaponArm;
     this.horseBase = model.horseBase;
+
+    // YXZ euler order so body.rotation.x is a BODY-LOCAL pitch (forward
+    // lean relative to the soldier's facing) rather than a world-axis
+    // rotation. With the default 'XYZ' order, rotation.x applies around
+    // the world X axis after rotation.y has already turned the body —
+    // a running soldier facing sideways would lean left instead of
+    // forward. See the lean write in sync() and RUN_FORWARD_LEAN_RAD.
+    if (this.body) this.body.rotation.order = 'YXZ';
 
     this.body.userData.unitId = this.soldier.unitId;
 
@@ -215,8 +315,12 @@ export class SoldierView {
     this._staticLegsMesh = this.body.userData.staticLegsMesh || null;
     this._staticLegsPoseGeometries =
       this.body.userData.staticLegsPoseGeometries || null;
+    this._staticLegsRunPoseGeometries =
+      this.body.userData.staticLegsRunPoseGeometries || null;
     this._staticLegsPoseCount =
       this.body.userData.staticLegsPoseCount || 0;
+    this._staticLegsRunPoseCount =
+      this.body.userData.staticLegsRunPoseCount || 0;
     this._horseLegs = (this.horseBase && this.horseBase.userData.horseLegs) || null;
 
     this._baseShieldColor = this.shield
@@ -231,8 +335,35 @@ export class SoldierView {
       .lerp(THRALL_TINT_COLOR, THRALL_TINT_BLEND);
     this._bodyTemplate = this.body.userData.baseMaterial;
     this._bodyMeshes = [];
+
+    // Skin and hair are OPTIONAL. Only the human blob body currently sets
+    // these templates; every other body builder leaves them undefined, so
+    // _skinTemplate / _hairTemplate stay null and the empty arrays below
+    // short-circuit _applyBodyTint's skin/hair branches. See
+    // BlobBodyBuilder.js and the skin-tone / hair-tone constants there.
+    this._skinTemplate = this.body.userData.skinMaterial || null;
+    this._skinMeshes = [];
+    this._skinBaseColor = this._skinTemplate
+      ? this._skinTemplate.color.clone()
+      : null;
+    this._thrallSkinBaseColor = this._skinBaseColor
+      ? this._skinBaseColor.clone().lerp(THRALL_TINT_COLOR, THRALL_TINT_BLEND)
+      : null;
+
+    this._hairTemplate = this.body.userData.hairMaterial || null;
+    this._hairMeshes = [];
+    this._hairBaseColor = this._hairTemplate
+      ? this._hairTemplate.color.clone()
+      : null;
+    this._thrallHairBaseColor = this._hairBaseColor
+      ? this._hairBaseColor.clone().lerp(THRALL_TINT_COLOR, THRALL_TINT_BLEND)
+      : null;
+
     this.body.traverse((o) => {
-      if (o.isMesh && o.material === this._bodyTemplate) this._bodyMeshes.push(o);
+      if (!o.isMesh) return;
+      if (o.material === this._bodyTemplate) this._bodyMeshes.push(o);
+      else if (this._skinTemplate && o.material === this._skinTemplate) this._skinMeshes.push(o);
+      else if (this._hairTemplate && o.material === this._hairTemplate) this._hairMeshes.push(o);
     });
     this._bodyTintLevel = -1;
     this._bodyTintThrall = false;
@@ -255,8 +386,17 @@ export class SoldierView {
     this._aimTarget = { x, z };
   }
 
-  triggerAttackAnim() {
+triggerAttackAnim() {
     if (GraphicsMode.disableAnimations) return;
+    if (this._isShortSpear) {
+      this.attackAnimTimeLeft = SHORT_SPEAR_THRUST_DURATION;
+      return;
+    }
+    if (this._isSpearRaised()) {
+      // A raised spearman chops; the arc needs longer than a thrust.
+      this.attackAnimTimeLeft = SPEAR_SWING_DURATION;
+      return;
+    }
     this.attackAnimTimeLeft = this._isSword
       ? SWORD_ATTACK_ANIM_DURATION
       : ATTACK_ANIM_DURATION;
@@ -318,6 +458,8 @@ export class SoldierView {
       this._walkSpeed > 0 ||
       this._horseAmplitude > 0 ||
       this._bowDrawProgress > 0 ||
+      this._megabowDeploy > 0 ||
+      s.crewPlanted === true ||
       (s.airborneTicksLeft > 0 && s.airborneTotalTicks > 0);
 
     if (!this._forceSync && c &&
@@ -367,20 +509,67 @@ export class SoldierView {
       this.group.traverse((o) => { if (o.isMesh) o.castShadow = false; });
     }
 
+    // Terrain-aware placement. Before the elevation batch this wrote the
+    // foot at world Y = airborneY (0 when grounded), which was correct only
+    // on flat terrain — a soldier standing on a hill was drawn airborneY
+    // units BELOW the ground mesh and read as buried. Airborne Y is an
+    // offset above the local ground (see _computeAirborneY), so the two
+    // add: elevated soldiers sit on the hill, thrown soldiers arc over it.
+    const groundY = ActiveTerrain.heightAt(s.pos.x, s.pos.z);
     const airborneY = this._computeAirborneY(s);
-    this.group.position.set(s.pos.x, airborneY, s.pos.z);
+    this.group.position.set(s.pos.x, groundY + airborneY, s.pos.z);
 
-    let rotX = -Math.PI / 2 * this.deathProgress;
-    if (s.airborneTicksLeft > 0 && s.airborneTotalTicks > 0) {
-      const t = 1 - s.airborneTicksLeft / s.airborneTotalTicks;
-      rotX += Math.PI * 2 * t;
+    // Death / knockdown rotation. Hounds are QUADRUPEDS — the standard
+    // forward X-rotation that makes a biped soldier face-plant stands a
+    // quadruped on its nose, which reads as a glitch, not as a corpse.
+    // They roll onto a flank instead.
+    const isHoundMount = this.soldier.unitTypeDef.mountType === 'hound';
+    let rotX;
+    let rotZ;
+    if (isHoundMount) {
+      // Sideways death: rotate around Z so the back and flank settle
+      // against the ground while the nose stays pointing forward — the
+      // classic fallen-animal pose. The per-soldier side is chosen from
+      // a hash of soldier id so a dying pack spreads both ways instead
+      // of collapsing as one solid block.
+      //
+      // Alternative ("torso to ground"): swap rotZ for a rotX of +π/2
+      // (nose down, belly flat, legs under the body). Reads as a
+      // face-plant on a dog — passable but less convincing than a
+      // flank collapse. Left as a documented alternative in case the
+      // flank pose is rejected.
+      rotX = 0;
+      if (s.state === 'dead' && this.deathProgress > 0) {
+        const side = this._houndDeathSide();
+        rotZ = side * (Math.PI / 2) * this.deathProgress;
+      } else if (s.state === 'knockedDown' && s.airborneTicksLeft <= 0) {
+        // Knocked down mid-battle — go prone on one flank. Not fully
+        // rotated because the hound gets back up after the stagger.
+        rotZ = Math.PI / 2;
+      } else {
+        rotZ = 0;
+      }
+    } else {
+      // Biped death — unchanged forward X-rotation.
+      rotX = -Math.PI / 2 * this.deathProgress;
+      if (s.airborneTicksLeft > 0 && s.airborneTotalTicks > 0) {
+        const t = 1 - s.airborneTicksLeft / s.airborneTotalTicks;
+        rotX += Math.PI * 2 * t;
+      }
+      rotZ = (s.state === 'knockedDown' && s.airborneTicksLeft <= 0) ? Math.PI / 2 : 0;
     }
+
     this.group.rotation.x = rotX;
-    this.group.rotation.z =
-      (s.state === 'knockedDown' && s.airborneTicksLeft <= 0) ? Math.PI / 2 : 0;
+    this.group.rotation.z = rotZ;
 
     const twist = this._computeSwordTwist();
     this.body.rotation.y = s.facing + twist;
+    // Forward pitch while running. Body euler order is 'YXZ' (set in
+    // _buildModel), so rotation.x pitches in the body's local frame —
+    // leaning into the direction of travel, not into world +Z. Smoothed
+    // toward the target so a mid-march gait toggle eases instead of pops.
+    this._updateRunLean(s, deltaSeconds);
+    this.body.rotation.x = this._runLean;
     // Riderless mounts have a null weapon (see SoldierModelComposer's
     // riderless branch). Skip the yaw reset for them.
     if (this.weapon) this.weapon.rotation.y = 0;
@@ -444,7 +633,7 @@ export class SoldierView {
   // Wound / death dimming (and the thrall hue shift) through SHARED
   // materials. Only touches the meshes when the quantised step or the
   // thrall flag actually changes, so a stable soldier costs two compares.
-  _applyBodyTint(s, hpRatio, deathDim) {
+_applyBodyTint(s, hpRatio, deathDim) {
     if (this._bodyMeshes.length === 0) return;
     const thrall = !!(s.isThrall && !s.isRiderlessMount);
     const level = quantizeTint((0.4 + 0.6 * hpRatio) * deathDim);
@@ -452,9 +641,28 @@ export class SoldierView {
     this._bodyTintLevel = level;
     this._bodyTintThrall = thrall;
 
+    // Torso (and legs — they share the torso template).
     const base = thrall ? this._thrallBaseColor : this._baseColor;
     const mat = getTintedMaterial(this._bodyTemplate, base, level);
     for (const mesh of this._bodyMeshes) mesh.material = mat;
+
+    // Head (skin). Only present on the human blob body — see
+    // BlobBodyBuilder. The base colour is the per-soldier random skin
+    // tone; the tint cache shares material instances across soldiers at
+    // the same (skin tone, level) pair.
+    if (this._skinMeshes.length > 0 && this._skinTemplate) {
+      const skinBase = thrall ? this._thrallSkinBaseColor : this._skinBaseColor;
+      const skinMat = getTintedMaterial(this._skinTemplate, skinBase, level);
+      for (const mesh of this._skinMeshes) mesh.material = skinMat;
+    }
+
+    // Hair. Same treatment as skin — separate tint cache entry per
+    // (hair tone, level) pair.
+    if (this._hairMeshes.length > 0 && this._hairTemplate) {
+      const hairBase = thrall ? this._thrallHairBaseColor : this._hairBaseColor;
+      const hairMat = getTintedMaterial(this._hairTemplate, hairBase, level);
+      for (const mesh of this._hairMeshes) mesh.material = hairMat;
+    }
   }
 
   // Shield damage dimming through shared materials.
@@ -491,7 +699,26 @@ export class SoldierView {
     if (this._walkSpeed < 0.01) this._walkSpeed = 0;
   }
 
-  // Walk cycle. When the composer produced pose geometries (every foot
+// Ramps the forward torso lean toward its target for this frame.
+  // Target is RUN_FORWARD_LEAN_RAD while running, 0 otherwise; the
+  // exponential smoothing is frame-rate independent enough for a
+  // purely cosmetic pose (a slight overshoot or undershoot on a very
+  // low-FPS frame is invisible). A dead or knocked-down soldier
+  // never leans — the corpse rotation would combine with it and
+  // produce a weird compound pose.
+  _updateRunLean(s, deltaSeconds) {
+    let target = 0;
+    if (s.gaitRunning && s.state !== 'dead'
+        && s.state !== 'knockedDown'
+        && s.airborneTicksLeft <= 0) {
+      target = RUN_FORWARD_LEAN_RAD;
+    }
+    const blend = Math.min(1, RUN_LEAN_SMOOTHING * (deltaSeconds / 0.016));
+    this._runLean += (target - this._runLean) * blend;
+    if (Math.abs(this._runLean) < 0.001) this._runLean = 0;
+  }
+
+// Walk cycle. When the composer produced pose geometries (every foot
   // soldier), this is a single geometry swap on the merged leg mesh — no
   // per-pivot rotation, one draw call per soldier whether idle or walking.
   //
@@ -586,19 +813,39 @@ export class SoldierView {
     // did not change which geometry was displayed. The rest pose baked
     // at index 0 is the fix — it is the pose the eye expects a soldier
     // to settle into when it halts.
+    // Pick the walk or run pose array. A running soldier uses the wider
+    // baked amplitude (RUN_LEG_SWING_RAD / RUN_KNEE_SWING_RAD), so the
+    // same physical leg cycle reads as a real stride instead of "walking
+    // faster". Falls back to walk poses when the run array is absent
+    // (older models, mounted units, ultra tier).
+    const useRun = s.gaitRunning === true &&
+      this._staticLegsRunPoseGeometries !== null;
+    const poseGeometries = useRun
+      ? this._staticLegsRunPoseGeometries
+      : this._staticLegsPoseGeometries;
+    const poseCount = useRun
+      ? this._staticLegsRunPoseCount
+      : this._staticLegsPoseCount;
+
     let poseIdx;
-    if (this._walkAmplitude < WALK_IDLE_EPSILON) {
+    if (this._walkAmplitude < WALK_IDLE_EPSILON || poseCount === 0) {
       poseIdx = 0;
     } else {
       const phaseNorm = ((this._walkPhase / (Math.PI * 2)) % 1 + 1) % 1;
       // +1: skip past the rest pose at index 0 to the walk poses.
       // The final % guards against a phase of exactly 1.0 landing one
       // past the array end after the initial modulo.
-      poseIdx = 1 + (Math.floor(phaseNorm * this._staticLegsPoseCount) %
-        this._staticLegsPoseCount);
+      poseIdx = 1 + (Math.floor(phaseNorm * poseCount) % poseCount);
     }
 
-    this._applyLegPose(poseIdx);
+    // Kneeling megabow carrier: the kneel poses sit after the walk poses in
+    // both pose arrays.
+    const kneelIdx = this._kneelPoseIndex();
+    if (kneelIdx >= 0 && poseGeometries) {
+      this._applyLegPose(kneelIdx, poseGeometries);
+      return;
+    }
+    this._applyLegPose(poseIdx, poseGeometries);
   }
 
   // Writes `poseIdx` to the merged leg mesh. Cached so a soldier whose
@@ -606,12 +853,14 @@ export class SoldierView {
   // frame. When pose geometries are absent (mounted, ultra tier), this is
   // a no-op — those soldiers either have no merged leg mesh at all or
   // use the animated pivots directly.
-  _applyLegPose(poseIdx) {
-    if (!this._staticLegsMesh || !this._staticLegsPoseGeometries) return;
-    if (poseIdx === this._lastLegPoseIdx) return;
+  _applyLegPose(poseIdx, poseGeometries) {
+    if (!this._staticLegsMesh || !poseGeometries) return;
+    if (poseIdx === this._lastLegPoseIdx &&
+        poseGeometries === this._lastLegPoseGeometries) return;
     this._lastLegPoseIdx = poseIdx;
+    this._lastLegPoseGeometries = poseGeometries;
     this._staticLegsMesh.userData.poseIdx = poseIdx;
-    this._staticLegsMesh.geometry = this._staticLegsPoseGeometries[poseIdx];
+    this._staticLegsMesh.geometry = poseGeometries[poseIdx];
   }
 
   _applyHorseWalkCycle(s, deltaSeconds) {
@@ -669,7 +918,7 @@ export class SoldierView {
     return Math.sin(Math.PI * t) * (s.throwPeakHeight || 0);
   }
 
-  _applyAttackAnim(deltaSeconds) {
+_applyAttackAnim(deltaSeconds) {
     if (this._isBow || !this.weapon) return;
 
     if (GraphicsMode.disableAnimations) {
@@ -689,6 +938,18 @@ export class SoldierView {
 
     this.attackAnimTimeLeft = Math.max(0, this.attackAnimTimeLeft - deltaSeconds);
 
+    if (this._isShortSpear) {
+      const p = 1 - this.attackAnimTimeLeft / SHORT_SPEAR_THRUST_DURATION;
+      this._applyShortSpearAttack(p);
+      return;
+    }
+
+    if (this._isSpearRaised()) {
+      const p = 1 - this.attackAnimTimeLeft / SPEAR_SWING_DURATION;
+      this._applyRaisedSpearSwing(p);
+      return;
+    }
+
     if (this._isSword && this.weaponArm) {
       const p = 1 - this.attackAnimTimeLeft / SWORD_ATTACK_ANIM_DURATION;
       this._applySwordSlash(p);
@@ -698,6 +959,60 @@ export class SoldierView {
     const t = this.attackAnimTimeLeft / ATTACK_ANIM_DURATION;
     const thrust = Math.sin((1 - t) * Math.PI) * 0.35;
     this._applyWeaponThrust(thrust);
+  }
+
+
+
+  // True when the soldier is a spearman whose spear is up. Reuses the
+  // sim-side check so the animation and the damage penalty agree on the
+  // same threshold. Guards against a null weapon (riderless mount) and a
+  // beast mount (whose weaponType is inherited from its source but whose
+  // scythe is not a spear that can be raised into a swing).
+  //
+  // Short spear opts out entirely: its visual stance is fixed diagonal,
+  // so the raised-spear CHOP animation never applies. The unit may still
+  // brace mechanically in the sim if its UnitType declares spear-wall
+  // behaviour — that is a data decision outside this class.
+  _isSpearRaised() {
+    if (!this.weapon) return false;
+    if (this._isShortSpear) return false;
+    // Beast-mounted and hound-mounted units do not raise a spear into a
+    // chop swing. The hound is riderless and its `bite` weapon never
+    // reaches SpearWall, but the explicit `hound` term keeps the contract
+    // clean for any future hound-mounted polearm unit.
+    const mountType = this.soldier.unitTypeDef.mountType;
+    if (mountType === 'beast' || mountType === 'hound') return false;
+    return SpearWall.isSpearRaised(this.soldier);
+  }
+
+  _applyRaisedSpearSwing(p) {
+    // Overhead chop from the raised position. The weapon's base pitch was
+    // already set this frame by _applyWeaponPitch (from spearRaiseAmount);
+    // the swing delta is ADDED on top, so the arc starts wherever the
+    // spear is held:
+    //   p = 0.00  windup starts, delta 0 (spear at raised pitch)
+    //   p = 0.20  windup peak, delta -WINDUP (spear further up)
+    //   p = 0.55  strike end,  delta +DOWN (spear past horizontal, tip down)
+    //   p = 1.00  recovery complete, delta 0 (back to raised pitch)
+    let delta;
+    if (p < SPEAR_SWING_STRIKE_START) {
+      const u = p / SPEAR_SWING_STRIKE_START;
+      delta = -SPEAR_SWING_WINDUP * u;
+    } else if (p < SPEAR_SWING_STRIKE_END) {
+      const u = (p - SPEAR_SWING_STRIKE_START) /
+        (SPEAR_SWING_STRIKE_END - SPEAR_SWING_STRIKE_START);
+      // Ease-in on the strike so it accelerates into the chop.
+      const eased = u * u;
+      delta = -SPEAR_SWING_WINDUP +
+        (SPEAR_SWING_WINDUP + SPEAR_SWING_DOWN) * eased;
+    } else {
+      const u = (p - SPEAR_SWING_STRIKE_END) /
+        (1 - SPEAR_SWING_STRIKE_END);
+      // Ease-out recovery back to the raised pitch pose.
+      const eased = 1 - (1 - u) * (1 - u);
+      delta = SPEAR_SWING_DOWN * (1 - eased);
+    }
+    this.weapon.rotation.x += delta;
   }
 
   _applySwordSlash(p) {
@@ -720,6 +1035,24 @@ export class SoldierView {
     this.weapon.rotation.x = wristRot;
   }
 
+  // Death side for a hound — left flank (rotZ = -π/2) or right
+  // (rotZ = +π/2). Deterministic per soldier so a fallen hound does not
+  // flip sides on a camera scroll or a paused frame. Uses a hash of the
+  // soldier id so a unit of dying hounds spreads both ways instead of
+  // collapsing in lockstep.
+  _houndDeathSide() {
+    const id = this.soldier.id;
+    let n = 0;
+    if (typeof id === 'number') {
+      n = id;
+    } else if (typeof id === 'string') {
+      for (let i = 0; i < id.length; i++) {
+        n = ((n * 31) + id.charCodeAt(i)) | 0;
+      }
+    }
+    return (n & 1) ? 1 : -1;
+  }
+
   _computeSwordTwist() {
     if (!this._isSword || this.attackAnimTimeLeft <= 0) return 0;
     const p = 1 - this.attackAnimTimeLeft / SWORD_ATTACK_ANIM_DURATION;
@@ -737,7 +1070,7 @@ export class SoldierView {
     this.weapon.position.set(basePos.x, basePos.y, basePos.z + thrustAmount);
   }
 
-  _applyWeaponPitch(s) {
+_applyWeaponPitch(s) {
     if (!this.weapon) return;
     if (this._isBow) {
       if (!this._aimTarget) {
@@ -752,6 +1085,14 @@ export class SoldierView {
       } else {
         this.weapon.rotation.x = -aim.pitch;
       }
+      return;
+    }
+
+    // Short spear: fixed diagonal-up stance, never modulated by
+    // spearRaiseAmount. The attack animation layers its own rotation
+    // delta on top of this base value (see _applyShortSpearAttack).
+    if (this._isShortSpear) {
+      this.weapon.rotation.x = SHORT_SPEAR_IDLE_RAD;
       return;
     }
 
@@ -779,6 +1120,16 @@ export class SoldierView {
 
   _applyBowDraw(s) {
     if (!this._isBow) return;
+
+    // Megabow carriers animate their weapon with a different driver —
+    // three prods flexing + a windlass + a single shared nock. The
+    // standard layoutBowString path only knows about a single bow's
+    // two limb pivots, so route crew carriers elsewhere before that
+    // method touches userData it does not have.
+    if (this._isMegabowCarrier) {
+      this._applyMegabowDraw(s);
+      return;
+    }
 
     if (GraphicsMode.disableAnimations) {
       layoutBowString(this.weapon, 0, 0);
@@ -829,6 +1180,119 @@ export class SoldierView {
     }
   }
 
+  // Megabow draw driver — the crew CARRIER's per-frame animation.
+  //
+  // Drives the whole mechanical draw cycle (three prods flexing, three
+  // strings tightening into a V bundle, winch winding, bolt sliding
+  // back with the nock) from a single drawProgress in [0, 1]. See
+  // layoutMegabowDraw in MegabowBuilder.js for the model contract.
+  //
+  // TRIGGER SOURCE — READ THIS IF THE ANIMATION DOES NOT PLAY
+  // The sim-side fire event is emitted for the SHOOTER (`attackerId`
+  // in the ranged fire event), not the carrier. There are two ways the
+  // carrier's draw progress can be derived:
+  //
+  //   A) The crew system mirrors the shooter's state onto the carrier
+  //      (both enter 'ranged', both share the cooldown countdown).
+  //      This is the design of every crew-served weapon in real-time
+  //      games, because otherwise the carrier would walk toward its
+  //      formation slot during the fire cycle while the shooter stood
+  //      still aiming — visibly broken. If (A) holds, the code below
+  //      drives the animation correctly out of the box.
+  //
+  //   B) The crew system only marks the shooter, leaving the carrier
+  //      in 'idle' / 'marching' the whole battle. If (B) is the actual
+  //      behaviour, this method returns targetProgress = 0 always and
+  //      the animation silently fails. The fix is to add a
+  //      triggerMegabowShot() method here and call it from
+  //      BattleRenderer._applyRangedEvent when the attacker is a crew
+  //      shooter (look up the paired carrier via CrewPairing), then
+  //      drive drawProgress from a wall-clock countdown instead of
+  //      soldier state.
+  //
+  // The `s.bowDrawMaxTicks` field is the cooldown value stamped on the
+  // SHOOTER at fire time (see RangedCombatSystem). Its presence on the
+  // carrier is therefore the clearest indicator of which model (A or B)
+  // applies. If bowDrawMaxTicks is undefined on carriers, fall back to
+  // the unit type's declared rangedCooldownTicks (90 for the
+  // megabowman) so at least the draw rate matches the intended cadence
+  // even if the animation only plays when the carrier happens to be
+  // in 'ranged' state.
+// Megabow carrier driver. Three layers, all fed by the sim:
+  //
+  //   DEPLOY  When CrewFireControl plants the carrier (s.crewPlanted) the
+  //           carrier kneels (leg pose + rider drop) and the hinge tips the
+  //           bow forward over the head, sliding it through the carriage.
+  //           When released everything runs backwards: the bow hangs
+  //           upright on the back again.
+  //   AIM     Pitch / yaw come from _aimTarget (setAimTarget). Without an
+  //           aim target a default pitch is used.
+  //   DRAW    attackCooldownTicks / bowDrawMaxTicks stamped by
+  //           RangedCombatSystem._stampHolder drive the string draw, but it
+  //           is only visible once the bow is mostly deployed.
+  //
+  // s.crewPlanted is undefined on snapshot soldiers (multiplayer guest);
+  // then the 'ranged' state is used as the planted signal.
+  _applyMegabowDraw(s) {
+    if (!this.weapon || !this.weaponArm) return;
+
+    const animated = !GraphicsMode.disableAnimations;
+    const planted = s.crewPlanted !== undefined
+      ? s.crewPlanted === true
+      : s.state === 'ranged';
+    const wantDeploy = animated && planted && s.state !== 'dead';
+
+    if (animated) {
+      const step = wantDeploy ? MEGABOW_DEPLOY_STEP : -MEGABOW_RETRACT_STEP;
+      this._megabowDeploy = Math.max(0, Math.min(1, this._megabowDeploy + step));
+    } else {
+      this._megabowDeploy = 0;
+      this._bowDrawProgress = 0;
+    }
+    const deploy = this._megabowDeploy;
+
+    // --- aim ---
+    let pitchGoal = MEGABOW_DEFAULT_PITCH;
+    let yawGoal = 0;
+    if (this._aimTarget) {
+      const aim = ArrowArc.computeAim(s.pos.x, s.pos.z, this._aimTarget.x, this._aimTarget.z);
+      pitchGoal = Math.max(MEGABOW_MIN_PITCH, Math.min(MEGABOW_MAX_PITCH, aim.pitch));
+      let yaw = Math.atan2(this._aimTarget.x - s.pos.x, this._aimTarget.z - s.pos.z) - s.facing;
+      yaw = ((yaw + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+      yawGoal = Math.max(-MEGABOW_MAX_YAW, Math.min(MEGABOW_MAX_YAW, yaw));
+    }
+    this._megabowPitch += (pitchGoal - this._megabowPitch) * MEGABOW_AIM_SMOOTHING;
+    this._megabowYaw += (yawGoal - this._megabowYaw) * MEGABOW_AIM_SMOOTHING;
+
+    // --- draw ---
+    const maxCooldown = s.bowDrawMaxTicks
+      || this.soldier.unitTypeDef.rangedCooldownTicks
+      || CombatConfig.rangedCooldownTicks
+      || 1;
+    let targetProgress = 0;
+    if (animated && s.state === 'ranged' && s.attackCooldownTicks > 0) {
+      const cooldownLeft = Math.min(s.attackCooldownTicks, maxCooldown);
+      targetProgress = 1 - cooldownLeft / maxCooldown;
+    }
+    this._bowDrawProgress += (targetProgress - this._bowDrawProgress) * BOW_DRAW_SMOOTHING;
+    if (this._bowDrawProgress < 0.001) this._bowDrawProgress = 0;
+
+    const t = Math.max(0, Math.min(1, (deploy - MEGABOW_DRAW_FROM) / (1 - MEGABOW_DRAW_FROM)));
+    const drawVisible = t * t * (3 - 2 * t);
+
+    // The bow's own frame is rotated by the harness mount; _applyWeaponPitch
+    // may have written a bow pitch here, so reset it.
+    this.weapon.rotation.x = 0;
+    layoutMegabowDeploy(this.weapon, this.weaponArm, deploy, this._megabowPitch, this._megabowYaw);
+    layoutMegabowDraw(this.weapon, this._bowDrawProgress * drawVisible);
+
+    // --- kneel drop: lowers the whole rider so the rear knee touches the ground ---
+    const hip = this._legLeftPivot ? this._legLeftPivot.position.y : 0.21;
+    const thigh = this._legLeftKnee ? -this._legLeftKnee.position.y : 0.105;
+    const drop = Math.max(0, hip - thigh * Math.cos(KNEEL_REAR_HIP_RAD));
+    this.rider.position.y = -drop * deploy;
+  }
+
   _applyBlockFlash(deltaSeconds) {
     if (GraphicsMode.disableAnimations) {
       this.blockFlashTimeLeft = 0;
@@ -845,7 +1309,42 @@ export class SoldierView {
     this.shield.scale.set(bump, bump, 1);
   }
 
+// Index into the leg pose arrays for the current deployment, or -1 when
+  // the legs should follow the normal walk cycle. Kneel poses sit after the
+  // walk poses: poseCount + 1 + stage (see SoldierModelComposer).
+  _kneelPoseIndex() {
+    const d = this._megabowDeploy;
+    if (!(d > MEGABOW_CROUCH_FROM)) return -1;
+    if (!this._staticLegsPoseGeometries || !(this._staticLegsPoseCount > 0)) return -1;
+    const stage = d >= MEGABOW_KNEEL_FROM ? KNEEL_STAGE_KNEEL : KNEEL_STAGE_CROUCH;
+    return this._staticLegsPoseCount + 1 + stage;
+  }
+
+// Short spear thrust. The weapon's idle stance is a fixed diagonal-
+  // up angle (SHORT_SPEAR_IDLE_RAD, set every frame by _applyWeaponPitch).
+  // The attack adds a rotation delta that cancels that angle — bringing
+  // the weapon to horizontal — plus a small forward positional lunge.
+  // Both peak at the middle of the animation and return to zero, so the
+  // spear snaps back to its fixed diagonal stance the instant the attack
+  // ends. There is no windup or recovery pose beyond this curve: the
+  // short spear reads as a quick forward jab from a ready diagonal, not
+  // as a raised-spear chop.
+  //
+  // p is the attack progress in [0, 1]. sin(p * π) is 0 at both ends and
+  // 1 at the midpoint, giving a smooth out-and-back arc with no
+  // discontinuity between the resting diagonal stance and the thrust.
+  _applyShortSpearAttack(p) {
+    const curve = Math.sin(p * Math.PI);
+    // Cancel the idle diagonal and reach horizontal at the peak. Idle
+    // is negative (tip up), so the delta is positive.
+    this.weapon.rotation.x += -SHORT_SPEAR_IDLE_RAD * curve;
+    // Small forward lunge; the spear also gets visual reach from the
+    // rotation alone, so the positional thrust stays modest.
+    this._applyWeaponThrust(curve * 0.30);
+  }
+
   dispose(scene) {
     scene.remove(this.group);
   }
 }
+

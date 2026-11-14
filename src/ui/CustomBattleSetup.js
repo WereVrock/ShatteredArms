@@ -41,6 +41,8 @@ import { buildPreviewUnit, previewPower } from '../campaign/UnitPreview.js';
 import { AITierConfig } from '../config/AITierConfig.js';
 import { AITierPreference } from '../config/AITierPreference.js';
 import { AITierPicker } from './AITierPicker.js';
+import { Biomes } from '../config/BiomeConfig.js';
+import { RuinTypes } from '../config/RuinConfig.js';
 import { baseSizeFor, stepSoldierCount } from '../scenarios/RosterScaling.js';
 import { buildRosterUnitTile } from './RosterUnitTile.js';
 import { captureScroll, restoreScroll } from './ScrollMemory.js';
@@ -88,6 +90,16 @@ export class CustomBattleSetup {
     // An array because both team headers can carry one picker (the
     // player team carries none).
     this._tierPickers = [];
+
+    // Terrain biome for this battle. 'auto' = hybrid mosaic; any other
+    // id forces that single biome everywhere. Passed to onStart as the
+    // 5th argument.
+    this.biome = 'auto';
+
+    // Ruin archetype. Only matters when biome === 'ruins'. 'random' picks
+    // one from the seed at generation time. Passed to onStart as the 6th
+    // argument.
+    this.ruinType = 'random';
   }
 
   // `initialState` is optional. When supplied and well-formed, its two
@@ -130,11 +142,29 @@ export class CustomBattleSetup {
       const redTier  = (persisted && typeof persisted.red  === 'string'
         && AITierConfig[persisted.red])  ? persisted.red  : defaultTier;
       this.aiTierByTeamId = { blue: blueTier, red: redTier };
+
+      // Terrain biome. Older saves predate this field and fall back to
+      // 'auto'. An unrecognised id falls back too, rather than passing a
+      // stale value through to the generator.
+      this.biome = (typeof initialState.biome === 'string'
+        && (initialState.biome === 'auto' || Biomes[initialState.biome]))
+        ? initialState.biome
+        : 'auto';
+
+      // Ruin archetype. 'random' or any id from RuinTypes. Unknown ids
+      // (from a future build) fall back to 'random'.
+      const knownRuinIds = RuinTypes.map(t => t.id);
+      this.ruinType = (typeof initialState.ruinType === 'string'
+        && (initialState.ruinType === 'random' || knownRuinIds.includes(initialState.ruinType)))
+        ? initialState.ruinType
+        : 'random';
     } else {
       this.blueRoster = [];
       this.redRoster = [];
       this.playerTeamId = 'blue';
       this.aiTierByTeamId = { blue: defaultTier, red: defaultTier };
+      this.biome = 'auto';
+      this.ruinType = 'random';
     }
     this.skeletonMode = false;
     this._render();
@@ -186,6 +216,8 @@ export class CustomBattleSetup {
     // (nearest the camera's default orientation). The setup screen reads
     // the same way the fight will when it opens.
     panel.appendChild(this._buildTeamStrip('red', this.redRoster, 'Red'));
+    panel.appendChild(this._buildBiomeRow());
+    panel.appendChild(this._buildRuinRow());
     panel.appendChild(this._buildPalette());
     panel.appendChild(this._buildSkeletonRow());
     panel.appendChild(this._buildTeamStrip('blue', this.blueRoster, 'Blue'));
@@ -452,6 +484,125 @@ export class CustomBattleSetup {
     return card;
   }
 
+  // Terrain biome picker. 'auto' leaves the generator to build a hybrid
+  // mosaic; any other id forces that biome on the whole map. Purely UI:
+  // the selected value is forwarded to onStart as the 5th argument, and
+  // main.js is the one that pushes it through ActiveCustomBattle and
+  // setupBattleTerrain.
+  _buildBiomeRow() {
+    const row = document.createElement('label');
+    row.className = 'custom-biome-row';
+
+    const lbl = document.createElement('span');
+    lbl.textContent = 'Terrain biome:';
+    lbl.style.marginRight = '8px';
+    row.appendChild(lbl);
+
+    const sel = document.createElement('select');
+    sel.style.cssText = [
+      'font-family:inherit',
+      'font-size:12px',
+      'padding:3px 8px',
+      'border-radius:4px',
+      'border:1px solid #3a4a5e',
+      'background:#1e2430',
+      'color:#cde'
+    ].join(';');
+
+    const auto = document.createElement('option');
+    auto.value = 'auto';
+    auto.textContent = 'Auto (hybrid mosaic)';
+    sel.appendChild(auto);
+
+    // Alphabetical for predictability — the option order should not
+    // change between sessions or builds.
+    const ids = Object.keys(Biomes).sort();
+    for (const id of ids) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = Biomes[id].displayName || id;
+      sel.appendChild(opt);
+    }
+
+    sel.value = this.biome;
+    sel.addEventListener('change', () => {
+      this.biome = sel.value;
+      // Re-render so the ruin-type row reflects the new biome
+      // (City Ruins disables the picker). Scroll memory restores the
+      // panel state, so nothing jumps.
+      this._render();
+    });
+    row.appendChild(sel);
+    return row;
+  }
+
+  // Ruin archetype picker. Rendered next to the biome picker. Only matters
+  // when the chosen biome is 'ruins' (or another biome that contains ruins
+  // patches in auto mode), but it is always visible so the player can set
+  // it up before switching biome. 'Random' picks one from the seed at
+  // generation time. Purely UI: forwarded to onStart as the 6th argument.
+  _buildRuinRow() {
+    const row = document.createElement('label');
+    row.className = 'custom-biome-row';
+
+    const lbl = document.createElement('span');
+    lbl.textContent = 'Ruin type:';
+    lbl.style.marginRight = '8px';
+    row.appendChild(lbl);
+
+    const sel = document.createElement('select');
+    sel.style.cssText = [
+      'font-family:inherit',
+      'font-size:12px',
+      'padding:3px 8px',
+      'border-radius:4px',
+      'border:1px solid #3a4a5e',
+      'background:#1e2430',
+      'color:#cde'
+    ].join(';');
+
+    // City Ruins biome forces a mix of every ruin type (that is what a
+    // ruined city IS — temples, fortresses, tombs all in one place), so
+    // the picker is disabled and shows a fixed 'mixed' entry. Every
+    // other biome (and 'auto') honours the player's pick.
+    const isCityRuins = this.biome === 'ruins';
+
+    if (isCityRuins) {
+      const mixed = document.createElement('option');
+      mixed.value = 'mixed';
+      mixed.textContent = 'Mixed (all types)';
+      sel.appendChild(mixed);
+      sel.value = 'mixed';
+      sel.disabled = true;
+      sel.style.opacity = '0.7';
+      sel.style.cursor = 'not-allowed';
+    } else {
+      const auto = document.createElement('option');
+      auto.value = 'random';
+      auto.textContent = 'Random';
+      sel.appendChild(auto);
+
+      for (const t of RuinTypes) {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.displayName;
+        sel.appendChild(opt);
+      }
+
+      sel.value = this.ruinType;
+      sel.addEventListener('change', () => { this.ruinType = sel.value; });
+    }
+    row.appendChild(sel);
+
+    const hint = document.createElement('span');
+    hint.textContent = isCityRuins
+      ? '  (City Ruins mixes all types)'
+      : '  (used by City Ruins and every other biome)';
+    hint.style.cssText = 'font-size:11px;color:#667;font-style:italic;';
+    row.appendChild(hint);
+    return row;
+  }
+
   _buildSkeletonRow() {
     const row = document.createElement('label');
     row.className = 'custom-skeleton-row';
@@ -493,11 +644,17 @@ export class CustomBattleSetup {
       // Third arg: 'blue' | 'red' | null. null means both teams AI.
       // Fourth arg: per-team AI difficulty, passed as a shallow copy so
       // downstream code cannot mutate this screen's state.
+      // City Ruins forces 'mixed' regardless of the (disabled) picker
+      // value, so a stale `this.ruinType` from a previous biome cannot
+      // sneak in.
+      const finalRuinType = (this.biome === 'ruins') ? 'mixed' : this.ruinType;
       this.onStart(
         this.blueRoster.slice(),
         this.redRoster.slice(),
         this.playerTeamId,
-        { ...this.aiTierByTeamId }
+        { ...this.aiTierByTeamId },
+        this.biome,
+        finalRuinType
       );
     });
     actions.appendChild(startBtn);
@@ -654,6 +811,8 @@ export class CustomBattleSetup {
     this.blueRoster = [];
     this.redRoster = [];
     this.skeletonMode = false;
+    this.biome = 'auto';
+    this.ruinType = 'random';
     const defaultTier = AITierPreference.get();
     this.aiTierByTeamId = { blue: defaultTier, red: defaultTier };
     if (this.onReset) {
@@ -661,7 +820,9 @@ export class CustomBattleSetup {
         this.blueRoster.slice(),
         this.redRoster.slice(),
         this.playerTeamId,
-        { ...this.aiTierByTeamId }
+        { ...this.aiTierByTeamId },
+        this.biome,
+        this.ruinType
       );
     }
     this._render();

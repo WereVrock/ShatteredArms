@@ -39,6 +39,11 @@ function parsePayload(raw) {
       && Array.isArray(parsed.customRosters.redRoster);
     if (!hasScenario && !hasCustom) return null;
 
+    // customRosters may also carry `biome` and `ruinType` alongside the
+    // rosters — passed straight through to buildCustomScenario on
+    // resume. Both are optional; older payloads predate them and the
+    // scenario builder falls back to 'auto' / 'random'.
+
     return parsed;
   } catch (e) {
     return null;

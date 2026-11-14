@@ -59,6 +59,12 @@ export class TargetingSystem {
 
     for (const soldier of allSoldiers) {
       if (!soldier.isAlive()) continue;
+      // Beasts (goblin hounds) are driven by HoundSystem.
+      if (soldier.unitTypeDef.beast === true) continue;
+      // Charging chargob beasts run a fixed course (ChargobSystem).
+      if (soldier.chargeActive === true) continue;
+      // Chargob handlers stay out of the fight while a beast stands in the line.
+      if (soldier.unitTypeDef.chargob !== undefined && this._chargobHolds(soldier, unitsById)) continue;
 
       soldier.rallyTargetId = null;
 
@@ -278,7 +284,7 @@ export class TargetingSystem {
           soldier.state = 'marching';
           continue;
         }
-        if (dist <= CombatConfig.rangedRange) {
+        if (dist <= getRangedRange(soldier.unitTypeDef)) {
           soldier.state = 'ranged';
         } else {
           soldier.state = 'marching';
@@ -307,7 +313,29 @@ export class TargetingSystem {
     }
   }
 
+  // True while the soldier's chargob unit still has a beast in its line
+  // (unit.chargobHold, set by ChargobSystem). The handler then neither
+  // targets nor fights: it stays idle and follows its slot. Routing,
+  // staggered and knocked-down handlers keep their state.
+  _chargobHolds(soldier, unitsById) {
+    const unit = unitsById.get(soldier.unitId);
+    if (!unit || unit.chargobHold !== true) return false;
+    soldier.rallyTargetId = null;
+    const st = soldier.state;
+    if (st === 'routing' || st === 'shattered') {
+      soldier.targetId = null;
+      return true;
+    }
+    if (st === 'staggered' || st === 'knockedDown') return true;
+    soldier.targetId = null;
+    soldier.isImpetuous = false;
+    soldier.state = 'idle';
+    return true;
+  }
+
   _rollImpetuous(soldier) {
+    // Chargob beasts only charge through the chargob rules.
+    if (soldier.unitTypeDef.chargobBeast === true) return false;
     const disciplineKey = soldier.unitTypeDef.discipline || 'normal';
     const cfg = CombatConfig.discipline[disciplineKey] || CombatConfig.discipline.normal;
     return Math.random() < cfg.impetuousChance;
@@ -321,6 +349,8 @@ export class TargetingSystem {
     const map = new Map();
     for (const s of allSoldiers) {
       if (!s.isAlive()) continue;
+      // A hound's fight is not a rally point for its handlers.
+      if (s.unitTypeDef.beast === true) continue;
       if (s.state !== 'engaged' && s.state !== 'staggered') continue;
       if (!s.targetId) continue;
       const t = byId.get(s.targetId);

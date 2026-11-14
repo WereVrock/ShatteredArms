@@ -17,6 +17,7 @@
 
 import { CampaignConfig } from './CampaignConfig.js';
 import { UNIT_LEVEL_THRESHOLDS, unitLevelForXp } from './UnitXp.js';
+import { HoundRoster } from './HoundRoster.js';
 
 function hasProgress(entry) {
   return entry.xp !== undefined || entry.level !== undefined;
@@ -60,6 +61,7 @@ export function mergeInto(target, source) {
   const progress = hasProgress(target) || hasProgress(source);
   const xp = progress ? mergedXp(target, source) : null;
 
+  if (HoundRoster.hasHounds(target)) target.houndCounts = HoundRoster.merged(target, source);
   target.aliveCount += source.aliveCount;
   target.maxCount += source.maxCount;
 

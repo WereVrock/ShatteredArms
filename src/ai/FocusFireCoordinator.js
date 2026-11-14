@@ -16,6 +16,7 @@ import { AIConfig } from '../config/AIConfig.js';
 import { getRangedRange } from '../config/UnitClasses.js';
 import { WeightedSelect } from './WeightedSelect.js';
 import { unitTypeOf } from './behaviorUtils.js';
+import { ArrowLanes } from './ArrowLanes.js';
 
 export class FocusFireCoordinator {
   // archerUnits: this team's ranged units (not defeated).
@@ -23,7 +24,7 @@ export class FocusFireCoordinator {
   // postureProfile: optional C3 posture profile (AIConfig.posture.press /
   // .hold). Defaults to .hold's behavior (wounded-only tier 1 preference,
   // matching pre-C3 output) when omitted, so existing callers are unaffected.
-  static assign(archerUnits, enemyUnits, objectiveUnit, postureProfile, tierCfg) {
+  static assign(archerUnits, enemyUnits, objectiveUnit, postureProfile, tierCfg, terrain) {
     if (archerUnits.length === 0 || enemyUnits.length === 0) return;
 
     let target = null;
@@ -41,11 +42,13 @@ export class FocusFireCoordinator {
         const dz = ec.z - ac.z;
         return dx * dx + dz * dz <= aRange * aRange;
       });
-      if (reachable) target = objectiveUnit;
+      if (reachable && this._hasFireLane(archerUnits, objectiveUnit, terrain)) {
+        target = objectiveUnit;
+      }
     }
 
     if (!target) {
-      target = this._pickFocusTarget(archerUnits, enemyUnits, postureProfile, tierCfg);
+      target = this._pickFocusTarget(archerUnits, enemyUnits, postureProfile, tierCfg, terrain);
     }
     if (!target) return;
 
@@ -74,7 +77,7 @@ export class FocusFireCoordinator {
     }
   }
 
-  static _pickFocusTarget(archerUnits, enemyUnits, postureProfile, tierCfg) {
+  static _pickFocusTarget(archerUnits, enemyUnits, postureProfile, tierCfg, terrain) {
     const alive = enemyUnits.filter(u => !u.isDefeated());
     if (alive.length === 0) return null;
 
@@ -97,7 +100,16 @@ export class FocusFireCoordinator {
         return dx * dx + dz * dz <= aRange * aRange;
       });
     });
-    const pool = reachable.length > 0 ? reachable : alive;
+    let pool = reachable.length > 0 ? reachable : alive;
+
+    // Terrain: of the enemies in range, prefer ones some in-range archer has a
+    // clear arrow lane to (no ridge, wall or rock in the way). If none has a
+    // lane (or there is no terrain), keep the range-only pool so focus fire
+    // never goes silent.
+    if (terrain) {
+      const open = pool.filter(e => this._hasFireLane(archerUnits, e, terrain));
+      if (open.length > 0) pool = open;
+    }
 
     // Tier handicap: some tiers prefer the simplest possible target
     // picker — nearest by archer centroid, no wounded/unshielded
@@ -139,6 +151,23 @@ export class FocusFireCoordinator {
       : pool;
 
     return this._weightedNearestToArcherCentroid(widenedPool, archerUnits, wounded);
+  }
+
+  // True when at least one living archer unit is within its own range of the
+  // enemy unit AND has a clear arrow lane to it. Null terrain = always true.
+  static _hasFireLane(archerUnits, enemy, terrain) {
+    if (!terrain) return true;
+    const ec = enemy.getCenter();
+    for (const a of archerUnits) {
+      if (a.isDefeated()) continue;
+      const range = getRangedRange(unitTypeOf(a));
+      const ac = a.getCenter();
+      const dx = ec.x - ac.x;
+      const dz = ec.z - ac.z;
+      if (dx * dx + dz * dz > range * range) continue;
+      if (ArrowLanes.clear(terrain, ac.x, ac.z, ec.x, ec.z)) return true;
+    }
+    return false;
   }
 
   static _unshieldedOf(pool) {

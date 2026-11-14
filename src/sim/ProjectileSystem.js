@@ -47,6 +47,9 @@ export class ProjectileSystem {
     this.spatialGrid = spatialGrid;
     this.projectiles = [];
     this.events = [];
+    // Set by BattleSimulation.setTerrain. Null = flat ground (pre-
+    // elevation behaviour). See spawn() and _findCollision().
+    this.terrain = null;
     this._nextId = 1;
     // Reusable candidate buffer for the per-projectile spatial query.
     // Cleared and refilled each call; avoids one array allocation per
@@ -60,11 +63,29 @@ export class ProjectileSystem {
   // shooter per volley, each with its own randomised target point inside
   // the target unit's scatter disc.
   spawn(opts) {
-    const proj = new Projectile({ id: this._nextId++, ...opts });
+    // Ground heights under the archer and under the target point. Both 0
+    // on a flat map. Passed through so the arrow's parabola is anchored to
+    // the local terrain instead of a fixed world Y — otherwise an arrow
+    // fired from a hilltop would spawn several units below the surface
+    // and be killed by the ground check on its very first tick.
+    const t = this.terrain;
+    const fromGroundY = (t && t.hasElevation)
+      ? t.heightAt(opts.fromX, opts.fromZ) : 0;
+    const toGroundY = (t && t.hasElevation)
+      ? t.heightAt(opts.toX, opts.toZ) : 0;
+
+    const proj = new Projectile({
+      id: this._nextId++,
+      ...opts,
+      fromGroundY,
+      toGroundY
+    });
     this.projectiles.push(proj);
     this.events.push({
       type: 'fire',
-      attackerId: opts.shooterSoldierId,
+      // The 'fire' event aims the weapon HOLDER's bow (the carrier for crew
+      // weapons, the shooter itself otherwise).
+      attackerId: opts.holderSoldierId ?? opts.shooterSoldierId,
       defenderId: null,
       fromPos: { x: opts.fromX, z: opts.fromZ },
       toPos: { x: opts.toX, z: opts.toZ }
@@ -105,6 +126,23 @@ export class ProjectileSystem {
       const hitSoldier = this._findCollision(proj, allSoldiers);
       if (hitSoldier) {
         this._resolveHit(proj, hitSoldier, byId);
+        continue;
+      }
+
+      // Ground hit: the arrow ended this tick below the terrain surface.
+      // Within one tick the parabolic Y is monotonic (rise, apex, fall),
+      // so an endpoint-under-terrain test is sufficient — the arrow
+      // crossed the surface somewhere in this segment and is gone. Soldier
+      // hits are checked FIRST above, so a defender standing at the same
+      // XZ with their body above the surface still takes the arrow before
+      // the ground does; only a clean miss into a hillside lands here.
+      if (this.terrain && this.terrain.hasElevation &&
+          proj.y < this.terrain.heightAt(proj.x, proj.z)) {
+        this.events.push({
+          type: 'arrowLanded',
+          fromPos: { x: proj.prevX, z: proj.prevZ },
+          toPos: { x: proj.x, z: proj.z }
+        });
         continue;
       }
 
@@ -189,8 +227,17 @@ export class ProjectileSystem {
       // Interpolate y linearly between prev and current. The true y is
       // parabolic, but a single tick's worth of travel is short enough
       // that the linear approximation is exact to floating-point noise.
+      // Body band is relative to the DEFENDER'S local ground height, not
+      // a fixed world band. On flat terrain gh is 0 and this is unchanged;
+      // on a hillside a defender 5 units up occupies world Y 5..6.5, and
+      // an arrow passing through at world Y 5.5 hits them as it should.
+      // gh is read here, per candidate, from the soldier's CURRENT
+      // position — an arrow that lands where the soldier used to be is a
+      // miss even if that old spot was under the arrow's Y.
       const y = proj.prevY + (proj.y - proj.prevY) * t;
-      if (y < cfg.bodyMinY || y > cfg.bodyMaxY) continue;
+      const gh = (this.terrain && this.terrain.hasElevation)
+        ? this.terrain.heightAt(soldier.pos.x, soldier.pos.z) : 0;
+      if (y < gh + cfg.bodyMinY || y > gh + cfg.bodyMaxY) continue;
 
       if (t < bestT) {
         bestT = t;

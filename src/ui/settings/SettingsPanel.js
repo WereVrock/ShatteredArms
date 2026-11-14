@@ -1,9 +1,10 @@
 // ===== SettingsPanel.js =====
-// The settings dialog. Three pages, swapped in place inside one modal shell:
-//   root      — a list of category entries (Graphics / Gameplay / UI)
+// The settings dialog. Pages swapped in place inside one modal shell:
+//   root      — the category list (Graphics / Gameplay / UI / Audio)
 //   graphics  — Scene / Quality / Soldiers sections (see _showGraphics)
 //   gameplay  — the double-click direct-march toggle
-//   ui        — the power-balance-scale toggle
+//   ui        — HUD visibility toggles (FPS, army bar overlays, banners)
+//   audio     — background-music on/off and volume
 //
 // Pure DOM overlay — knows only about SettingsStore, not about the game,
 // the renderer, or the scene. One instance per page, opened from both the
@@ -49,6 +50,10 @@ export class SettingsPanel {
     this._powerSwordsToggle = null;
     this._bannerSizeSelect = null;
     this._legacyBannersToggle = null;
+    this._waterEffectsToggle = null;
+    this._cullDistantObstaclesToggle = null;
+    this._musicEnabledToggle = null;
+    this._musicVolumeRow = null;
 
     // Page listeners. Fired with the page name on every page transition:
     //   'root'      — top-level category list
@@ -188,6 +193,7 @@ export class SettingsPanel {
     this._panel.appendChild(this._buildNavRow('Graphics', () => this._showGraphics()));
     this._panel.appendChild(this._buildNavRow('Gameplay', () => this._showGameplay()));
     this._panel.appendChild(this._buildNavRow('UI', () => this._showUI()));
+    this._panel.appendChild(this._buildNavRow('Audio', () => this._showAudio()));
     this._notifyPage('root');
   }
 
@@ -218,6 +224,12 @@ _showGraphics() {
     this._panel.appendChild(this._fieldEdgeToggle);
     this._fogToggle = this._buildToggleRow('Fog', 'fog');
     this._panel.appendChild(this._fogToggle);
+
+    this._waterEffectsToggle = this._buildToggleRow('Water effects', 'waterEffects');
+    this._waterEffectsToggle.title =
+      'Animated ripples, caustics, sun glints and shore foam on lakes. ' +
+      'Turn off for a flat static tint on weak hardware — takes effect immediately.';
+    this._panel.appendChild(this._waterEffectsToggle);
 
     // --- Quality -----------------------------------------------------
     // The big levers — shadow pass, resolution multiplier, anti-aliasing.
@@ -251,6 +263,20 @@ _showGraphics() {
       'Smooths jagged edges and pixel shimmer on moving units. Takes ' +
       'effect after pressing Restart or starting a new battle. Costs GPU time.';
     this._panel.appendChild(this._antialiasToggle);
+
+    // Opt-in perf shortcut. Off by default — full quality. Turning it on
+    // skips drawing obstacles beyond ~400 units from the camera target,
+    // trading a sparser distant silhouette for a shorter draw list.
+    // Auto-enabled by the ultraLow / low presets; never by medium / max.
+    this._cullDistantObstaclesToggle = this._buildToggleRow(
+      'Hide distant obstacles (perf)',
+      'cullDistantObstacles'
+    );
+    this._cullDistantObstaclesToggle.title =
+      'Skips drawing trees, rocks, ruins and scenery beyond ~400 world ' +
+      'units from the camera focus. Faster in large battles; the far ' +
+      'battlefield may look sparser. Off by default.';
+    this._panel.appendChild(this._cullDistantObstaclesToggle);
 
     // --- Soldiers ----------------------------------------------------
     // Only the LOD block stays on the everyday page. Instanced rendering
@@ -515,6 +541,44 @@ _showGameplay() {
     this._notifyPage('ui');
   }
 
+  // Audio page: background-music controls. MusicManager subscribes to
+  // SettingsStore on its own — flipping the Music checkbox writes the
+  // value, MusicManager reacts, and the running track fades out (or a
+  // new one fades in) within ~1 s. The volume slider updates the
+  // currently playing track live; further track changes inherit the new
+  // level. The two controls are deliberately independent of any other
+  // category, so a player tuning battle volume never needs to touch
+  // graphics settings.
+  _showAudio() {
+    this._clearToggleRefs();
+    this._panel.innerHTML = '';
+    this._panel.appendChild(this._buildTitleRow('Audio'));
+
+    this._musicEnabledToggle = this._buildToggleRow('Music', 'musicEnabled');
+    this._musicEnabledToggle.title =
+      'Background music in the main menu, campaign screens and battles.';
+    this._panel.appendChild(this._musicEnabledToggle);
+
+    this._musicVolumeRow = this._buildSliderRow(
+      'Volume', 'musicVolume', { min: 0, max: 1, step: 0.05 }
+    );
+    this._panel.appendChild(this._musicVolumeRow);
+
+    // Re-sync whenever the Music toggle changes so the volume slider
+    // disables / re-enables at once. The store subscription would catch
+    // this too, but doing it directly keeps the visual state in lockstep
+    // with the click — no perceptible lag between unchecking and the
+    // slider dimming.
+    this._musicEnabledToggle._checkbox.addEventListener('change', () => {
+      this._syncFromStore();
+    });
+
+    this._panel.appendChild(this._buildBackRow(() => this._showMain()));
+
+    this._syncFromStore();
+    this._notifyPage('audio');
+  }
+
 
 
   _clearToggleRefs() {
@@ -536,6 +600,8 @@ _showGameplay() {
     this._powerSwordsToggle = null;
     this._bannerSizeSelect = null;
     this._legacyBannersToggle = null;
+    this._waterEffectsToggle = null;
+    this._cullDistantObstaclesToggle = null;
     this._moraleBarToggle = null;
     this._fatigueBarToggle = null;
     this._unitFlagsToggle = null;
@@ -546,6 +612,8 @@ _showGameplay() {
     this._shadowRefreshToggle = null;
     this._spearChecksToggle = null;
     this._hudRefreshToggle = null;
+    this._musicEnabledToggle = null;
+    this._musicVolumeRow = null;
   }
 
   // --- builders -------------------------------------------------------------
@@ -709,6 +777,74 @@ _showGameplay() {
     row.appendChild(select);
 
     row._select = select;
+    return row;
+  }
+
+  // A label + range-slider row, for continuous settings like music
+  // volume. Same layout family as _buildToggleRow / _buildSelectRow;
+  // the control on the right is a <input type="range"> plus a live
+  // percentage readout. The slider is stored on the row as `_slider`
+  // and the readout span as `_readout`, matching the `_checkbox` /
+  // `_select` conventions above so _syncFromStore can write to both
+  // without a DOM query.
+  //
+  // The slider writes through on every `input` event, so a drag
+  // updates SettingsStore live — each step fires subscribers, and
+  // MusicManager's live-volume path picks it up on the currently
+  // playing track.
+  _buildSliderRow(labelText, settingsKey, { min = 0, max = 1, step = 0.05 } = {}) {
+    const row = document.createElement('label');
+    Object.assign(row.style, {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '10px 0',
+      borderBottom: '1px solid #2a2f3a',
+      cursor: 'pointer',
+      userSelect: 'none'
+    });
+
+    const text = document.createElement('span');
+    text.textContent = labelText;
+    text.style.fontSize = '14px';
+    row.appendChild(text);
+
+    const controls = document.createElement('div');
+    Object.assign(controls.style, {
+      display: 'flex',
+      gap: '8px',
+      alignItems: 'center'
+    });
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(min);
+    slider.max = String(max);
+    slider.step = String(step);
+    slider.style.cursor = 'pointer';
+    slider.style.width = '110px';
+
+    const readout = document.createElement('span');
+    Object.assign(readout.style, {
+      fontSize: '12px',
+      opacity: '0.8',
+      minWidth: '36px',
+      textAlign: 'right',
+      fontVariantNumeric: 'tabular-nums'
+    });
+
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      readout.textContent = Math.round(v * 100) + '%';
+      SettingsStore.set(settingsKey, v);
+    });
+
+    controls.appendChild(slider);
+    controls.appendChild(readout);
+    row.appendChild(controls);
+
+    row._slider = slider;
+    row._readout = readout;
     return row;
   }
 
@@ -1102,6 +1238,8 @@ _showGameplay() {
     if (this._grassToggle)         this._grassToggle._checkbox.checked         = !!s.grass;
     if (this._fieldEdgeToggle)     this._fieldEdgeToggle._checkbox.checked     = !!s.fieldEdge;
     if (this._fogToggle)           this._fogToggle._checkbox.checked           = !!s.fog;
+    if (this._waterEffectsToggle)  this._waterEffectsToggle._checkbox.checked  = s.waterEffects !== false;
+    if (this._cullDistantObstaclesToggle) this._cullDistantObstaclesToggle._checkbox.checked = s.cullDistantObstacles === true;
     if (this._fpsToggle)           this._fpsToggle._checkbox.checked           = !!s.showFps;
     if (this._lodToggle) {
       this._lodToggle.checked = !!s.lodEnabled;
@@ -1146,5 +1284,16 @@ _showGameplay() {
     if (this._shadowRefreshToggle) this._shadowRefreshToggle._checkbox.checked = s.reducedShadowRefresh !== false;
     if (this._spearChecksToggle) this._spearChecksToggle._checkbox.checked = s.reducedSpearChecks !== false;
     if (this._hudRefreshToggle) this._hudRefreshToggle._checkbox.checked = s.reducedHudRefresh !== false;
+    if (this._musicEnabledToggle) {
+      this._musicEnabledToggle._checkbox.checked = s.musicEnabled !== false;
+    }
+    if (this._musicVolumeRow) {
+      const vol = typeof s.musicVolume === 'number' ? s.musicVolume : 0.55;
+      this._musicVolumeRow._slider.value = String(vol);
+      this._musicVolumeRow._readout.textContent = Math.round(vol * 100) + '%';
+      const enabled = s.musicEnabled !== false;
+      this._musicVolumeRow._slider.disabled = !enabled;
+      this._musicVolumeRow.style.opacity = enabled ? '1' : '0.45';
+    }
   }
 }

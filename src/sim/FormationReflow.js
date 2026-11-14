@@ -101,6 +101,16 @@ export class FormationReflow {
   // grid formations this codebase produces, it is exact. It is
   // deterministic (ties broken by soldier id / slot order) so replays
   // are stable.
+// Pairs soldiers with slots without letting anyone cross. Positions are
+  // projected onto the NEW formation frame (lateral = local +x, forward =
+  // local +z). Soldiers are sorted front to back, cut into rows of the same
+  // lengths as the slot rows (back row first, so a short remainder row gets the
+  // rearmost soldiers), and sorted left to right inside each row. The result
+  // is deterministic (ties break on soldier id).
+  //
+  // Works for any change of facing or translation, unlike a sort by world X,
+  // which crosses soldiers whenever the unit turns. The anchor is not needed
+  // (matching only uses relative order) and is kept for call compatibility.
   static assignByWorldPosition(soldiers, slots, anchor, facing) {
     const n = soldiers.length;
     if (n === 0 || slots.length !== n) return;
@@ -108,34 +118,44 @@ export class FormationReflow {
     const cos = Math.cos(facing);
     const sin = Math.sin(facing);
 
-    // World position of each slot under the new frame. Rotation formula
-    // matches Unit._applyFormationAt and ArrowArc so sim and render can
-    // never disagree about where a slot is.
-    const worldSlots = new Array(n);
-    for (let j = 0; j < n; j++) {
-      const s = slots[j];
-      worldSlots[j] = {
-        x: anchor.x + s.x * cos + s.z * sin,
-        z: anchor.z + (-s.x * sin + s.z * cos),
-        localX: s.x,
-        localZ: s.z,
-        rank: s.rank,
-        order: j
-      };
-    }
-
-    const sortedSoldiers = [...soldiers].sort((a, b) =>
-      (a.pos.x - b.pos.x) || (a.pos.z - b.pos.z) || (a.id - b.id)
-    );
-    const sortedSlots = [...worldSlots].sort((a, b) =>
-      (a.x - b.x) || (a.z - b.z) || (a.order - b.order)
+    // Slots ordered by row (local z), then left to right (local x).
+    const slotOrder = new Array(n);
+    for (let j = 0; j < n; j++) slotOrder[j] = j;
+    slotOrder.sort((a, b) =>
+      (slots[a].z - slots[b].z) || (slots[a].x - slots[b].x) || (a - b)
     );
 
+    // Soldier coordinates in the new frame. Same axes as Unit._applyFormationAt:
+    // lateral (cos, -sin), forward (sin, cos).
+    const fw = new Float64Array(n);
+    const lt = new Float64Array(n);
+    const idx = new Array(n);
     for (let i = 0; i < n; i++) {
-      const soldier = sortedSoldiers[i];
-      const slot = sortedSlots[i];
-      soldier.formationOffset = { x: slot.localX, z: slot.localZ };
-      soldier.formationRank = slot.rank;
+      const p = soldiers[i].pos;
+      fw[i] = p.x * sin + p.z * cos;
+      lt[i] = p.x * cos - p.z * sin;
+      idx[i] = i;
+    }
+    idx.sort((a, b) =>
+      (fw[a] - fw[b]) || (lt[a] - lt[b]) || (soldiers[a].id - soldiers[b].id)
+    );
+
+    let start = 0;
+    while (start < n) {
+      const rowZ = slots[slotOrder[start]].z;
+      let end = start + 1;
+      while (end < n && slots[slotOrder[end]].z === rowZ) end++;
+
+      const row = idx.slice(start, end);
+      row.sort((a, b) => (lt[a] - lt[b]) || (soldiers[a].id - soldiers[b].id));
+
+      for (let k = 0; k < row.length; k++) {
+        const soldier = soldiers[row[k]];
+        const slot = slots[slotOrder[start + k]];
+        soldier.formationOffset = { x: slot.x, z: slot.z };
+        soldier.formationRank = slot.rank;
+      }
+      start = end;
     }
   }
 }

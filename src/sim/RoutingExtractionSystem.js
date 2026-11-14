@@ -50,6 +50,10 @@ export class RoutingExtractionSystem {
     soldier.targetId = null;
     soldier.isRouting = false;
 
+    // Hounds leave the field without being recorded: the campaign record
+    // counts handlers only.
+    if (soldier.unitTypeDef.beast === true) return;
+
     let entry = this._record.get(soldier.unitId);
     if (!entry) {
       const unit = unitsById ? unitsById.get(soldier.unitId) : null;
@@ -61,11 +65,13 @@ export class RoutingExtractionSystem {
         teamId: soldier.teamId,
         typeId: typeDef ? typeDef.id : null,
         isUndead: !!soldier.isUndead,
-        escapedCount: 0
+        escapedCount: 0,
+        withdrawnCount: 0
       };
       this._record.set(soldier.unitId, entry);
     }
     entry.escapedCount++;
+    if (soldier.withdrawing) entry.withdrawnCount++;
   }
 
   // Force-extract every soldier currently in 'routing' or 'shattered' state,

@@ -90,11 +90,32 @@ function clubLayer() {
   `;
 }
 
+// Short spear: short shaft, spear head sitting low.
+function shortSpearLayer() {
+  return `
+    <rect x="34" y="44" width="4" height="46" fill="#5a3d20"/>
+    <polygon points="36,20 43,44 36,50 29,44" fill="#c0c0c0"/>
+  `;
+}
+
+// Crew-served crossbow (goblin megabow): horizontal stock, big prod at the
+// front, bolt on the rail.
+function crossbowLayer() {
+  return `
+    <rect x="10" y="46" width="66" height="8" fill="#5a3d20"/>
+    <path d="M 58 10 Q 80 50 58 90" fill="none" stroke="#3a2414" stroke-width="5"/>
+    <line x1="58" y1="10" x2="58" y2="90" stroke="#ddd" stroke-width="1.5"/>
+    <rect x="28" y="49" width="56" height="2.5" fill="#8a5a24"/>
+    <polygon points="94,50 82,44 82,56" fill="#c0c0c0"/>
+  `;
+}
+
 const WEAPON_LAYERS = {
   sword: swordLayer,
   spear: spearLayer,
   bow:   bowLayer,
-  lance: lanceLayer
+  lance: lanceLayer,
+  shortSpear: shortSpearLayer
 };
 
 // --- accents ---------------------------------------------------------------
@@ -299,10 +320,12 @@ export function unitIconSvg(unitTypeDef, isUndead) {
   // WeaponViewFactory routing bodyVariant === 'goblinSlave' to the
   // club mesh), so it is the correct key here too.
   const isSlaveClub = !!unitTypeDef
-    && unitTypeDef.bodyVariant === 'goblinSlave';
+    && (unitTypeDef.bodyVariant === 'goblinSlave' || unitTypeDef.clubWeapon === true);
   const weaponBuilder = isSlaveClub
     ? clubLayer
-    : (WEAPON_LAYERS[weaponType] || spearLayer);
+    : ((unitTypeDef && unitTypeDef.rangedWeaponType === 'crossbow')
+        ? crossbowLayer
+        : (WEAPON_LAYERS[weaponType] || spearLayer));
   parts.push(weaponBuilder());
 
   if (unitTypeDef && unitTypeDef.race === 'goblin') {

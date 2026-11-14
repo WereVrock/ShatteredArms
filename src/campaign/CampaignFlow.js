@@ -16,6 +16,7 @@ import { MenuAutoFit } from '../ui/MenuAutoFit.js';
 import { ChampionPanelView } from '../ui/ChampionPanelView.js';
 import { ArmyManagerController } from './ArmyManagerController.js';
 import { CampaignArmy } from './CampaignArmy.js';
+import { HoundRoster } from './HoundRoster.js';
 import { unmergedSize, reinforceAmount, reinforce } from './UnitMerge.js';
 import { computeUnitPrice, buildPreviewUnit } from './UnitPreview.js';
 import { AITierPreference } from '../config/AITierPreference.js';
@@ -31,10 +32,11 @@ import {
 import { HighscoreApi } from '../net/HighscoreApi.js';
 import { SnapshotCodec } from '../net/SnapshotCodec.js';
 import { CampaignSession } from './CampaignSession.js';
-import { CampaignCampView } from '../ui/CampaignCampView.js';
+import { CampaignCampView } from '../render/CampaignCampView.js';
 import { CampaignFaction } from './CampaignFaction.js';
 import { CampViewToggle } from '../ui/CampViewToggle.js';
 import { SettingsStore } from '../ui/settings/SettingsStore.js';
+import { MusicManager } from '../audio/MusicManager.js';
 
 // Orchestrates the campaign. All UI rendering is delegated to
 // CardPickerView; this class only builds view-model data and mutates
@@ -229,6 +231,7 @@ export class CampaignFlow {
     this._autoFit = new MenuAutoFit(menuElement);
     const pickerShow = this.picker.show.bind(this.picker);
     this.picker.show = (config) => {
+      MusicManager.play('campaign');
       const result = pickerShow(config);
       this._autoFit.refit();
       // CardPickerView.show() clears menuElement.innerHTML, which
@@ -295,6 +298,7 @@ this.campToggle = null;
   // confirms, so backing out of the picker leaves no orphaned roster
   // entry. See _showChampionPicker / _showChampionPreview.
 startNewCampaign() {
+    MusicManager.play('campaign');
     if (!ProfileStore.isLoggedIn()) {
       this._showProfileGate(() => this.startNewCampaign());
       return;
@@ -776,11 +780,14 @@ _showChampionPicker(state) {
     // if its resulting size is below 20% of its maxCount. Units that
     // did not rout keep their standard aliveCount > 0 rule untouched.
     const extractedByUnit = new Map();
+    // Soldiers who left on the player's order (see BattleWithdrawal).
+    const withdrawnByUnit = new Map();
     for (const ex of extractions) {
       if (!ex || ex.teamId !== 'blue') continue;
       if (typeof ex.unitId === 'undefined') continue;
       if (typeof ex.escapedCount !== 'number' || ex.escapedCount <= 0) continue;
       extractedByUnit.set(ex.unitId, ex.escapedCount);
+      withdrawnByUnit.set(ex.unitId, ex.withdrawnCount || 0);
     }
 
     for (const entry of state.roster) {
@@ -796,12 +803,17 @@ _showChampionPicker(state) {
       const wasFullyRouted = entry.aliveCount === 0;
 
       entry.aliveCount += escaped;
-      if (wasFullyRouted && entry.aliveCount / entry.maxCount < 0.2) {
+      // A unit that left the battle on the player's order is never dropped
+      // for being small: withdrawing exists to save it for the next battle.
+      const withdrew = (withdrawnByUnit.get(entry.id) || 0) > 0;
+      if (wasFullyRouted && !withdrew && entry.aliveCount / entry.maxCount < 0.2) {
         entry.aliveCount = 0;
       }
     }
 
     state.roster = CampaignRoster.removeDestroyed(state.roster);
+    // Surviving handlers keep their hounds (with the regeneration roll).
+    HoundRoster.record(state.roster, simulation.units);
 
     // Champion status. Multiple independent signals, any of which ends
     // the campaign on the champion's fall:

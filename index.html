@@ -4,9 +4,48 @@
 <meta charset="UTF-8">
 <title>Shattered Arms</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
+<style>
+  /* Critical boot styles — applied immediately as the HTML parses, BEFORE
+     the render-blocking stylesheet link below is fetched and parsed. This
+     keeps the first paint dark instead of the browser's default white.
+     Must stay in this file: moving it into style.css defeats the point,
+     because that file is exactly what the browser is waiting on. */
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0a0f17; }
+  #bootLoading {
+    position: fixed; inset: 0; z-index: 9998;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 20px;
+    background: radial-gradient(ellipse at center, #1a2433 0%, #0a0f17 100%);
+    color: #cde;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    user-select: none;
+  }
+  #bootLoading .bl-title {
+    font-size: 18px; letter-spacing: 4px; text-transform: uppercase;
+    color: #d0b878;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  }
+  #bootLoading .bl-bar {
+    position: relative; width: 240px; height: 3px;
+    background: #1e2430; border-radius: 2px; overflow: hidden;
+  }
+  #bootLoading .bl-fill {
+    position: absolute; top: 0; bottom: 0; width: 40%;
+    background: linear-gradient(90deg, #d0b878, #f0e8d0);
+    animation: bootSweep 1.1s infinite ease-in-out;
+  }
+  @keyframes bootSweep {
+    0%   { left: -40%; }
+    100% { left: 100%; }
+  }
+</style>
 <link rel="stylesheet" href="src/style.css">
 </head>
 <body>
+<div id="bootLoading">
+  <div class="bl-title">Loading</div>
+  <div class="bl-bar"><div class="bl-fill"></div></div>
+</div>
 <div id="topBar">
   <button id="hudToggle" title="Toggle info panel">☰ Info</button>
   <button id="restartButton" title="Restart battle">↻ Restart</button>

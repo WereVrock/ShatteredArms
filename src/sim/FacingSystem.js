@@ -20,6 +20,8 @@
 // _updateSpearHandling below.
 import { CombatConfig } from '../config/CombatConfig.js';
 import { SpearFriendlyContact } from './SpearFriendlyContact.js';
+import { SpearWall } from './SpearWall.js';
+import { SpearWallConfig } from '../config/SpearWallConfig.js';
 
 // A lowered, non-turning spearman only re-checks for friendlies in front of
 // the shaft every Nth tick (staggered by soldier id). Raising the spear is a
@@ -125,7 +127,31 @@ _resolveDesiredFacing(soldier, byId, unitsById) {
 _updateSpearHandling(soldier) {
     if (!soldier.unitTypeDef.raisesPolearmOnTurn) return;
 
-    if (soldier.state === 'engaged' || soldier.state === 'staggered') {
+    const inMelee = soldier.state === 'engaged' || soldier.state === 'staggered';
+    const isSpear = soldier.unitTypeDef.weaponType === 'spear';
+
+    // Track how long the soldier has stood still for the plant override.
+    // Melee is NOT stationary — a soldier in a fight is fighting, not
+    // finding his footing. The counter resets whenever the soldier
+    // enters combat or actually moves.
+    if (inMelee) {
+      soldier.spearStationaryTicks = 0;
+      soldier._spearStationaryX = soldier.pos.x;
+      soldier._spearStationaryZ = soldier.pos.z;
+    } else {
+      const sdx = soldier.pos.x - (soldier._spearStationaryX ?? soldier.pos.x);
+      const sdz = soldier.pos.z - (soldier._spearStationaryZ ?? soldier.pos.z);
+      if (sdx * sdx + sdz * sdz > 0.0001) {
+        soldier.spearStationaryTicks = 0;
+        soldier._spearStationaryX = soldier.pos.x;
+        soldier._spearStationaryZ = soldier.pos.z;
+      } else {
+        soldier.spearStationaryTicks = (soldier.spearStationaryTicks || 0) + 1;
+      }
+    }
+
+    // Lances (cavalry) keep the old rule: melee lowers the shaft at once.
+    if (inMelee && !isSpear) {
       soldier.spearRaiseState = 'lowered';
       soldier.spearRaiseTicksLeft = 0;
       soldier.spearRaiseAmount = 0;
@@ -135,12 +161,16 @@ _updateSpearHandling(soldier) {
     const cfg = CombatConfig.spearHandling;
     const diff = this._normalizeAngle(soldier.desiredFacing - soldier.facing);
     const diffDeg = Math.abs(diff) * 180 / Math.PI;
-    const needsRotation = diffDeg >= cfg.minRotationDegForRaise;
+    // In melee facing is target tracking: no reorientation ceremony.
+    const needsRotation = !inMelee && diffDeg >= cfg.minRotationDegForRaise;
+
+    // Footing: a spearman whose own ground breaks his shaft (bog, slope,
+    // trees, rocks, walls) keeps it up. A raised spear cannot fight.
+    const terrainRaise = isSpear && SpearWall.mustRaise(soldier);
 
     // Idle throttle: a lowered spearman that is not turning only needs the
-    // contact query on every SPEAR_IDLE_CHECK_PERIOD-th tick. Turning,
-    // raising, raised and lowering soldiers still query every tick.
-    if (soldier.spearRaiseState === 'lowered' && !needsRotation &&
+    // contact query on every SPEAR_IDLE_CHECK_PERIOD-th tick.
+    if (soldier.spearRaiseState === 'lowered' && !needsRotation && !terrainRaise &&
         (((this._spearTick | 0) + soldier.id) % SPEAR_IDLE_CHECK_PERIOD) !== 0) {
       soldier.spearRaiseAmount = 0;
       return;
@@ -151,15 +181,31 @@ _updateSpearHandling(soldier) {
     const nearby = this.spatialGrid.queryNearbyInto(
       this._nearbyBuf, soldier.pos.x, soldier.pos.z, 1
     );
-    // Contact is independent of rotation: a friendly in front of the
-    // shaft forces the spear up whether or not the soldier is turning.
+    // A friendly in front of the shaft forces the spear up, whether or not
+    // the soldier is turning, and now also while fighting.
     const touching = SpearFriendlyContact.isTouchingFriendly(soldier, nearby);
+
+    // Stationary plant override. A FRONTLINE spearman who has stood still
+    // for stationaryPlantTicks has found footing for his shaft even on
+    // otherwise bad terrain. A friendly touching the shaft still forces
+    // the spear up — you cannot plant into a man's back. Back ranks do
+    // not benefit: their role is depth, not contact.
+    const rank = soldier.formationRank || 0;
+    const plantedOverride = isSpear
+      && !inMelee
+      && !touching
+      && rank <= SpearWallConfig.stationaryPlantMaxRank
+      && (soldier.spearStationaryTicks || 0) >= SpearWallConfig.stationaryPlantTicks;
+
+    // mustHold: touching always raises. Terrain raise is overridden by the
+    // stationary plant.
+    const mustHold = touching || (terrainRaise && !plantedOverride);
 
     switch (soldier.spearRaiseState) {
       case 'lowered': {
         soldier.spearRaiseAmount = 0;
         const sweepRisk = needsRotation && this._wouldClipFriendly(soldier, diff, nearby);
-        if (touching || sweepRisk) {
+        if (mustHold || sweepRisk) {
           soldier.spearRaiseState = 'raising';
           soldier.spearRaiseTicksLeft = cfg.raiseDurationTicks;
         }
@@ -177,17 +223,17 @@ _updateSpearHandling(soldier) {
       }
       case 'raised': {
         soldier.spearRaiseAmount = 1;
-        // Stay up while turning OR while a friendly is still in front.
-        if (!needsRotation && !touching) {
+        // Stay up while turning, touching a friendly or standing badly.
+        if (!needsRotation && !mustHold) {
           soldier.spearRaiseState = 'lowering';
           soldier.spearRaiseTicksLeft = cfg.lowerDurationTicks;
         }
         return;
       }
       case 'lowering': {
-        if (touching) {
-          // A friendly is in the shaft's path again: resume raising from
-          // the current height instead of finishing the lowering.
+        if (mustHold) {
+          // Resume raising from the current height instead of finishing
+          // the lowering.
           soldier.spearRaiseState = 'raising';
           soldier.spearRaiseTicksLeft = Math.max(
             1,

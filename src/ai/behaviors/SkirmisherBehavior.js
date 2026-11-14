@@ -48,6 +48,7 @@ import { toSimSpeed } from '../../config/SpeedScale.js';
 import { isCavalry, isRanged, getRangedRange } from '../../config/UnitClasses.js';
 import { nearestUnit, centerTowardUnit, unitTypeOf } from '../behaviorUtils.js';
 import { AIDebugLog } from '../AIDebugLog.js';
+import { TerrainPositioning } from '../TerrainPositioning.js';
 
 // Standoff buffer (world units) subtracted from the archer's own effective
 // range when computing the desired distance to the nearest enemy soldier.
@@ -368,6 +369,29 @@ export class SkirmisherBehavior {
     // Already at the goal: hold and shoot. A hold is a no-order — the
     // unit keeps whatever it is doing (drawing, firing) and does not
     // reset its combat state.
+    // Terrain: when the geometric goal is poor ground (mud, forest floor,
+    // cluttered, low), swap it for clearly better ground nearby. The
+    // replacement must stay inside [desired - slack, desired + slack] of the
+    // same enemy anchor, so the archer can still fire from it. Not applied
+    // while hugging the line: hug positions are tied to the infantry.
+    // worldCtx.terrain is null on flat maps and for tiers with
+    // terrainAware === false, which disables this.
+    if (!hugMode && worldCtx && worldCtx.terrain) {
+      const slack = AIConfig.archerTerrainRangeSlack ?? 2.0;
+      const spot = TerrainPositioning.archerSpot(
+        worldCtx.terrain,
+        unit,
+        { x: goalX, z: goalZ },
+        { x: anchorX, z: anchorZ },
+        Math.max(CombatConfig.rangedMinRange + 1.0, desired - slack),
+        Math.min(standoffCap, desired + slack)
+      );
+      if (spot) {
+        goalX = spot.x;
+        goalZ = spot.z;
+      }
+    }
+
     const dgx = goalX - myCenter.x;
     const dgz = goalZ - myCenter.z;
     const dg = Math.sqrt(dgx * dgx + dgz * dgz);

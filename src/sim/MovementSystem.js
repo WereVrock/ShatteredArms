@@ -1,5 +1,13 @@
+// ===== src/sim/MovementSystem.js =====
 import { CombatConfig } from '../config/CombatConfig.js';
 import { MakeWayGate } from './MakeWayGate.js';
+import { slopeSpeedFactor, climbFatigueMult } from './TerrainLocomotion.js';
+import { SoldierPathFollower } from './SoldierPathFollower.js';
+import { RouterSteering } from './RouterSteering.js';
+import { Gait } from './Gait.js';
+import { RunSystem } from './RunSystem.js';
+import { SlotSteering } from './SlotSteering.js';
+import { CrewFireControl } from './CrewFireControl.js';
 
 // Moves soldiers each tick based on their state, and tracks each soldier's
 // actual current speed + movement heading (moveFacing).
@@ -20,9 +28,14 @@ import { MakeWayGate } from './MakeWayGate.js';
 // actually walk home, not sprint off the map.
 const FLEE_SPEED_MULT = 1.0;
 const FLEE_LOOKAHEAD = 8;
+// Soldiers of a unit ordered to leave the battle (see BattleWithdrawal)
+// walk off faster than a rout.
+const WITHDRAW_SPEED_MULT = 1.6;
 
 export class MovementSystem {
   constructor(spatialGrid) {
+    // Set by BattleSimulation.setTerrain. Null = flat uniform ground.
+    this.terrain = null;
     this.spatialGrid = spatialGrid;
     // Reusable candidate buffer for _applyMakeWay's per-yielder query.
     // Each yielder's iteration completes before the next yielder starts,
@@ -33,10 +46,23 @@ export class MovementSystem {
     this.soldiersById = null;
     // Pre-filter for the make-way neighbour scan. See MakeWayGate.js.
     this._makeWayGate = new MakeWayGate();
+    // Tick counter used to stagger per-soldier path checks.
+    this._tick = 0;
+    this._pathFollower = new SoldierPathFollower();
+    this._routerSteering = new RouterSteering();
+    // Per-soldier detours around trees, rocks, walls and water while walking to a slot.
+    this._slotSteering = new SlotSteering();
+    // Decides which units / soldiers run this tick (see RunSystem).
+    this._runSystem = new RunSystem();
   }
 
-update(allSoldiers, unitsById, deltaSeconds) {
+  update(allSoldiers, unitsById, deltaSeconds) {
     const byId = this.soldiersById || new Map(allSoldiers.map(s => [s.id, s]));
+    this._tick++;
+    this._runSystem.update(allSoldiers, unitsById);
+    // Crew-served weapons: decides which pairs are deployed (carrier kneels,
+    // shooter takes the spot behind it). Must run before the loop below.
+    CrewFireControl.update(allSoldiers, unitsById, byId);
 
     // Pre-pass: which units currently have a soldier in melee. Idle unit-mates
     // advance on the fight instead of holding formation.
@@ -58,6 +84,10 @@ update(allSoldiers, unitsById, deltaSeconds) {
 
       if (!soldier.isAlive()) continue;
 
+      // Deployed crew pair (see CrewFireControl): the shooter walks to its
+      // firing spot, everyone else stands. No slot-following while firing.
+      if (soldier.unitTypeDef.crew && this._crewFireStep(soldier, deltaSeconds)) continue;
+
       // Ranged soldiers stand and shoot, but never from a broken formation:
       // if one is off its slot it walks back onto it first. Without this a
       // line ordered while enemies were in range froze wherever each archer
@@ -75,7 +105,8 @@ update(allSoldiers, unitsById, deltaSeconds) {
         continue;
       }
 
-      let speed = soldier.effectiveMoveSpeed *
+      this._applyTerrain(soldier);
+      let speed = soldier.surfaceMoveSpeed *
         CombatConfig.movement.globalSpeedScale *
         deltaSeconds;
       const unit = unitsById.get(soldier.unitId);
@@ -129,14 +160,30 @@ update(allSoldiers, unitsById, deltaSeconds) {
           x: soldier.pos.x + soldier.fleeDirection.x * FLEE_LOOKAHEAD,
           z: soldier.pos.z + soldier.fleeDirection.z * FLEE_LOOKAHEAD
         };
-        speed *= FLEE_SPEED_MULT;
+        speed *= soldier.withdrawing ? WITHDRAW_SPEED_MULT : FLEE_SPEED_MULT;
+        if (this.terrain) {
+          // targetPos is a fresh object made just above; edited in place.
+          this._routerSteering.apply(soldier, targetPos, this.terrain, this._tick, FLEE_LOOKAHEAD);
+        }
+      } else if (soldier.chargeActive === true) {
+        // A charging chargob beast runs a fixed course (see ChargobCharge).
+        targetPos = {
+          x: soldier.pos.x + soldier.chargeDirX * FLEE_LOOKAHEAD,
+          z: soldier.pos.z + soldier.chargeDirZ * FLEE_LOOKAHEAD
+        };
+        if (this.terrain) {
+          this._routerSteering.apply(soldier, targetPos, this.terrain, this._tick, FLEE_LOOKAHEAD);
+        }
+      } else if (soldier.houndWaypoint) {
+        // A hound circling to its target's flank (see HoundSystem).
+        targetPos = soldier.houndWaypoint;
       } else if (soldier.state === 'impetuous' && soldier.targetId) {
         const target = byId.get(soldier.targetId);
         if (target && target.isAlive()) targetPos = target.pos;
-      } else if (isReleased && hasFocusTarget && soldier.targetId) {
+      } else if (isReleased && hasFocusTarget && soldier.targetId && soldier.unitTypeDef.chargobBeast !== true) {
         const target = byId.get(soldier.targetId);
         if (target && target.isAlive()) targetPos = target.pos;
-      } else if (isReleased && soldier.rallyTargetId && unitsInCombat.has(soldier.unitId)) {
+      } else if (isReleased && soldier.rallyTargetId && unitsInCombat.has(soldier.unitId) && soldier.unitTypeDef.chargobBeast !== true) {
         const rallyTarget = byId.get(soldier.rallyTargetId);
         if (rallyTarget && rallyTarget.isAlive()) targetPos = rallyTarget.pos;
       }
@@ -148,6 +195,13 @@ update(allSoldiers, unitsById, deltaSeconds) {
       // in tolerance ramp (Unit._settleToleranceBonus) subsumes the
       // old "pushed and within tolerance → accept" test. Cleared so the
       // flag does not accumulate stale true values from CollisionSystem.
+      // Double-click direct march: slot-chasing soldiers route around
+      // obstacles through the unit's path instead of walking straight.
+      if (this.terrain && unit && unit._directPath !== null &&
+          targetPos === soldier.formationSlot) {
+        targetPos = this._pathFollower.steer(soldier, unit, this.terrain, this._tick);
+      }
+
       soldier.pushedSinceLastMovement = false;
 
       // Walk decision. Non-slot targets (an enemy to chase, a flee
@@ -192,7 +246,18 @@ update(allSoldiers, unitsById, deltaSeconds) {
         tolerance = 0.01;
       }
 
-      this._moveToward(soldier, targetPos, speed, tolerance);
+      speed *= this._slopeFactor(soldier, targetPos);
+      let walkTarget = targetPos;
+      let walkTolerance = tolerance;
+      if (isSlotTarget && this.terrain !== null &&
+          (this.terrain.obstacles.length > 0 || this.terrain.hasBlockedCells)) {
+        const detour = this._slotSteering.steer(soldier, targetPos, this.terrain, this._tick);
+        if (detour !== null) {
+          walkTarget = detour;
+          walkTolerance = 0.01;
+        }
+      }
+      this._moveToward(soldier, walkTarget, speed, walkTolerance);
 
       const movedX = soldier.pos.x - prevX;
       const movedZ = soldier.pos.z - prevZ;
@@ -282,9 +347,47 @@ update(allSoldiers, unitsById, deltaSeconds) {
     soldier.fleeDirection = { x: dx / d, z: dz / d };
   }
 
-  // Direct movement to targetPos by up to maxStep. No sideways bias — the
+// Movement of a crew soldier whose pair is deployed. Returns true when the
+  // soldier was handled here (the caller then skips the normal movement).
+  //   shooter, not yet on its spot: walks to the spot behind the carrier.
+  //   carrier planted / shooter ready: stands still.
+  // Soldiers that are not part of a deployed pair return false.
+  _crewFireStep(soldier, deltaSeconds) {
+    const settingUp = soldier.crewFireActive === true && soldier.crewReady !== true;
+    const standing = soldier.crewPlanted === true ||
+      (soldier.crewFireActive === true && soldier.crewReady === true);
+    if (!settingUp && !standing) return false;
+
+    if (settingUp) {
+      this._applyTerrain(soldier);
+      const maxStep = soldier.actualMoveSpeed *
+        CombatConfig.movement.globalSpeedScale *
+        deltaSeconds;
+      const spot = { x: soldier.crewFireSpotX, z: soldier.crewFireSpotZ };
+
+      const prevX = soldier.pos.x;
+      const prevZ = soldier.pos.z;
+      this._moveToward(soldier, spot, maxStep, 0.05);
+
+      const movedX = soldier.pos.x - prevX;
+      const movedZ = soldier.pos.z - prevZ;
+      const movedDist = Math.sqrt(movedX * movedX + movedZ * movedZ);
+      soldier.currentSpeed = deltaSeconds > 0 ? movedDist / deltaSeconds : 0;
+      soldier.movedThisTick = movedDist > 0.001;
+      if (soldier.movedThisTick) {
+        soldier.moveFacing = Math.atan2(movedX, movedZ);
+      }
+      return true;
+    }
+
+    soldier.currentSpeed *= 0.75;
+    soldier.movedThisTick = false;
+    return true;
+  }
+
+// Direct movement to targetPos by up to maxStep. No sideways bias — the
   // make-way pass handles clearing the path, not this function.
-_moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
+  _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     const dx = targetPos.x - soldier.pos.x;
     const dz = targetPos.z - soldier.pos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
@@ -296,7 +399,7 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     soldier.pos.z += (dz / dist) * step;
   }
 
-// Ranged soldiers hold formation while shooting. Returns true if the
+  // Ranged soldiers hold formation while shooting. Returns true if the
   // soldier was off its slot and walked toward it this tick (the caller
   // then skips the stand-still branch), false if it is already on its slot
   // within CombatConfig.rangedSlotHoldTolerance and should just stand.
@@ -323,7 +426,8 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     );
     if (dist <= tolerance) return false;
 
-    const maxStep = soldier.effectiveMoveSpeed *
+    this._applyTerrain(soldier);
+    const maxStep = soldier.actualMoveSpeed *
       CombatConfig.movement.globalSpeedScale *
       deltaSeconds;
 
@@ -343,7 +447,7 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     return true;
   }
 
-// Make-way pass. A soldier who is idle or marching, and who has a
+  // Make-way pass. A soldier who is idle or marching, and who has a
   // different-unit friendly marching at them from close range, steps
   // perpendicular to that friendly's heading — away from the corridor
   // center, opening a lane for the friendly to walk straight through.
@@ -370,7 +474,7 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
   // passed. Any oscillation is damped by the fact that once a blocker
   // has stepped to one side, the incoming friendly is no longer heading
   // directly at them (dot drops below threshold) and the push stops.
-// Make-way pass (Option 2 — perpendicular yield).
+  // Make-way pass (Option 2 — perpendicular yield).
   //
   // Runs after the main movement loop each tick. A disengaged soldier
   // (idle/marching) whose different-unit friendly is walking into them
@@ -608,7 +712,7 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
       const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
       if (len < 0.0001) continue;
 
-      const step = yielder.effectiveMoveSpeed *
+      const step = yielder.actualMoveSpeed *
         CombatConfig.movement.globalSpeedScale *
         deltaSeconds *
         cfg.amount *
@@ -629,7 +733,54 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     this._updateUnitSpread(allSoldiers, unitsById, passingThroughUnits, deltaSeconds);
   }
 
-// Unit center, computed at most once per make-way pass. Unit.getCenter()
+  // Samples the terrain under the soldier and caches the multiplier on it.
+  // Soldier.surfaceMoveSpeed, Unit's anchor speed and fatigue all read it.
+  // Slope is applied separately per step by _slopeFactor, so this method is
+  // only responsible for the surface (terrain type) multiplier.
+  _applyTerrain(soldier) {
+    const t = this.terrain;
+    // surfaceTerrainMult is the pure ground multiplier. terrainSpeedMult is
+    // that times the gait multiplier (walk-speed normalisation, or the run
+    // speed), which is what surfaceMoveSpeed / actualMoveSpeed / the march
+    // anchor read. Runners use the 'run' terrain gait, so rough ground
+    // slows them more.
+    if (!t) {
+      soldier.surfaceTerrainMult = 1.0;
+      soldier.terrainSpeedMult = Gait.speedMult(soldier);
+      return;
+    }
+    const surface = t.speedMultAt(
+      soldier.pos.x, soldier.pos.z, soldier.isMountedType,
+      (soldier.gaitRunning && soldier.chargeActive !== true) ? 'run' : soldier.gait);
+    soldier.surfaceTerrainMult = surface;
+    soldier.terrainSpeedMult = surface * Gait.speedMult(soldier);
+  }
+
+  // Speed factor for walking toward targetPos from here. Caches the slope on
+  // the soldier: Soldier.actualMoveSpeed and the climbing fatigue read it.
+  // Slope-aware pathfinding already prefers low-cost routes; this is only
+  // the local micro-correction for the direction the soldier is actually
+  // walking this tick.
+  _slopeFactor(soldier, targetPos) {
+    const t = this.terrain;
+    if (!t || !t.hasElevation) {
+      soldier.slopeSpeedMult = 1.0;
+      soldier.climbSlope = 0;
+      return 1.0;
+    }
+    const dx = targetPos.x - soldier.pos.x;
+    const dz = targetPos.z - soldier.pos.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < 1e-8) return soldier.slopeSpeedMult;
+    const inv = 1 / Math.sqrt(d2);
+    const slope = t.slopeAlong(soldier.pos.x, soldier.pos.z, dx * inv, dz * inv);
+    const f = slopeSpeedFactor(slope, soldier.isMountedType);
+    soldier.climbSlope = slope;
+    soldier.slopeSpeedMult = f;
+    return f;
+  }
+
+  // Unit center, computed at most once per make-way pass. Unit.getCenter()
   // walks every soldier of the unit, and the pass asked for it once per
   // (yielder, pusher) pair. The 4-unit gate it feeds does not care about the
   // sub-step drift of yielders moving during the pass.
@@ -644,7 +795,7 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
     return c;
   }
 
-// Unit-level formation spread while a friendly unit passes through.
+  // Unit-level formation spread while a friendly unit passes through.
   //
   // When _applyMakeWay detects that one of this unit's soldiers is being
   // walked through by a friendly soldier from a different unit, the
@@ -751,14 +902,23 @@ _moveToward(soldier, targetPos, maxStep, tolerance = 0.01) {
   // Skip when the configured drain is zero so a future tuning pass that
   // wants walking to be free can flip one config value to a no-op
   // without a code change.
-_drainWalkFatigue(allSoldiers) {
+  _drainWalkFatigue(allSoldiers) {
     const drain = CombatConfig.fatigue.drainPerWalkTick;
     if (!(drain > 0)) return;
-    const WALK_DRAIN_MULT = 0.5;
+    // Halved from 0.5 so a marching army does not exhaust itself before
+    // reaching the enemy. Running multiplies this by RunConfig.drainMult*
+    // (see _drainWalkFatigue), keeping the walk:run drain ratio at 1:3.
+    const WALK_DRAIN_MULT = 0.25;
     for (const s of allSoldiers) {
       if (!s.movedThisTick) continue;
+      // Slogging through mud or water costs more stamina; roads give no
+      // discount. Climbing multiplies it further (see climbFatigueMult).
+      const tm = s.surfaceTerrainMult ?? s.terrainSpeedMult;
+      let terrainFatigue = tm >= 1 ? 1 : Math.min(2.5, 1 / Math.max(tm, 0.01));
+      terrainFatigue *= climbFatigueMult(s.climbSlope);
+      if (s.gaitRunning) terrainFatigue *= Gait.runDrainMult(s);
       s.fatigue = Math.max(0,
-        s.fatigue - drain * s.fatigueDrainMultiplier * WALK_DRAIN_MULT);
+        s.fatigue - drain * s.fatigueDrainMultiplier * WALK_DRAIN_MULT * terrainFatigue);
     }
   }
 }

@@ -18,15 +18,23 @@
 // hysteresis LineBehavior uses, so the unit does not flip between targets
 // every decision cycle.
 //
+// Terrain: when scoring enemies by distance, an enemy spear block is weighted
+// by the real integrity of its wall (see _wallMult). A buckled wall (bog,
+// slope, clutter) scores as nearer, an intact one as farther, most strongly
+// for swordsmen, whose frontal attacks a braced wall cuts to a third. This
+// is a preference ranking only: the local-threat override below still wins.
+//
 // Focus (ranged pressure) targets / assigned chaser targets are only taken if
 // within AIConfig.rangedPressureMaxChaseDist of this unit. With no usable
 // focus target the unit falls back to the general nearest-enemy pick only if
 // allowAnyTarget is true (line alarm active); otherwise it returns null and
 // normal line behavior continues.
 import { AIConfig } from '../../config/AIConfig.js';
+import { SpearWallConfig } from '../../config/SpearWallConfig.js';
 import { centerTowardUnit, unitTypeOf } from '../behaviorUtils.js';
-import { isCavalry, isRanged } from '../../config/UnitClasses.js';
+import { isCavalry, isRanged, isSwordsmen } from '../../config/UnitClasses.js';
 import { AIDebugLog } from '../AIDebugLog.js';
+import { TerrainSense } from '../TerrainSense.js';
 
 function isMostlyRouting(unit) {
   const alive = unit.getAliveSoldiers();
@@ -155,7 +163,7 @@ export class LineAssault {
       // the archers. Fight closest infantry, staying vigilant for very close
       // cavalry / archers. Only fall through to general nearest if allowed.
       if (!assignedFocus) {
-        const infantryPick = LineAssault._pickInfantryWithVigilance(unit, enemyUnits, intent);
+        const infantryPick = LineAssault._pickInfantryWithVigilance(unit, enemyUnits, intent, worldCtx);
         if (infantryPick) return infantryPick;
         if (!allowAnyTarget) return null;
       } else {
@@ -166,10 +174,10 @@ export class LineAssault {
       }
     }
 
-    return LineAssault._pickNearest(unit, enemyUnits, intent);
+    return LineAssault._pickNearest(unit, enemyUnits, intent, worldCtx);
   }
 
-// Nearest non-routing, non-defeated enemy within
+  // Nearest non-routing, non-defeated enemy within
   // AIConfig.lineAssaultLocalThreatRadius of this unit's center, or null
   // when nothing qualifies. Used by _pickTarget as the local-threat
   // override — see that method's header for the rationale.
@@ -209,7 +217,7 @@ export class LineAssault {
     return best;
   }
 
-static _pickFocusTarget(unit, focusUnits, intent) {
+  static _pickFocusTarget(unit, focusUnits, intent) {
     const maxDist = AIConfig.rangedPressureMaxChaseDist;
     const candidates = [];
     for (const enemy of focusUnits) {
@@ -222,11 +230,35 @@ static _pickFocusTarget(unit, focusUnits, intent) {
     );
   }
 
+  // Score multiplier for an enemy spear block, from the real integrity of its
+  // wall (the live, eased, unit-blended value SpearWallSystem writes).
+  //   integrity <= SpearWallConfig.brokenBelow    -> 1 - weight (softest target)
+  //   integrity >= SpearWallConfig.fullStrengthAt -> 1 + weight (hardest target)
+  // Lower score wins, so a broken wall attracts and an intact one repels.
+  // 1 for non-spear enemies, with no terrain (flat map or terrain-blind tier),
+  // and when the unit has no live spearmen.
+  static _wallMult(unit, enemy, worldCtx) {
+    const terrain = worldCtx ? worldCtx.terrain : null;
+    if (!terrain) return 1;
+    const integrity = TerrainSense.unitWallIntegrity(enemy);
+    if (integrity === null) return 1;
+
+    const cfg = SpearWallConfig;
+    let strength = (integrity - cfg.brokenBelow) / (cfg.fullStrengthAt - cfg.brokenBelow);
+    if (strength < 0) strength = 0; else if (strength > 1) strength = 1;
+
+    const type = unitTypeOf(unit);
+    const weight = (type && isSwordsmen(type))
+      ? AIConfig.lineAssaultWallWeightSword
+      : AIConfig.lineAssaultWallWeightOther;
+    return 1 + weight * (strength * 2 - 1);
+  }
+
   // Non-chaser path under ranged pressure: primary target is closest infantry
   // (non-cav, non-ranged), with engaged-preference scoring and the same
   // sticky hysteresis as the rest of the line. Very close cavalry or archers
   // override that preference so the unit does not ignore an immediate threat.
-  static _pickInfantryWithVigilance(unit, enemyUnits, intent) {
+  static _pickInfantryWithVigilance(unit, enemyUnits, intent, worldCtx) {
     const vigilanceDist = AIConfig.rangedPressureVigilanceDist;
     const closeThreats = [];
     const infantry = [];
@@ -258,11 +290,11 @@ static _pickFocusTarget(unit, focusUnits, intent) {
     return LineAssault._pickSticky(infantry, intent, enemy => {
       let score = distanceBetween(unit, enemy);
       if (isFightingUs(enemy)) score *= AIConfig.lineAssaultEngagedPreference;
-      return score;
+      return score * LineAssault._wallMult(unit, enemy, worldCtx);
     });
   }
 
-  static _pickNearest(unit, enemyUnits, intent) {
+  static _pickNearest(unit, enemyUnits, intent, worldCtx) {
     const candidates = [];
     for (const enemy of enemyUnits) {
       if (enemy.isDefeated()) continue;
@@ -272,7 +304,7 @@ static _pickFocusTarget(unit, focusUnits, intent) {
     return LineAssault._pickSticky(candidates, intent, enemy => {
       let score = distanceBetween(unit, enemy);
       if (isFightingUs(enemy)) score *= AIConfig.lineAssaultEngagedPreference;
-      return score;
+      return score * LineAssault._wallMult(unit, enemy, worldCtx);
     });
   }
 

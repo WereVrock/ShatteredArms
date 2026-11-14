@@ -36,6 +36,7 @@
 // the shatter-burst fragments run on the sim delta and freeze with the
 // battle.
 import * as THREE from 'three';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
 import { SettingsStore } from '../ui/settings/SettingsStore.js';
 import { TeamColors } from './TeamColors.js';
 import {
@@ -45,12 +46,32 @@ import {
 import {
   SHIELD_PIECE_COUNT
 } from './ShieldIconBuilder.js';
+import { computeBannerLift } from './BannerOcclusion.js';
 
 // Fixed world Y of the shield's BOTTOM edge. The billboard's sprite is
 // positioned so the shield's bottom edge sits here; distance scale and
 // banner-size multiplier both grow the banner UP from this anchor. Set
 // to 2.0 to clear the ~1.7-tall soldier heads at any zoom or size.
 const SHIELD_BOTTOM_Y = 2.0;
+
+// Occlusion-lift smoothing and chain-visibility hysteresis. See
+// BannerOcclusion.js for the lift itself and _updateEntry for how these
+// are applied.
+//
+// LIFT_SMOOTHING is the per-16ms blend fraction. The applied rate is
+// asymmetric: raising is faster (banner clears a newly-intruding tree
+// promptly), lowering is slower (a passing tree must not drop the
+// banner the frame after it leaves the ray).
+//
+// The chain thresholds are deliberately distinct. A single threshold
+// would let a lift hovering near it toggle the chain on and off every
+// frame — the exact flicker the hysteresis exists to prevent. The gap
+// (0.35 vs 0.08) also absorbs the small lift oscillation that a
+// drifting camera produces when an occluder is intermittent along the
+// ray.
+const LIFT_SMOOTHING = 0.18;        // blend per 16ms frame at 60fps
+const CHAIN_ON_THRESHOLD = 0.35;    // lift above which the chain appears
+const CHAIN_OFF_THRESHOLD = 0.08;   // lift below which the chain disappears
 
 // Render order within the transparent pass.
 const RENDER_ORDER_BILLBOARD = 3;
@@ -185,6 +206,10 @@ export class UnitOverlayView {
   _disposeEntry(entry) {
     this.scene.remove(entry.group);
     if (entry.billboard) entry.billboard.dispose();
+    if (entry.chain) {
+      entry.chain.geometry.dispose();
+      entry.chain.material.dispose();
+    }
     for (const piece of entry.shieldPieces) {
       if (piece.sprite && piece.sprite.parent) {
         piece.sprite.parent.remove(piece.sprite);
@@ -244,6 +269,39 @@ export class UnitOverlayView {
       });
     }
 
+    // Chain. A thin rod from the unit's ground anchor (group-local Y = 0)
+    // up to the banner's bottom edge. Hidden by default — the floating
+    // banner needs no visible support — and shown only when the banner
+    // is lifted to clear an intervening hill or tree (see computeBannerLift
+    // and the lift write in _updateEntry). The visible purpose is to
+    // preserve the "banner belongs to this unit" read when the banner
+    // sits much higher than the unit it labels.
+    //
+    // Geometry is bottom-anchored (translated +0.5 on Y before assignment)
+    // so scale.y directly sets the chain's world height with its base
+    // pinned at the group origin.
+    const chainGeo = new THREE.CylinderGeometry(0.03, 0.03, 1, 6);
+    chainGeo.translate(0, 0.5, 0);
+    // depthTest: false so the chain is always visible — the whole reason
+    // the banner was lifted is that something stood between it and the
+    // camera, and a depth-tested chain would hide behind that same
+    // occluder, defeating the "connected to this unit" read.
+    // depthWrite: false so the billboard (renderOrder 3) is not affected
+    // by the chain's depth, and transparent so the chain can fade in and
+    // out around the hysteresis threshold without a visible pop.
+    const chainMat = new THREE.MeshBasicMaterial({
+      color: 0x4a3a2a,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+      depthWrite: false
+    });
+    const chain = new THREE.Mesh(chainGeo, chainMat);
+    chain.visible = false;
+    chain.renderOrder = 2;
+    chain.frustumCulled = false;
+    group.add(chain);
+
     this.scene.add(group);
 
     return {
@@ -251,11 +309,31 @@ export class UnitOverlayView {
       billboard,
       shieldPieces,
       teamColorHex,
+      chain,
       wasCollapsed: false,
       wasShattered: false,
       flagShattered: false,
       // Wall-clock timestamp (ms) of the current pulse's rising edge.
-      flashStartMs: null
+      flashStartMs: null,
+
+      // Occlusion-lift state. _currentLift is the SMOOTHED lift value
+      // currently applied to the billboard — it lags the target so a
+      // passing occluder produces a gentle rise/fall rather than a
+      // jump. _chainActive is a hysteresis flag (separate on/off
+      // thresholds) that prevents the chain appearing and disappearing
+      // every frame when lift hovers near a single threshold.
+      // _chainOpacity is the chain's fade value so its appearance and
+      // disappearance are not a pop.
+      _currentLift: 0,
+      _chainActive: false,
+      _chainOpacity: 0,
+
+      // Per-frame cache for computeBannerLift. Both key halves are
+      // rounded to 0.25-unit granularity, so sub-quarter-unit camera
+      // drift and slow soldier movement reuse the previous lift result
+      // instead of re-running the grid query. See _updateEntry.
+      _liftCacheKey: '',
+      _liftCacheTarget: 0
     };
   }
 
@@ -294,7 +372,14 @@ export class UnitOverlayView {
       anchorX = ax;
       anchorZ = az;
     }
-    entry.group.position.set(anchorX, 0, anchorZ);
+    // Anchor the banner group to the terrain under the unit rather than
+    // flat world Y = 0. Every child sprite Y value — the shield bottom,
+    // falling shard start, etc. — is LOCAL to this group, so raising the
+    // group raises the whole banner uniformly. Pre-elevation this read 0
+    // and was correct; on hills it left the banner hanging below soldier
+    // heads, or buried behind an intervening ridge.
+    const groundY = ActiveTerrain.heightAt(anchorX, anchorZ);
+    entry.group.position.set(anchorX, groundY, anchorZ);
 
     // --- distance + size scale --------------------------------------------
     // The banner sits at a fixed SCREEN size across zoom (distance factor)
@@ -309,15 +394,109 @@ export class UnitOverlayView {
       // Shield center Y at the CURRENT state — used only as the reference
       // point for the distance calc. One frame of lag is negligible; the
       // billboard's _worldScale will refresh immediately after.
-      const shieldCenterY = SHIELD_BOTTOM_Y + entry.billboard.getShieldCenterOffset();
+      // Shield's WORLD-Y centre: the group already sits at groundY, so the
+      // local bottom-anchor offset stacks on top of it. Camera-distance
+      // sizing must use this world value, not the local offset alone, or
+      // the banner will zoom out as the unit climbs toward the camera.
+      const shieldCenterY =
+        groundY + SHIELD_BOTTOM_Y + entry.billboard.getShieldCenterOffset();
       const cam = camera.position;
       const dx = anchorX - cam.x;
       const dy = shieldCenterY - cam.y;
       const dz = anchorZ - cam.z;
       const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
       entry.billboard.setWorldScale(distance);
-      entry.billboard.sprite.position.y =
-        SHIELD_BOTTOM_Y + entry.billboard.getAnchorOffset();
+
+      // Occlusion lift. See BannerOcclusion.js for the algorithm and the
+      // spatial-grid acceleration. Only computed when the shield is
+      // actually drawn (banners hidden → skip the grid query entirely);
+      // otherwise the previous smoothed lift is simply held. Lift state
+      // is retained through a "shields hidden" period, so when the
+      // setting is re-enabled the banner picks up where it left off
+      // instead of popping from zero.
+      let targetLift = 0;
+      if (showShields) {
+        // Per-frame cache. Both halves rounded to 0.25 world units, so
+        // small camera drift and slow soldier movement reuse the
+        // previous result. Cache-miss cost is one grid query plus
+        // ~20-80 inner iterations; cache-hit is one string compare.
+        const camKey =
+          `${Math.round(cam.x * 4)},` +
+          `${Math.round(cam.y * 4)},` +
+          `${Math.round(cam.z * 4)}`;
+        const anchorKey =
+          `${Math.round(anchorX * 4)},${Math.round(anchorZ * 4)}`;
+        const cacheKey = camKey + '|' + anchorKey;
+
+        if (entry._liftCacheKey === cacheKey) {
+          targetLift = entry._liftCacheTarget;
+        } else {
+          const terrain = ActiveTerrain.get();
+          targetLift = computeBannerLift(
+            anchorX, anchorZ, cam, terrain, SHIELD_BOTTOM_Y
+          );
+          entry._liftCacheKey = cacheKey;
+          entry._liftCacheTarget = targetLift;
+        }
+      } else {
+        targetLift = entry._currentLift;
+      }
+
+      // Smoothing. k is zero when paused (deltaSeconds = 0), so the
+      // banner freezes mid-transition exactly like every other
+      // animation. Asymmetric rate: rise 2x faster than fall, so a
+      // newly-intruding occluder is cleared promptly while a passing
+      // one does not drop the banner the frame after it leaves the ray.
+      // The final Math.min(1, ...) prevents overshoot on a low-FPS
+      // frame; without it the lift would jump past its target and
+      // oscillate back the next frame — the exact jitter this smoothing
+      // exists to remove.
+      const k = deltaSeconds > 0
+        ? Math.min(1, LIFT_SMOOTHING * (deltaSeconds / 0.016))
+        : 0;
+      const rate = Math.min(
+        1,
+        targetLift > entry._currentLift ? k * 2.0 : k * 0.5
+      );
+      entry._currentLift += (targetLift - entry._currentLift) * rate;
+      if (Math.abs(entry._currentLift) < 0.005) entry._currentLift = 0;
+
+      // Chain visibility hysteresis. On and off use DIFFERENT
+      // thresholds, so a lift hovering near a single value cannot
+      // toggle the chain every frame. The 0.35 / 0.08 gap is wider than
+      // any lift oscillation a drifting camera can produce while an
+      // occluder remains intermittent along the ray.
+      if (!entry._chainActive && entry._currentLift > CHAIN_ON_THRESHOLD) {
+        entry._chainActive = true;
+      } else if (entry._chainActive &&
+                 entry._currentLift < CHAIN_OFF_THRESHOLD) {
+        entry._chainActive = false;
+      }
+
+      const spriteLocalY =
+        SHIELD_BOTTOM_Y + entry.billboard.getAnchorOffset()
+        + entry._currentLift;
+      entry.billboard.sprite.position.y = spriteLocalY;
+
+      // Chain. Shown only when the banner has been lifted above the
+      // default floating position — the default banner needs no visible
+      // support. Scale tracks the SMOOTHED lift (not the target), so
+      // the chain's top edge stays exactly at the shield's bottom edge
+      // throughout the rise. Opacity fades in and out via the same
+      // smoothing rate, so the chain's appearance is not a pop even
+      // though its hysteresis threshold is crossed in one frame.
+      if (entry.chain) {
+        const chainTargetOpacity = entry._chainActive ? 1 : 0;
+        entry._chainOpacity +=
+          (chainTargetOpacity - entry._chainOpacity) * rate;
+        if (entry._chainOpacity > 0.01) {
+          entry.chain.visible = true;
+          entry.chain.scale.y = SHIELD_BOTTOM_Y + entry._currentLift;
+          entry.chain.material.opacity = entry._chainOpacity;
+        } else {
+          entry.chain.visible = false;
+        }
+      }
     }
 
     // --- collapse / shatter detection -------------------------------------
@@ -328,9 +507,13 @@ export class UnitOverlayView {
     if (isShattered && !entry.wasShattered) {
       if (unit.teamId === this.playerTeamId && !entry.flagShattered) {
         entry.flagShattered = true;
-        const burstY = entry.billboard
+        // Shatter burst particles are added directly to the scene (world
+        // coords, NOT group-local), so groundY has to be folded in here —
+        // unlike the billboard and falling shards, which inherit groundY
+        // from the group position.
+        const burstY = groundY + (entry.billboard
           ? SHIELD_BOTTOM_Y + entry.billboard.getShieldCenterOffset()
-          : SHIELD_BOTTOM_Y + 0.9;
+          : SHIELD_BOTTOM_Y + 0.9);
         this._spawnShatterBurst(anchorX, burstY, anchorZ, entry.teamColorHex);
       }
     }

@@ -788,6 +788,65 @@ export const AIConfig = {
   // morale is low" — a much tighter definition than the raw morale read.
   fragileMinRoutingFraction: 0.20,
 
+  // --- Running (see RunDirector, RunConfig) ---
+  // Moves shorter than this walk. Mounted units regrouping are the exception.
+  runMinGoalDist: 8.0,
+  // A unit with average fatigue (0..100) below this does not start running:
+  // it conserves stamina for the fight. RunSystem separately stops runners at
+  // RunConfig.stopFatigue.
+  runMinFatigue: 55,
+  // Infantry stop running when the nearest enemy unit center is this close,
+  // so they arrive formed. Spearmen stop earlier: a runner has its spear
+  // raised and needs about 2 s after stopping to lower it. Distances are
+  // center to center; a unit's own depth is only 1-2 units.
+  runStopEnemyDistSpear: 9.0,
+  runStopEnemyDistOther: 5.0,
+  // Cavalry charges run unless the unit is below this average fatigue.
+  runCavalryChargeMinFatigue: 20,
+  // Archers marching on a focus target run while further than this
+  // multiple of their own range.
+  runFocusRangeMult: 1.3,
+
+  // --- Wall-weighted assault targeting (LineAssault._wallMult) ---
+  // Distance score multiplier for an enemy spear block ranges over
+  // 1 +- weight: broken wall = 1 - weight, intact wall = 1 + weight.
+  // Swordsmen get the larger weight: a braced wall cuts their frontal
+  // damage to a third.
+  lineAssaultWallWeightSword: 0.35,
+  lineAssaultWallWeightOther: 0.15,
+
+  // ArrowLanes: true makes trees, rocks and walls block lanes as well as
+  // ground. Leave false while ProjectileSystem only stops arrows on ground.
+  arrowLanesBlockObstacles: false,
+
+  // --- Terrain awareness ---
+  // Minimum average run-gait speed factor over the last stretch of a charge
+  // lane (see TerrainSense.chargeLaneClean). Below this the charge is refused
+  // because mud / water / steep ground would stop the cavalry building speed.
+  chargeLaneMinSpeedFactor: 0.65,
+
+  // WinPlanner: candidate strength is multiplied by
+  // 1 + clamp((groundQuality - 1) * weight, -cap, +cap), where groundQuality is
+  // measured under the ENEMY unit (TerrainSense.groundQuality; ~1 = neutral).
+  // Enemies on bad ground (broken spear wall, bog) become more attractive
+  // objectives; enemies on good or high ground less so.
+  winPlannerTerrainWeight: 0.5,
+  winPlannerTerrainCap: 0.35,
+
+  // Archer terrain positioning (TerrainPositioning.archerSpot). The archer may
+  // swap its geometric standoff goal for better ground within +-slack of its
+  // ideal distance from the enemy, so it can still fire from the new spot.
+  //   goodEnough: goal ground at least this good is left alone.
+  //   margin:     a replacement must beat the goal's ground by this much.
+  //   radii/angles: search pattern around the goal.
+  //   maxGoalDrift: a remembered spot is dropped once the goal moves this far.
+  archerTerrainRangeSlack: 2.0,
+  archerTerrainGoodEnough: 1.0,
+  archerTerrainMargin: 0.15,
+  archerTerrainRadii: [2, 4, 6],
+  archerTerrainAngles: 12,
+  archerTerrainMaxGoalDrift: 8.0,
+
   // --- B2: Pin detector ---
   // Per-unit-type thresholds for PinDetector. A single global engaged-
   // fraction would read a 5-wide spear block and a 3-wide archer unit

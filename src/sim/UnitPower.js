@@ -58,8 +58,9 @@
 // scalar total; UI and debugging read the breakdown.
 import { CombatConfig, WeaponMatchup } from '../config/CombatConfig.js';
 import { unitHasClass, UnitClass, getRangedRange, isCavalry } from '../config/UnitClasses.js';
-import { raceOf, raceHasProperty } from '../config/RaceConfig.js';
+import { raceOf, raceHasProperty, soldierHasProperty } from '../config/RaceConfig.js';
 import { Property } from '../config/Properties.js';
+import { CrewPairing } from './CrewPairing.js';
 
 // Shield HP counts this fraction as much as soldier HP in the durability
 // sum. Shields only protect the frontal arc — a shield unit hit from the
@@ -217,6 +218,9 @@ export class UnitPower {
     if (!typeDef) return this._empty(deployed);
 
     const isRangedUnit = unitHasClass(typeDef, UnitClass.RANGED);
+    // Crew-served units score per working weapon (shooter + carrier pair),
+    // not per soldier. See CrewPairing.pairCount.
+    const isCrewUnit = !!typeDef.crew;
 
     // Per-soldier offense, computed once — it depends only on the unit's
     // type, not on any individual soldier's current state. Routing and
@@ -247,7 +251,7 @@ export class UnitPower {
       if (s.state === 'routing' || s.state === 'shattered') continue;
       fighters++;
 
-      if (perSoldierOffense > 0) {
+      if (perSoldierOffense > 0 && !isCrewUnit) {
         if (isRangedUnit) rangedOffense += perSoldierOffense;
         else meleeOffense += perSoldierOffense;
       }
@@ -268,6 +272,23 @@ export class UnitPower {
     }
 
     if (fighters === 0) return this._empty(deployed);
+
+    // Companions (goblin hounds) add offense and durability but have no
+    // morale, so they stay out of the state averages.
+    if (unit.companions && unit.companions.length > 0) {
+      for (const h of unit.companions) {
+        if (!h.isAlive() || h.state === 'routing' || h.state === 'shattered' || h.beastDetached) continue;
+        // A chargob beast that has hit something while charging is WORTHLESS:
+        // spent, it counts for half (WORTHLESS_POWER_MULT). Scoring only.
+        const w = soldierHasProperty(h, Property.WORTHLESS) ? WORTHLESS_POWER_MULT : 1.0;
+        meleeOffense += this.meleePerSoldierOffense(h.unitTypeDef) * w;
+        if (includeDurability) durability += h.maxHp * w;
+      }
+    }
+
+    if (isCrewUnit && perSoldierOffense > 0) {
+      rangedOffense += perSoldierOffense * CrewPairing.pairCount(unit);
+    }
 
     const avgMorale = moraleSum / fighters;
     const avgHealth = healthSum / fighters;
@@ -372,10 +393,13 @@ export class UnitPower {
   // ranged-duel assessment agrees with the per-unit power score.
   static rangedPerSoldierOffense(typeDef) {
     if (!typeDef) return 0;
-    const matchup = WeaponMatchup[typeDef.weaponType];
+    // The projectile's weapon (crossbow for megabowmen) and the type's own
+    // draw time, falling back to the bow and the global cadence.
+    const matchup = WeaponMatchup[typeDef.rangedWeaponType ?? typeDef.weaponType];
     if (!matchup) return 0;
 
-    const attacksPerSecond = CombatConfig.tickRateHz / CombatConfig.rangedCooldownTicks;
+    const attacksPerSecond = CombatConfig.tickRateHz /
+      (typeDef.rangedCooldownTicks ?? CombatConfig.rangedCooldownTicks);
     const toHitMod = matchup.toHitMod ?? 1;
     const raceDamageMult = raceOf(typeDef).damageMultiplier ?? 1.0;
     // Scoring-only weapon bias. Orthogonal to rangedEnvelopeScale: the

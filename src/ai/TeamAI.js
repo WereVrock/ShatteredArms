@@ -54,6 +54,8 @@ import { RangedPressureDetector } from './RangedPressureDetector.js';
 import { ChargeReadiness } from './ChargeReadiness.js';
 import { AIDebugLog } from './AIDebugLog.js';
 import { unitTypeOf, centerTowardUnit, isFragile } from './behaviorUtils.js';
+import { TerrainSense } from './TerrainSense.js';
+import { RunDirector } from './RunDirector.js';
 
 export class TeamAI {
   // valiantDefence: see BattleAssessment's constructor doc. Scenario-level
@@ -92,6 +94,9 @@ export class TeamAI {
     // shooter units, or null) each decision cycle.
     this.rangedPressure = new RangedPressureDetector();
     this.assessment = null;
+
+    // Set each tick by BattleAI.setTerrain. Null = flat ground.
+    this.terrain = null;
 
     // Stance: computed once from the first assessment's strengthRatio
     // (see _decide). Held for the remainder of the battle — a team does
@@ -431,7 +436,10 @@ tick() {
     // C3: posture profile widens/narrows FocusFireCoordinator's candidate
     // pool (press opens tier 2/3 alongside tier 1 instead of insisting on
     // the most-wounded target).
-    FocusFireCoordinator.assign(archerUnits, enemyUnits, this._currentObjectiveUnit || null, this._postureProfile(), this.tierCfg);
+    FocusFireCoordinator.assign(
+      archerUnits, enemyUnits, this._currentObjectiveUnit || null, this._postureProfile(), this.tierCfg,
+      this.tierCfg.terrainAware === false ? null : (this.terrain || null)
+    );
   }
 
   // C3: resolves this cycle's posture-conditional parameter set from
@@ -865,6 +873,17 @@ tick() {
     // Callback so behaviors can push the router-chase cooldown back onto
     // this TeamAI. Attached AFTER the literal so the write target is a
     // real instance field, not a per-cycle worldCtx copy.
+    // Every terrain-smart AI read goes through worldCtx.terrain. A tier with
+    // terrainAware === false gets null here, i.e. it plays as if on flat
+    // ground. (Goal snapping in _issueOrderIfChanged still uses this.terrain
+    // directly: that is a safety net against illegal destinations, not a
+    // tactical skill, so no tier loses it.)
+    worldCtx.terrain = this.tierCfg.terrainAware === false ? null : (this.terrain || null);
+
+    // Read by RunDirector from _issueOrderIfChanged, which has no worldCtx
+    // parameter. Stale between decision cycles, which is fine for these reads.
+    this._cycleCtx = worldCtx;
+
     const self = this;
     worldCtx.setRouterChaseCooldown = function (untilTick) {
       self._routerChaseCooldownUntilTick = untilTick;
@@ -894,7 +913,9 @@ tick() {
     // subsystem below (line concentration, cavalry, focus fire) consults
     // this FIRST — this is what replaces four independently-guessing
     // heuristics with one coherent plan.
-    const { objectiveUnit } = WinPlanner.plan(this.teamUnits, enemyUnits, this.formation, this.teamId, this.tickCounter);
+    const { objectiveUnit } = WinPlanner.plan(
+      this.teamUnits, enemyUnits, this.formation, this.teamId, this.tickCounter, worldCtx.terrain
+    );
     this._currentObjectiveUnit = objectiveUnit; // exposed for _updateFocusFire
 
     // Stage B plan layer: advance or create a team plan BEFORE per-unit
@@ -923,6 +944,7 @@ tick() {
       infantryLineUnits: infantryLineData.units,
       rangedUnits: infantryLineData.rangedUnits
     };
+    planWorldCtx.terrain = this.terrain || null;
     this._currentPlan = this.planScheduler.update(this._currentPlan, planWorldCtx);
     if (this._currentPlan && this._currentPlan.objectiveUnitId) {
       const planObj = enemyUnits.find(u => u.id === this._currentPlan.objectiveUnitId);
@@ -1194,6 +1216,7 @@ tick() {
         if (targetUnit) {
           const isNewFocus = unit.focusTargetUnitId !== targetUnit.id;
           unit.issueAttackOrder(targetUnit);
+          unit.setRunEnabled(RunDirector.forCharge(unit, this._cycleCtx));
           intent.lastIssuedX = order.x;
           intent.lastIssuedZ = order.z;
           intent.lastIssuedFacing = order.facing;
@@ -1326,6 +1349,7 @@ tick() {
   // of the battle) if a front-line gap opened near its hold position, or a
   // reinforcement need exists within reserveDeployRadius.
   _updateReserveDeployment(contexts, enemyUnits) {
+    let allSoldiersCache = null;
     if (!contexts) return;
 
     for (const unit of this.teamUnits) {
@@ -1358,7 +1382,9 @@ tick() {
         if (Math.sqrt(dx * dx + dz * dz) > AIConfig.reserveDeployRadius) return false;
 
         const { allyCount, enemyCount } = BattleAssessment.localCounts(
-          c.x, c.z, this._allSoldiersOfBothSides(enemyUnits), this.teamId, AIConfig.localSuperiorityRadius
+          c.x, c.z,
+          allSoldiersCache || (allSoldiersCache = this._allSoldiersOfBothSides(enemyUnits)),
+          this.teamId, AIConfig.localSuperiorityRadius
         );
         return allyCount > 0 && (enemyCount / allyCount) > AIConfig.reinforceLocalOutnumberRatio;
       });
@@ -1875,6 +1901,18 @@ _unitIsInCombat(unit) {
   // issued orders should gate the log on the return value so a skipped
   // cycle is silent.
   _issueOrderIfChanged(unit, intent, x, z, facing) {
+    // Goals inside deep water, walls or big rocks are moved to the nearest free
+    // ground first, so the same-order comparison below sees the real goal.
+    if (this.terrain) {
+      const g = TerrainSense.freeGoal(this.terrain, x, z);
+      x = g.x;
+      z = g.z;
+    }
+    // Run decision. Before the same-order filter below, so a unit whose
+    // destination is unchanged still stops running when the enemy gets close
+    // or its stamina drops.
+    unit.setRunEnabled(RunDirector.forMove(unit, intent, x, z, this._cycleCtx));
+
     const SAME_ORDER_DIST = 0.5;
     const SAME_ORDER_FACING_RAD = 0.1;
 
@@ -1944,6 +1982,7 @@ _unitIsInCombat(unit) {
       // the new intent.
       intent.pendingMove = null;
       unit.issueAttackOrder(target);
+      unit.setRunEnabled(RunDirector.forFocus(unit, target, this._cycleCtx));
       intent.lastIntentKey = `focus:${target.id}`;
       return;
     }
@@ -2044,10 +2083,21 @@ _unitIsInCombat(unit) {
     }
   }
 
-  _allSoldiersOfBothSides(enemyUnits) {
-    const all = [];
-    for (const u of this.teamUnits) all.push(...u.soldiers);
-    for (const u of enemyUnits) all.push(...u.soldiers);
+_allSoldiersOfBothSides(enemyUnits) {
+    let total = 0;
+    for (const u of this.teamUnits) total += u.soldiers.length;
+    for (const u of enemyUnits) total += u.soldiers.length;
+
+    const all = new Array(total);
+    let idx = 0;
+    for (const u of this.teamUnits) {
+      const list = u.soldiers;
+      for (let i = 0; i < list.length; i++) all[idx++] = list[i];
+    }
+    for (const u of enemyUnits) {
+      const list = u.soldiers;
+      for (let i = 0; i < list.length; i++) all[idx++] = list[i];
+    }
     return all;
   }
 

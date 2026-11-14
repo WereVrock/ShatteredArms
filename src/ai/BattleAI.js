@@ -8,6 +8,7 @@
 import { TeamAI } from './TeamAI.js';
 import { BattleLineFormation } from './BattleLineFormation.js';
 import { AITierPreference } from '../config/AITierPreference.js';
+import { Unit } from '../sim/Unit.js';
 
 export class BattleAI {
   // options.valiantDefenceTeamIds: optional array of team ids that should
@@ -64,10 +65,24 @@ export class BattleAI {
     });
   }
 
-  tick() {
-    for (const ai of this.teamAIs) {
-      ai.tick();
+tick() {
+    Unit.beginQueryCache();
+    try {
+      for (const ai of this.teamAIs) {
+        ai.tick();
+      }
+    } finally {
+      Unit.endQueryCache();
     }
+  }
+
+  // Called by BattleSimulation every tick with its current terrain (null =
+  // flat). Only forwards on change, so it costs one comparison per tick and
+  // does not matter whether terrain or AI was created first.
+  setTerrain(terrain) {
+    if (this._terrain === terrain) return;
+    this._terrain = terrain;
+    for (const ai of this.teamAIs) ai.terrain = terrain;
   }
 
   // Forwarded from BattleSimulation the instant a volley releases for a

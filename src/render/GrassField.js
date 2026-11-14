@@ -1,5 +1,6 @@
-// ===== GrassField.js =====
+// ===== src/render/GrassField.js =====
 import * as THREE from 'three';
+import { TerrainTypes } from '../config/TerrainConfig.js';
 
 // Scattered grass tufts as a single InstancedMesh. One draw call regardless
 // of tuft count. Each tuft is two crossed vertical quads with an alpha-tested
@@ -62,14 +63,23 @@ export class GrassField {
     // bare ground.
     const rng = this._mulberry32(0xCAFE);
     const dummy = new THREE.Object3D();
+    // Kept so applyTerrain() can hide tufts that land on mud/road/water.
+    this._placements = new Float32Array(count * 4);
+    this._count = count;
 
     for (let i = 0; i < count; i++) {
       const x = x0 + rng() * spanX;
       const z = z0 + rng() * spanZ;
-      dummy.position.set(x, 0, z);
-      dummy.rotation.y = rng() * Math.PI * 2;
+      const rot = rng() * Math.PI * 2;
       // Height variation: short tufts dominate, occasional taller clumps.
-      dummy.scale.setScalar(0.35 + rng() * 0.35);
+      const sc = 0.35 + rng() * 0.35;
+      this._placements[i * 4] = x;
+      this._placements[i * 4 + 1] = z;
+      this._placements[i * 4 + 2] = rot;
+      this._placements[i * 4 + 3] = sc;
+      dummy.position.set(x, 0, z);
+      dummy.rotation.y = rot;
+      dummy.scale.setScalar(sc);
       dummy.updateMatrix();
       this.mesh.setMatrixAt(i, dummy.matrix);
     }
@@ -178,5 +188,23 @@ export class GrassField {
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
+  }
+
+  // Hides tufts on terrain where grass should not grow. Pass null to
+  // restore all, and lifts each tuft to the terrain surface so grass on
+  // hillsides does not float or sink.
+  applyTerrain(terrain) {
+    const dummy = new THREE.Object3D();
+    const p = this._placements;
+    for (let i = 0; i < this._count; i++) {
+      const x = p[i * 4], z = p[i * 4 + 1];
+      const grassy = !terrain || TerrainTypes[terrain.typeAt(x, z)].grassy;
+      dummy.position.set(x, terrain ? terrain.heightAt(x, z) : 0, z);
+      dummy.rotation.y = p[i * 4 + 2];
+      dummy.scale.setScalar(grassy ? p[i * 4 + 3] : 0.0001);
+      dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, dummy.matrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
   }
 }

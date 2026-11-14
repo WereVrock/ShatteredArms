@@ -1,4 +1,5 @@
 import { CampaignRoster } from './CampaignRoster.js';
+import { HoundRoster } from './HoundRoster.js';
 import { effectiveUnitXp, unitLevelForXp } from './UnitXp.js';
 import { battleScore, teamPowerFromSim } from './CampaignScore.js';
 
@@ -30,11 +31,13 @@ export const CampaignBattleResolver = {
     CampaignRoster.applyBattleResult(state.roster, result);
 
     const extractedByUnit = new Map();
+    const withdrawnByUnit = new Map();
     for (const ex of extractions) {
       if (!ex || ex.teamId !== 'blue') continue;
       if (typeof ex.unitId === 'undefined') continue;
       if (typeof ex.escapedCount !== 'number' || ex.escapedCount <= 0) continue;
       extractedByUnit.set(ex.unitId, ex.escapedCount);
+      withdrawnByUnit.set(ex.unitId, ex.withdrawnCount || 0);
     }
 
     for (const entry of state.roster) {
@@ -42,12 +45,16 @@ export const CampaignBattleResolver = {
       if (escaped <= 0) continue;
       const wasFullyRouted = entry.aliveCount === 0;
       entry.aliveCount += escaped;
-      if (wasFullyRouted && entry.aliveCount / entry.maxCount < 0.2) {
+      // A unit that left the battle on the player's order is never dropped
+      // for being small: withdrawing exists to save it for the next battle.
+      const withdrew = (withdrawnByUnit.get(entry.id) || 0) > 0;
+      if (wasFullyRouted && !withdrew && entry.aliveCount / entry.maxCount < 0.2) {
         entry.aliveCount = 0;
       }
     }
 
     state.roster = CampaignRoster.removeDestroyed(state.roster);
+    HoundRoster.record(state.roster, simulation.units);
   },
 
   // Adds post-battle XP to every surviving roster entry and promotes it

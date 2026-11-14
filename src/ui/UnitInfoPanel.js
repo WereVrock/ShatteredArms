@@ -100,7 +100,9 @@ const WEAPON_NAMES = {
   sword: 'Sword',
   spear: 'Spear',
   bow:   'Bow',
-  lance: 'Lance'
+  lance: 'Lance',
+  shortSpear: 'Short Spear',
+  crossbow: 'Crossbow'
 };
 
 // Prose tooltips for the Combat section's Weapon row. The tooltip is a
@@ -130,6 +132,17 @@ const WEAPON_TOOLTIPS = {
     + 'impact, unlike melee. Arrows are easier to block than melee '
     + 'thrusts, so shielded defenders absorb a lot of archer fire; '
     + 'unshielded targets take the full brunt.',
+  shortSpear:
+    'A short spear. It forms no spear wall and cannot brace, so cavalry '
+    + 'charging it rides it down. Against cavalry that has lost its speed '
+    + '(stalled, bogged down) it deals +50% damage. Attacking the front of '
+    + 'a braced spear wall it swings 40% slower. It carries none of the '
+    + 'long spear\'s movement or turning penalties.',
+  crossbow:
+    'A crew-served crossbow: one goblin carries it, another fires it. '
+    + 'Enormous range and heavy bolts, but a very long draw time and a '
+    + 'wide scatter. It fires only while both its shooter and its carrier '
+    + 'live and stay close together; a lone survivor cannot use it.',
   lance:
     'A cavalry charge weapon. Bonus damage scales with the '
     + 'attacker-to-defender mass ratio, and on a qualifying charge hit '
@@ -522,6 +535,7 @@ const STYLE_TEXT = `
   }
   .uip-stat-morale  .uip-stat-fill { background: linear-gradient(90deg, #4a9a4a 0%, #7ad07a 100%); }
   .uip-stat-fatigue .uip-stat-fill { background: linear-gradient(90deg, #9a7a3a 0%, #d0b06a 100%); }
+  .uip-stat-panic .uip-stat-fill { background: linear-gradient(90deg, #9a4a2a 0%, #e0803a 100%); }
   .uip-stat-shield  .uip-stat-fill { background: linear-gradient(90deg, #3a6a9a 0%, #6aa0d0 100%); }
 
   /* ---------- kills row ---------- */
@@ -945,6 +959,8 @@ export class UnitInfoPanel {
     );
 
     // --- progression (campaign units only) ---
+    const beastSection = this._buildBeastSection(unit);
+    if (beastSection) bodyParts.push(beastSection);
     const progressionSection = this._buildProgressionSection(unit);
     if (progressionSection) bodyParts.push(progressionSection);
 
@@ -991,7 +1007,9 @@ export class UnitInfoPanel {
   _buildCombatSection(typeDef, unit) {
     if (!typeDef) return '';
 
-    const matchup = WeaponMatchup[typeDef.weaponType];
+    // Ranged units that fire a different projectile than their melee weapon
+    // (crew-served crossbow) show the projectile's numbers.
+    const matchup = WeaponMatchup[typeDef.rangedWeaponType ?? typeDef.weaponType];
     if (!matchup) return '';
 
     const isRanged = unitHasClass(typeDef, UnitClass.RANGED);
@@ -1018,7 +1036,8 @@ export class UnitInfoPanel {
     // the sim's real rate rather than an approximate label.
     let attackSeconds;
     if (isRanged) {
-      attackSeconds = CombatConfig.rangedCooldownTicks / CombatConfig.tickRateHz;
+      attackSeconds = (typeDef.rangedCooldownTicks ?? CombatConfig.rangedCooldownTicks)
+        / CombatConfig.tickRateHz;
     } else {
       const speedMult = typeDef.attackSpeedMultiplier ?? 1;
       const cooldownTicks = Math.max(
@@ -1031,7 +1050,7 @@ export class UnitInfoPanel {
     const moveSpeed = this._effectiveMoveSpeed(typeDef, !!(unit && unit.isUndead), unit);
 
     const rows = [];
-    const weaponKey = typeDef.weaponType;
+    const weaponKey = typeDef.rangedWeaponType ?? typeDef.weaponType;
     // Goblin slave: the SIM still classifies the club as a sword (sword
     // combat tables, sword-arm swing animation), but the player sees a
     // club in the icon and body model. Show "Club" here so the panel
@@ -1039,7 +1058,7 @@ export class UnitInfoPanel {
     // explicit that the mechanics are still the sword's. Keyed on
     // bodyVariant so any future club-carrying unit type gets the same
     // treatment without a per-type id check.
-    const isSlaveClub = typeDef.bodyVariant === 'goblinSlave';
+    const isSlaveClub = typeDef.bodyVariant === 'goblinSlave' || typeDef.clubWeapon === true;
     const weaponLabel = isSlaveClub
       ? 'Club'
       : (WEAPON_NAMES[weaponKey] || weaponKey || '\u2014');
@@ -1083,7 +1102,21 @@ export class UnitInfoPanel {
       + `</div>`;
   }
 
-// Level + XP bar, rendered only for units the campaign battle builder
+  // Chargob herd summary (beasts in the herd, charging, panic). The numbers
+  // come from Unit.chargobPanicInfo; empty string for every other unit.
+  _buildBeastSection(unit) {
+    const info = typeof unit.chargobPanicInfo === 'function' ? unit.chargobPanicInfo() : null;
+    if (!info || (info.beasts === 0 && info.charging === 0)) return '';
+    return `<div class="uip-section">`
+      + `<div class="uip-section-title">Beasts</div>`
+      + combatRow('In the herd', String(info.beasts))
+      + combatRow('Charging', String(info.charging))
+      + combatRow('Panic (avg / max)', `${Math.round(info.avg)} / ${Math.round(info.max)}`)
+      + statRow('panic', ICON_MORALE, 'Panic', info.avg, 100)
+      + `</div>`;
+  }
+
+  // Level + XP bar, rendered only for units the campaign battle builder
   // annotated with progression data (see CampaignBattleBuilder
   // .annotateUnitProgression). A standalone or custom battle unit does
   // not carry unitLevel, so this returns an empty string and no section

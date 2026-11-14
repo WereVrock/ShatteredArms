@@ -25,8 +25,18 @@ export class SelectionRingFactory {
   // instance uses this one material instance — no per-soldier material
   // copy exists anywhere in the codebase.
   static getMaterial() {
+    // depthTest: false so a selected soldier's ring stays visible even
+    // when terrain (a hill between the camera and the unit) or another
+    // soldier would otherwise occlude it. Same choice RangeCircleView
+    // makes for the ranged-range ring. The ring is a flat ground decal,
+    // so the through-terrain read is intentional and matches every other
+    // world-space UI overlay in the game.
     return cachedMaterial('selectionRing.mat', () =>
-      new THREE.MeshBasicMaterial({ color: RING_COLOR, side: THREE.DoubleSide }));
+      new THREE.MeshBasicMaterial({
+        color: RING_COLOR,
+        side: THREE.DoubleSide,
+        depthTest: false
+      }));
   }
 
   // Legacy single-mesh variant. Kept so a caller that needs exactly one

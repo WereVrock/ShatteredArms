@@ -1,5 +1,15 @@
 ### Shattered Arms — Changelog
 
+#Columbus Edition 0.6.0
+-Terrain and Biomes
+-Running
+-Spearmen distruption when running and on uneven terrain or when bogged
+-Ai adaptation
+-Main menu animation
+-Music
+-Goblin units and short spearmen
+-Units can now be ordered to leave
+
 # Perseus Edition: 0.5.4
 -Added global highscores
 -Added user specific saves

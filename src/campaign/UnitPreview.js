@@ -46,6 +46,8 @@ import { CombatConfig } from '../config/CombatConfig.js';
 import { MoraleConfig } from '../config/MoraleConfig.js';
 import { raceOf } from '../config/RaceConfig.js';
 import { UnitPower } from '../sim/UnitPower.js';
+import { UnitTypes } from '../config/UnitTypes.js';
+import { ChargobPack } from '../sim/ChargobPack.js';
 
 // Campaign economy: one gold per 10 power, rounded down. Kept as a named
 // constant rather than a magic number so the intent is legible at the
@@ -144,6 +146,36 @@ export function previewPower(typeDef, isUndead, aliveCount, options = {}) {
   return preview.getPower(options).total;
 }
 
+// Synthetic beasts for a chargob preview, so the price and power of the unit
+// include its beasts (one per handlersPerBeast handlers, see ChargobPack).
+function buildChargobBeasts(typeDef, aliveHandlers) {
+  const beastDef = UnitTypes[typeDef.chargob.beastTypeId];
+  if (!beastDef) return [];
+  const hp = maxHpForSoldier(beastDef, false, raceOf(beastDef));
+  const out = [];
+  const n = ChargobPack.beastCount(typeDef, aliveHandlers);
+  for (let i = 0; i < n; i++) {
+    out.push({ unitTypeDef: beastDef, hp, maxHp: hp, state: 'idle', isAlive: () => true });
+  }
+  return out;
+}
+
+// Synthetic hounds for a handler preview, so the price and power of a
+// hound unit include its pack (see HoundPack).
+function buildPreviewCompanions(typeDef, aliveHandlers) {
+  if (typeDef.chargob) return buildChargobBeasts(typeDef, aliveHandlers);
+  const cfg = typeDef.hounds;
+  const houndDef = cfg ? UnitTypes[cfg.typeId] : null;
+  if (!houndDef) return [];
+  const hp = maxHpForSoldier(houndDef, false, raceOf(houndDef));
+  const out = [];
+  const n = aliveHandlers * cfg.perHandler;
+  for (let i = 0; i < n; i++) {
+    out.push({ unitTypeDef: houndDef, hp, maxHp: hp, state: 'idle', isAlive: () => true });
+  }
+  return out;
+}
+
 export function buildPreviewUnit({
   id, typeDef, isUndead, aliveCount, maxCount, teamId
 }) {
@@ -185,6 +217,7 @@ export function buildPreviewUnit({
     teamId,
     isUndead: effectiveUndead,
     soldiers,
+    companions: buildPreviewCompanions(typeDef, aliveSlots),
     getAliveSoldiers() {
       return soldiers.filter(s => s.isAlive());
     },

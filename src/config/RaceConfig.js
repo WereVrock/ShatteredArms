@@ -197,6 +197,26 @@ export const Races = {
     }
   },
 
+  // Chargob race: the savage beasts of the chargob unit. Heavy bite
+  // (the 'bite' weapon's 9 damage x 1.8), full HP, no morale properties,
+  // and a weakness to every kind of spear.
+  chargob: {
+    id: 'chargob',
+    displayName: 'Chargob',
+    supportsUndead: false,
+    damageMultiplier: 1.8,
+    moveSpeedMultiplier: 1.0,
+    hpMultiplier: 1.0,
+    maxMoraleMultiplier: 1.0,
+    fatigueDrainMultiplier: 1.0,
+    unitSizeMultiplier: 1.0,
+    incomingDamageMultipliers: {
+      spear: 1.5,
+      shortSpear: 1.5
+    },
+    properties: []
+  },
+
   // Hobgoblin race. Extracted from the previous "hobgoblinSwordsman
   // tagged as goblin with per-type overrides" pattern. Bodyguards of
   // the Goblin Warlord, plus any future hobgoblin type, use this

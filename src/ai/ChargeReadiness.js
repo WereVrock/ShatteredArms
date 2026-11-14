@@ -21,6 +21,38 @@ import { CombatConfig } from '../config/CombatConfig.js';
 import { toSimSpeed } from '../config/SpeedScale.js';
 import { AIConfig } from '../config/AIConfig.js';
 import { AIDebugLog } from './AIDebugLog.js';
+import { SpearWall } from '../sim/SpearWall.js';
+import { TerrainSense } from './TerrainSense.js';
+
+// The (up to) three soldiers of `pool` nearest to (cx, cz), nearest first.
+// Linear, replacing a map + sort of the whole pool per assessment.
+function nearestThree(pool, cx, cz) {
+  const out = [];
+  const ds = [];
+  for (let i = 0; i < pool.length; i++) {
+    const s = pool[i];
+    const dx = s.pos.x - cx;
+    const dz = s.pos.z - cz;
+    const d = dx * dx + dz * dz;
+    if (out.length === 3 && d >= ds[2]) continue;
+    let j;
+    if (out.length < 3) {
+      out.push(s);
+      ds.push(d);
+      j = out.length - 1;
+    } else {
+      out[2] = s;
+      ds[2] = d;
+      j = 2;
+    }
+    while (j > 0 && ds[j - 1] > ds[j]) {
+      const tmpS = out[j - 1]; out[j - 1] = out[j]; out[j] = tmpS;
+      const tmpD = ds[j - 1]; ds[j - 1] = ds[j]; ds[j] = tmpD;
+      j--;
+    }
+  }
+  return out;
+}
 
 export class ChargeReadiness {
   // attacker: a Soldier from the charging cavalry unit (any one; used for
@@ -122,18 +154,26 @@ export class ChargeReadiness {
 
     // Nearest 3 to the impact point — those are the soldiers who'd
     // physically receive the charge.
-    const nearestDefenders = samplePool
-      .map(s => {
-        const ddx = s.pos.x - defCenter.x;
-        const ddz = s.pos.z - defCenter.z;
-        return { soldier: s, distSq: ddx * ddx + ddz * ddz };
-      })
-      .sort((a, b) => a.distSq - b.distSq)
-      .slice(0, 3)
-      .map(e => e.soldier);
+    const nearestDefenders = nearestThree(samplePool, defCenter.x, defCenter.z);
 
     let bracedCount = 0;
     for (const defender of nearestDefenders) {
+      // Engaged spearmen cannot turn to face us and cannot plant a shaft
+      // while locked in melee — the same rule the corridor sample applies
+      // below (see _countBracedSpearmenInCorridor). Skipping them makes
+      // the AI charge spear lines that are pinned by our own infantry,
+      // which is exactly the moment a flank charge should land.
+      //
+      // The denominator (nearestDefenders.length, used for the majority
+      // bar) is NOT adjusted for skipped defenders, so an engaged
+      // spearman contributes 0 to both bracedCount AND to the threshold
+      // of "how many must brace to refuse". That is the more aggressive
+      // reading: a line with 2 of 3 pinned and 1 free will still charge
+      // unless that 1 is enough to clear the bar on its own. If this
+      // proves too charge-happy in playtest, raise the posture leniency
+      // (AIConfig.posture.press.chargeReadinessLeniency) rather than
+      // adding a second denominator adjustment here.
+      if (defender.isInMelee()) continue;
       if (this._willBeFacingInTime(defender, approachAngle, ticksToContact, cavalryUnit.id)) {
         bracedCount++;
       }
@@ -214,7 +254,12 @@ export class ChargeReadiness {
     const bracedMajorityBar = Math.ceil(nearestDefenders.length * (0.5 + lenient));
     const impactClean = bracedCount < bracedMajorityBar;
     const corridorClean = corridorBracedCount === 0;
-    const willLandClean = impactClean && corridorClean;
+    // Terrain: a charge only works if the cavalry can keep speed over the last
+    // stretch. Mud, water, forest floor and steep uphill refuse it.
+    const laneOk = TerrainSense.chargeLaneClean(
+      worldCtx ? worldCtx.terrain : null, cavCenter, defCenter, dist
+    );
+    const willLandClean = impactClean && corridorClean && laneOk;
 
     AIDebugLog.log('charge', (worldCtx && worldCtx.currentTick) || 0,
       `assess cav=${cavalryUnit.id} target=${targetUnit.id} dist=${dist.toFixed(2)} distToContact=${distToContact.toFixed(2)} ticksToContact=${ticksToContact.toFixed(1)} impact=${bracedCount}/${nearestDefenders.length} corridor=${corridorBracedCount} => clean=${willLandClean}`);
@@ -222,6 +267,7 @@ export class ChargeReadiness {
     let reason;
     if (willLandClean) reason = 'defenders unlikely to face in time';
     else if (!corridorClean) reason = 'spear wall in approach corridor';
+    else if (!laneOk && impactClean) reason = 'terrain slows the charge lane';
     else reason = 'defenders likely to turn and brace before contact';
 
     return {
@@ -465,6 +511,13 @@ export class ChargeReadiness {
     // flag; shattered soldiers carry it too (set before state is
     // assigned in MoraleSystem._updateSoldier).
     if (defender.isRouting || defender.state === 'routing' || defender.state === 'shattered') return false;
+
+    // A spearman whose wall is broken up by the ground cannot brace
+    // (CombatResolutionSystem._isBracedSpearman applies the same rule), so
+    // he must not veto a charge either: cavalry should ride into a bogged
+    // or scattered spear line. Covers the impact sample and the corridor
+    // sample, which both go through here.
+    if (!SpearWall.canBrace(defender)) return false;
 
     let diff = approachAngle - defender.facing;
     diff = ((diff + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;

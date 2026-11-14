@@ -11,6 +11,9 @@ import { isRanged, getRangedRange } from '../config/UnitClasses.js';
 import { SoldierInstancer } from './SoldierInstancer.js';
 import { SettingsStore } from '../ui/settings/SettingsStore.js';
 import * as THREE from 'three';
+import { ActiveTerrain } from '../session/ActiveTerrain.js';
+import { WeatherParticles } from './WeatherParticles.js';
+import { BiomeVisuals } from '../config/BiomeVisuals.js';
 
 // Owns SoldierViews, active projectiles, short-lived effect views, and
 // per-unit range circles, drives per-frame sync from sim state, and
@@ -74,6 +77,12 @@ export class BattleRenderer {
       SettingsStore.get().instancedRendering !== false
     );
     this._selectedUnitsProvider = null;
+
+    // Ambient particle layer. Kind is set per biome in _syncWeather();
+    // null means no particles (most biomes have none).
+    this._weather = new WeatherParticles(sceneSetup.scene);
+    this._currentBiomeId = undefined;
+    this._particleBounds = 120;
   }
 
   setDebugPathUnit(unit) {
@@ -203,6 +212,34 @@ setPlayerTeamId(teamId) {
       this.formationSlotDebugView.setUnits([]);
     }
     this.formationSlotDebugView.sync();
+
+    this._syncWeather(deltaSeconds);
+  }
+
+  // Keeps the ambient particle kind in sync with the active terrain's
+  // dominant biome. Reads ActiveTerrain so no explicit setTerrain call is
+  // needed — the terrain is already set on the sim by the time this runs.
+  _syncWeather(deltaSeconds) {
+    const terrain = ActiveTerrain.get();
+    const biomeId = terrain ? terrain.dominantBiome : null;
+
+    if (biomeId !== this._currentBiomeId) {
+      this._currentBiomeId = biomeId;
+      const v = biomeId ? BiomeVisuals[biomeId] : null;
+      const kind = v && v.particles ? v.particles : null;
+      // Particle cloud bounds: roughly the terrain region's half-extent
+      // so a small map does not waste particles in the void.
+      if (terrain && terrain.region) {
+        const w = terrain.region.maxX - terrain.region.minX;
+        const h = terrain.region.maxZ - terrain.region.minZ;
+        this._particleBounds = Math.max(60, Math.min(220, Math.max(w, h) * 0.4));
+      } else {
+        this._particleBounds = 120;
+      }
+      this._weather.setKind(kind, this._particleBounds);
+    }
+
+    this._weather.update(deltaSeconds, this.sceneSetup.cameraTarget);
   }
 
   // Populates the instanced selection-ring mesh from every alive soldier
@@ -249,10 +286,12 @@ setPlayerTeamId(teamId) {
     let instanceIdx = 0;
     for (const s of allSoldiers) {
       if (s.state === 'dead') continue;
+      if (s.beastDetached) continue;
       const unit = unitsById.get(s.unitId);
       if (!unit || !unit.selected) continue;
 
       _ringDummy.position.x = s.pos.x;
+      _ringDummy.position.y = 0.04 + ActiveTerrain.heightAt(s.pos.x, s.pos.z);
       _ringDummy.position.z = s.pos.z;
       _ringDummy.updateMatrix();
       this._selectionRingMesh.setMatrixAt(instanceIdx, _ringDummy.matrix);

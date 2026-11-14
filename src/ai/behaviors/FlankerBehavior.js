@@ -25,6 +25,8 @@ import { centerTowardUnit, unitTypeOf } from '../behaviorUtils.js';
 import { ChargeReadiness } from '../ChargeReadiness.js';
 import { AIDebugLog } from '../AIDebugLog.js';
 import { WeightedSelect } from '../WeightedSelect.js';
+import { TerrainSense } from '../TerrainSense.js';
+import { Gait } from '../../sim/Gait.js';
 
 // Convergence radius for the pure-cavalry mass charge. When the team has
 // no melee line and no ranged units, all cavalry converge to within this
@@ -490,7 +492,10 @@ export class FlankerBehavior {
     const alive = unit.getAliveSoldiers().filter(s => !s.isRouting);
     if (alive.length === 0) return fallback;
     let speedSum = 0;
-    for (const s of alive) speedSum += s.effectiveMoveSpeed;
+    // Pessimistic: assume everyone who can run is running (the cav when it
+    // charges, the target fleeing, the defenders closing). Foot skeletons
+    // can only walk.
+    for (const s of alive) speedSum += Gait.designSpeed(s, true);
     const avg = speedSum / alive.length;
     return avg * CombatConfig.movement.globalSpeedScale;
   }
@@ -499,7 +504,10 @@ export class FlankerBehavior {
     if (!Array.isArray(enemyUnits) || enemyUnits.length === 0) {
       return { clean: true, reason: 'no-enemies' };
     }
-    const cavSpeed = this._effectiveUnitSpeed(unit);
+    const cavSpeed = this._effectiveUnitSpeed(unit) *
+      TerrainSense.routeSpeedFactor(
+        worldCtx ? worldCtx.terrain : null, unit.getCenter(), target.getCenter(), true
+      );
     if (!(cavSpeed > 0)) return { clean: false, reason: 'no-speed' };
 
     // Target's assumed flee speed, in the same SIM-space units as the
@@ -569,7 +577,10 @@ export class FlankerBehavior {
       const dz = ec.z - tgtCenter.z;
       const threatDist = Math.sqrt(dx * dx + dz * dz);
 
-      const threatSpeed = this._effectiveUnitSpeed(enemy);
+      const threatSpeed = this._effectiveUnitSpeed(enemy) *
+        TerrainSense.routeSpeedFactor(
+          worldCtx ? worldCtx.terrain : null, ec, tgtCenter, isCav
+        );
       if (!(threatSpeed > 0)) continue;
       // Defender closes on the target, and the target closes on the
       // defender — combined speed.
@@ -779,7 +790,14 @@ _decideCommitted(unit, enemyUnits, intent, worldCtx, leniency, context) {
     // Conservative closing rate assumption: 45% of the theoretical sim
     // speed. Empirically the cav in the reference log closed at ~30% of
     // theory; 45% gives some margin without being pathologically long.
-    const assumedClosingSpeed = simSpeed > 0 ? simSpeed * 0.45 : 0;
+    // Terrain slows the approach (mud, water, uphill, forest floor). Without
+    // this the timeout fires mid-charge on bad ground, releases the unit to
+    // seeking, and it re-commits with a fresh timer. The factor is <= 1 and
+    // floored by TerrainSense, so this can only lengthen the timeout.
+    const approachFactor = TerrainSense.routeSpeedFactor(
+      worldCtx.terrain || null, unit.getCenter(), target.getCenter(), true
+    );
+    const assumedClosingSpeed = simSpeed > 0 ? simSpeed * 0.45 * approachFactor : 0;
     const ticksNeeded = assumedClosingSpeed > 0
       ? (measuredDist / assumedClosingSpeed) * CombatConfig.tickRateHz
       : AIConfig.commitTimeoutTicks;
@@ -1071,7 +1089,10 @@ _decideCommitted(unit, enemyUnits, intent, worldCtx, leniency, context) {
     // seeking mid-field, still ~11 units from the spears.
     const arrived = dist < AIConfig.slotArrivalRadius * 2;
     const typeDef = unitTypeOf(unit);
-    const simSpeed = toSimSpeed(typeDef ? typeDef.baseMoveSpeed : 2.6);
+    const regroupFactor = TerrainSense.routeSpeedFactor(
+      worldCtx.terrain || null, center, dest, true
+    );
+    const simSpeed = toSimSpeed(typeDef ? typeDef.baseMoveSpeed : 2.6) * regroupFactor;
     const ticksNeeded = simSpeed > 0 ? (dist / simSpeed) * CombatConfig.tickRateHz : 0;
     const stalled = elapsed > Math.max(AIConfig.regroupHoldTicks, ticksNeeded * 2);
 
@@ -1207,7 +1228,11 @@ _decideCommitted(unit, enemyUnits, intent, worldCtx, leniency, context) {
     // 1) Speed / catchability. Absolute threshold, not map-relative.
     const cavSample = unit.soldiers.find(s => s.isAlive() && !s.isRouting);
     const routerSample = router.soldiers.find(s => s.isAlive() && s.isRouting);
-    const cavSpeed = cavSample ? cavSample.effectiveMoveSpeed : 0;
+    // Cavalry speed is scaled by the terrain between cav and router; only the
+    // cav side is scaled (the router's escape route is unknown), which keeps
+    // the estimate conservative on bad ground.
+    const cavSpeed = (cavSample ? cavSample.effectiveMoveSpeed : 0) *
+      TerrainSense.routeSpeedFactor(worldCtx.terrain || null, cavCenter, routerCenter, true);
     const routerSpeed = routerSample ? routerSample.effectiveMoveSpeed : 0;
     const closing = cavSpeed - routerSpeed;
     if (closing <= 0.01) return { ok: false, reason: 'speed-no-close' };

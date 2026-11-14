@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Terrain Test</title>
+<link rel="icon" href="data:,">
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100%;
+    background: #0e1218; color: #cdd6e2;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    padding: 12px 20px;
+    background: rgba(14, 18, 24, 0.95);
+    border-bottom: 1px solid #2a3544;
+    display: flex; align-items: center; gap: 14px;
+    backdrop-filter: blur(8px);
+  }
+  header h1 {
+    margin: 0; font-size: 16px; letter-spacing: 2px;
+    text-transform: uppercase; color: #d0b878;
+    font-weight: 600;
+  }
+  header .hint { font-size: 11px; color: #6c7c92; }
+  header input[type="number"] {
+    background: #0a0f17; color: #cdd6e2;
+    border: 1px solid #3a4a5e; border-radius: 4px;
+    padding: 5px 8px; width: 90px;
+    font-family: 'Courier New', monospace; font-size: 13px;
+  }
+  header button {
+    background: linear-gradient(180deg, #2a4a1a, #152a0a);
+    color: #d0f0c0;
+    border: 1px solid #4a8a3a; border-radius: 4px;
+    padding: 6px 16px; cursor: pointer;
+    font-family: inherit; font-size: 12px; letter-spacing: 0.6px;
+    font-weight: 600;
+  }
+  header button:hover:not(:disabled) {
+    background: linear-gradient(180deg, #3a5a2a, #203a10);
+    border-color: #6a9a5a;
+  }
+  header button:disabled { opacity: 0.4; cursor: not-allowed; }
+  header #stopBtn {
+    background: linear-gradient(180deg, #6a2a2a, #3a0a0a);
+    border-color: #a04a4a;
+    color: #f0d0d0;
+  }
+  header #stopBtn:hover:not(:disabled) {
+    background: linear-gradient(180deg, #803a3a, #501a1a);
+    border-color: #d06a6a;
+  }
+  /* Scenery boost toggle. Off = default green (same as Generate All).
+     On = distinct amber, so it is obvious when the multiplier is active
+     and a re-render will look different from a normal pass. */
+  header #testModeBtn {
+    background: linear-gradient(180deg, #3a3a2a, #1a1a10);
+    border-color: #6a6a3a;
+    color: #e0d0a0;
+  }
+  header #testModeBtn:hover:not(:disabled) {
+    background: linear-gradient(180deg, #4a4a3a, #2a2a1a);
+    border-color: #8a8a5a;
+  }
+  header #testModeBtn.active {
+    background: linear-gradient(180deg, #8a6a1a, #5a3a0a);
+    border-color: #d0a040;
+    color: #fff0c0;
+    box-shadow: 0 0 12px rgba(208, 168, 64, 0.4);
+  }
+  header .status { font-size: 11px; color: #889; margin-left: auto; }
+
+  #grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(680px, 1fr));
+    gap: 18px;
+    padding: 18px;
+  }
+  .tile {
+    background: #161c26;
+    border: 1px solid #2a3544;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .tile-header {
+    padding: 8px 12px;
+    background: #1a2430;
+    border-bottom: 1px solid #2a3544;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .tile-name {
+    flex: 1 1 auto;
+    font-size: 13px; font-weight: 600;
+    color: #d0b878; letter-spacing: 0.5px;
+  }
+  .tile-seed {
+    font-family: 'Courier New', monospace;
+    font-size: 10px; color: #6c7c92;
+    padding: 2px 6px; border-radius: 3px;
+    background: #0a0f17;
+  }
+  .regen-btn {
+    background: #1e2430; color: #cdd6e2;
+    border: 1px solid #3a4a5e; border-radius: 4px;
+    width: 26px; height: 26px; padding: 0;
+    cursor: pointer; font-size: 14px; line-height: 1;
+  }
+  .regen-btn:hover:not(:disabled) {
+    background: #26354a; border-color: #6a8ac0;
+  }
+  .regen-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .tile-image-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 2px;
+    aspect-ratio: 4 / 3;
+    background: #0a0f17;
+  }
+  .tile-cell {
+    position: relative;
+    background: #0a0f17;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .tile-cell img {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+    cursor: zoom-in;
+    transition: filter 0.15s ease;
+  }
+  .tile-cell img:hover { filter: brightness(1.1); }
+  .tile-cell-label {
+    position: absolute; top: 4px; left: 6px;
+    font-size: 9px; letter-spacing: 1px;
+    text-transform: uppercase; color: rgba(200, 200, 210, 0.65);
+    background: rgba(10, 15, 23, 0.7);
+    padding: 1px 5px; border-radius: 2px;
+    pointer-events: none;
+  }
+  .tile-loading {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(10, 15, 23, 0.85);
+    color: #889; font-size: 12px;
+    letter-spacing: 2px; text-transform: uppercase;
+    flex-direction: column; gap: 10px;
+    z-index: 2;
+  }
+  .tile-loading.hidden { display: none; }
+  .tile-loading .spinner {
+    width: 28px; height: 28px;
+    border: 2px solid #2a3544; border-top-color: #d0b878;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tile.error .tile-loading { color: #f88; }
+
+  #renderCanvas {
+    position: fixed;
+    left: -10000px; top: 0;
+    pointer-events: none;
+  }
+
+  /* --- Lightbox --- */
+  #lightbox {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0, 0, 0, 0.92);
+    display: none;
+    align-items: center; justify-content: center;
+    cursor: zoom-out;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  #lightbox.active {
+    display: flex;
+    opacity: 1;
+  }
+  #lightbox img {
+    max-width: 96vw;
+    max-height: 96vh;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.85);
+    border: 1px solid #3a4a5e;
+    cursor: default;
+  }
+  #lightbox .lb-hint {
+    position: absolute; bottom: 16px;
+    font-size: 11px; color: #6c7c92;
+    letter-spacing: 1.2px; text-transform: uppercase;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Terrain Test</h1>
+  <span class="hint">Base seed:</span>
+  <input id="seedInput" type="number" value="1" min="1" step="1">
+  <button id="generateAllBtn">Generate All</button>
+  <button id="testModeBtn" title="Multiply scenery density 20x so camps are visible in the test shots">Scenery 20×</button>
+  <button id="stopBtn" disabled>Stop</button>
+  <span id="status" class="status"></span>
+</header>
+
+<div id="grid"></div>
+
+<canvas id="renderCanvas"></canvas>
+
+<div id="lightbox" role="dialog" aria-label="Enlarged view">
+  <img id="lightboxImg" alt="">
+  <div class="lb-hint">Click anywhere or press Esc to close</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module" src="./src/test/terrain-test.js"></script>
+</body>
+</html>

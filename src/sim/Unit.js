@@ -55,7 +55,7 @@ const SETTLE_TOLERANCE_STEP = 0.1;
 // formations look like they're being dragged too fast/slow toward their
 // destination relative to how quickly soldiers close the gap to their
 // slot.
-const MARCH_ANCHOR_SPEED = 1.3;
+// (MARCH_ANCHOR_SPEED now lives in UnitMarch.js.)
 
 // Safety margin (world units) kept INSIDE a ranged unit's max range when
 // computing the focus-target standoff — see Unit._focusTargetStandoff.
@@ -65,7 +65,7 @@ const MARCH_ANCHOR_SPEED = 1.3;
 // leaving a small buffer against range-edge flicker (the enemy center
 // drifting a fraction of a unit between the anchor's halt and the next
 // firing tick) and minor formation-alignment error.
-const FOCUS_TARGET_STANDOFF_BUFFER = 1.5;
+// (FOCUS_TARGET_STANDOFF_BUFFER now lives in UnitMarch.js.)
 
 // Elastic pull-back per the "soldiers allowed to lag/catch up slightly"
 // design: the anchor is allowed to advance even if soldiers haven't fully
@@ -73,6 +73,8 @@ const FOCUS_TARGET_STANDOFF_BUFFER = 1.5;
 // being perfectly rigid (perfectly rigid would require the anchor to stall
 // on the single slowest/most-blocked soldier, which risks the whole
 // formation freezing behind one stuck soldier).
+
+// Terrain pathing and march-turn constants live in UnitMarch.js.
 
 export class Unit {
   constructor({ id, teamId, formationFacing, isUndead }) {
@@ -198,6 +200,67 @@ export class Unit {
     // pass-through ends. Engaged units are excluded — a unit in melee
     // holds formation.
     this._spreadFactor = 1.0;
+
+    // Formation bend state, written by FormationSlots. _spineBlend is 0 for the
+    // plain straight block and 1 when slots fully follow the path spine.
+    // _slotTick staggers the per-soldier free-ground re-checks.
+    this._spineBlend = 0;
+    this._slotTick = 0;
+
+    // --- Terrain path following ---
+    // Waypoints the marching anchor follows instead of heading straight for
+    // the destination. Computed lazily in update(); null = go straight.
+    this._path = null;
+    this._pathIdx = 0;
+    this._pathGoal = null;
+    this._pathAgeTicks = 0;
+    this._pathPartial = false;
+    this._mountedCache = undefined;
+    // Facing the order asked for. A detouring march turns back to it on the final leg.
+    this._pathFinalFacing = null;
+    // Double-click direct march: soldiers ignore the block and each follows this
+    // unit-level path (see UnitDirectMarch / SoldierPathFollower).
+    this._directMarch = false;
+    this._directPath = null;
+    this._directPathStamp = 0;
+    // Set by BattleSimulation.setTerrain. While deploying, every instant
+    // move is settled onto free ground (see TerrainPlacement). Null = flat.
+    this.placementTerrain = null;
+
+    // Running. runEnabled is the permission (player button, or the AI each
+    // decision cycle); gaitRunning is what RunSystem actually decided this
+    // tick. _runExhausted is the stamina hysteresis latch. Foot skeletons
+    // can never run (see Gait.unitCanRun).
+    this.runEnabled = RunConfig.defaultEnabled;
+    this.gaitRunning = false;
+    this._runExhausted = false;
+
+    // Crew-served units (see CrewPairing). crewDontWait is the player's
+    // toggle ("don't wait for carriers"); crewDontWaitActive is the
+    // EFFECTIVE value (forced on when every carrier is dead), written each
+    // tick by CrewPairing.update and read by Gait and UnitMarch.
+    // leavingBattle is set once the unit has started withdrawing.
+    this.crewDontWait = false;
+    this.crewDontWaitActive = false;
+    this.leavingBattle = false;
+
+    // Companion soldiers (goblin hounds). NOT part of `soldiers`; see
+    // HoundPack. BattleSimulation.getAllSoldiers() includes them.
+    this.companions = [];
+    // Ticks left in which hounds are not released automatically (set by a
+    // recall).
+    this.houndAutoSuppress = 0;
+
+    // Chargob units (see ChargobPack / ChargobSystem). companionKind tells
+    // the hound and chargob systems whose companions these are. chargobWanted
+    // is the number of beasts still to be goaded into a charge (player button),
+    // chargobHold is true while a beast stands in the line (the handlers then
+    // stay out of the fight).
+    this.companionKind = null;
+    this.chargobWanted = 0;
+    this.chargobHold = false;
+    // True once the player abandoned the beasts (see ChargobAbandon).
+    this.chargobAbandoned = false;
   }
 
   // Count of soldiers alive and not in 'routing' or 'shattered' state.
@@ -237,6 +300,11 @@ finalizeFormationOffsets(cols) {
   }
 
 _layoutGrid(cols, spacing, soldiers = this.soldiers) {
+    if (soldiers.length > 0 && soldiers[0].unitTypeDef.crew) {
+      CrewFormation.layout(this, soldiers, cols, spacing, 'index');
+      this._laidOutCount = soldiers.length;
+      return;
+    }
     const slots = FormationGrid.computeSlots(soldiers.length, cols, spacing);
     for (let i = 0; i < slots.length; i++) {
       soldiers[i].formationOffset = { x: slots[i].x, z: slots[i].z };
@@ -245,7 +313,14 @@ _layoutGrid(cols, spacing, soldiers = this.soldiers) {
     this._laidOutCount = soldiers.length;
   }
 
-  getAliveSoldiers() {
+getAliveSoldiers() {
+    if (Unit._queryCache) {
+      if (this._aliveEpoch === Unit._queryEpoch) return this._aliveCached;
+      const list = this.soldiers.filter(s => s.isAlive());
+      this._aliveEpoch = Unit._queryEpoch;
+      this._aliveCached = list;
+      return list;
+    }
     return this.soldiers.filter(s => s.isAlive());
   }
 
@@ -297,6 +372,110 @@ isDefeated() {
     return true;
   }
 
+  // Player / AI switch for running. Turning it off stops the unit running
+  // immediately; RunSystem decides whether it actually runs otherwise.
+  setRunEnabled(on) {
+    this.runEnabled = !!on;
+    if (!this.runEnabled) this.gaitRunning = false;
+  }
+
+  setCrewDontWait(on) {
+    this.crewDontWait = !!on;
+  }
+
+  // Any unit with living soldiers may leave the battle, at any time, as
+  // long as it has not already started leaving.
+  canLeaveBattle() {
+    return !this.leavingBattle && this.getAliveCount() > 0;
+  }
+
+  // Withdraws the whole unit off the nearest map edge. See
+  // BattleWithdrawal. Only allowed when canLeaveBattle() is true.
+  leaveBattle() {
+    if (!this.canLeaveBattle()) return false;
+    return BattleWithdrawal.withdraw(this);
+  }
+
+  // --- Hounds -------------------------------------------------------------
+
+  // Sends every leashed, living hound at the given enemy unit. Hounds
+  // already attacking keep their own target.
+  unleashHounds(targetUnitId) {
+    let sent = 0;
+    for (const h of this.companions) {
+      if (!h.isAlive() || h.houndMode !== 'leashed') continue;
+      h.houndMode = 'attacking';
+      h.houndTargetUnitId = targetUnitId;
+      h.targetId = null;
+      sent++;
+    }
+    return sent > 0;
+  }
+
+  _houndInRecallRange(h, center) {
+    const r = CombatConfig.hound.recallRange;
+    const dx = h.pos.x - center.x;
+    const dz = h.pos.z - center.z;
+    return dx * dx + dz * dz <= r * r;
+  }
+
+  // True while at least one attacking hound is close enough to be recalled.
+  canRecallHounds() {
+    if (this.companions.length === 0) return false;
+    const center = this.getCenter();
+    for (const h of this.companions) {
+      if (h.isAlive() && h.houndMode === 'attacking' && this._houndInRecallRange(h, center)) return true;
+    }
+    return false;
+  }
+
+  // Recalls the attacking hounds that are within recall range. Hounds out
+  // of range keep attacking.
+  recallHounds() {
+    const center = this.getCenter();
+    let n = 0;
+    for (const h of this.companions) {
+      if (!h.isAlive() || h.houndMode !== 'attacking') continue;
+      if (!this._houndInRecallRange(h, center)) continue;
+      h.houndMode = 'leashed';
+      h.houndTargetUnitId = null;
+      h.targetId = null;
+      h.houndWaypoint = null;
+      if (h.state === 'engaged' || h.state === 'impetuous' || h.state === 'marching') h.state = 'idle';
+      n++;
+    }
+    if (n > 0) this.houndAutoSuppress = CombatConfig.hound.autoUnleashSuppressTicks;
+    return n > 0;
+  }
+
+  // --- Chargob ------------------------------------------------------------
+
+  // { available, wanted, jobs } for the charge button (see ChargobPoke).
+  chargobInfo() {
+    return ChargobPoke.info(this);
+  }
+
+  // Left click +1 / right click -1 beast to goad into a charge.
+  adjustChargeCount(delta) {
+    return ChargobPoke.adjust(this, delta);
+  }
+
+  // True while the unit still has beasts to abandon.
+  canAbandonBeasts() {
+    return ChargobAbandon.canAbandon(this);
+  }
+
+  // One-way: the beasts leave the player's control (see ChargobAbandon).
+  abandonBeasts() {
+    return ChargobAbandon.abandon(this);
+  }
+
+  // { beasts, charging, avg, max }: beasts in the herd, beasts that left it
+  // charging, and the panic average / maximum of the herd (see ChargobPanic).
+  chargobPanicInfo() {
+    return ChargobPanic.summary(this);
+  }
+
   // Number of living soldiers without building an array. Use instead of
   // getAliveSoldiers().length wherever only the count is needed.
   getAliveCount() {
@@ -312,18 +491,27 @@ isDefeated() {
   // array (getAliveSoldiers) and no per-soldier accumulator object. Called
   // from centerTowardUnit on every pair TeamAI's weak-point scorer touches,
   // so the allocation saving is per-pair, per-decision-cycle.
-  getCenter() {
+getCenter() {
+    const cache = Unit._queryCache;
+    if (cache && this._centerEpoch === Unit._queryEpoch) return this._centerCached;
+
+    const soldiers = this.soldiers;
     let sumX = 0;
     let sumZ = 0;
     let count = 0;
-    for (const s of this.soldiers) {
+    for (let i = 0; i < soldiers.length; i++) {
+      const s = soldiers[i];
       if (!s.isAlive()) continue;
       sumX += s.pos.x;
       sumZ += s.pos.z;
       count++;
     }
-    if (count === 0) return { x: 0, z: 0 };
-    return { x: sumX / count, z: sumZ / count };
+    const c = count === 0 ? { x: 0, z: 0 } : { x: sumX / count, z: sumZ / count };
+    if (cache) {
+      this._centerEpoch = Unit._queryEpoch;
+      this._centerCached = c;
+    }
+    return c;
   }
 
   // Ranged power: a single number representing this unit's contribution
@@ -360,6 +548,9 @@ isDefeated() {
 
     const perSoldier = UnitPower.rangedPerSoldierOffense(typeDef);
     if (perSoldier <= 0) return 0;
+
+    // Crew-served: one working weapon per shooter + carrier pair.
+    if (typeDef.crew) return CrewPairing.pairCount(this) * perSoldier;
 
     let count = 0;
     for (const s of this.soldiers) {
@@ -446,9 +637,18 @@ isDefeated() {
   // unit that has arrived (hasActiveOrder false, no focus target) simply
   // keeps its soldiers' formationSlot pinned at the current anchor, which
   // by then equals formationOrigin.
-update(deltaSeconds, unitsById) {
+  update(deltaSeconds, unitsById, terrain = null) {
     const alive = this.getAliveSoldiers();
     if (alive.length === 0) return;
+
+    // Crew-served units: repair shooter/carrier pairs (no-op otherwise).
+    CrewPairing.update(this);
+    // A survivor was re-paired: lay the pairs out again so each pair stands
+    // together (cells keep their side of the formation).
+    if (this._crewRelayout) {
+      this._crewRelayout = false;
+      this._applyExistingShape();
+    }
 
     // Settle-in tolerance ramp. While an order (move or attack) is
     // active, the ramp is held at zero — a marching formation uses its
@@ -538,7 +738,8 @@ update(deltaSeconds, unitsById) {
 
     const preAnchorX = this.formationMarchOrigin.x;
     const preAnchorZ = this.formationMarchOrigin.z;
-    const preCenter = this.getCenter();
+    const debugWatched = Unit.DEBUG_WATCH_UNIT_IDS.has(this.id);
+    const preCenter = debugWatched ? this.getCenter() : null;
 
     if (target) {
       // Self-regulating gate: advance the anchor only if the soldiers who
@@ -551,19 +752,27 @@ update(deltaSeconds, unitsById) {
       // the gap; the anchor resumes the moment they stop falling behind.
       if (!this._followersFallingBehind(alive)) {
         const anchorSpeed = this._computeAnchorSpeed(alive);
-        this._advanceMarchAnchor(target, deltaSeconds, anchorSpeed);
+        // Follow terrain-aware waypoints instead of heading straight at
+        // the destination. With no terrain this returns `target`.
+        const steer = this._steerTarget(target, terrain, deltaSeconds);
+        this._advanceMarchAnchor(steer, deltaSeconds, anchorSpeed);
       }
+      if (this._directMarch) UnitDirectMarch.ensurePath(this, target, terrain);
       this._releaseSoldiersInBreakoffRange(alive, target);
+    } else if ((this._path !== null || this._directPath !== null) &&
+               !this._finishMarchTurn(alive, deltaSeconds)) {
+      this._invalidatePath();
     }
 
-    this._applyFormationAt(this.formationMarchOrigin.x, this.formationMarchOrigin.z, this.formationFacing);
+    FormationSqueeze.update(this, alive, terrain);
+    this._applyFormationAt(this.formationMarchOrigin.x, this.formationMarchOrigin.z, this.formationFacing, terrain, alive, deltaSeconds);
 
     // Record this tick's follower distance for next tick's gate. Measured
     // after _applyFormationAt so the stored value always corresponds to
     // the anchor position the comparison is made against.
     this._followerSlotDist = this._avgFollowerSlotDist(alive);
 
-    if (target && Unit.DEBUG_WATCH_UNIT_IDS.has(this.id)) {
+    if (target && debugWatched) {
       const anchorDx = target.x - this.formationMarchOrigin.x;
       const anchorDz = target.z - this.formationMarchOrigin.z;
       const anchorDist = Math.sqrt(anchorDx * anchorDx + anchorDz * anchorDz);
@@ -598,7 +807,57 @@ update(deltaSeconds, unitsById) {
     }
   }
 
-  // Moves formationMarchOrigin a bounded step toward `target`. Elastic, not
+_invalidatePath() {
+    this._path = null;
+    this._pathIdx = 0;
+    this._pathGoal = null;
+    this._pathAgeTicks = 0;
+    this._pathPartial = false;
+    this._pathFinalFacing = null;
+    this._directMarch = false;
+    this._directPath = null;
+  }
+
+// Rotates formationFacing toward `desired` at MARCH_TURN_RATE. Returns the
+  // angle (radians) still to turn. Differences under the deadband are ignored.
+_turnTowardFacing(desired, deltaSeconds) {
+    return UnitMarch.turnTowardFacing(this, desired, deltaSeconds);
+  }
+
+  // After arrival, keeps turning to the ordered facing. Returns true while a
+  // turn remains, which keeps the path state alive. Never turns a unit in
+  // melee or one that was chasing a target.
+_finishMarchTurn(alive, deltaSeconds) {
+    return UnitMarch.finishMarchTurn(this, alive, deltaSeconds);
+  }
+
+_isMountedUnit() {
+    if (this._mountedCache === undefined) {
+      const td = this.soldiers[0]?.unitTypeDef;
+      this._mountedCache = !!(td && isMounted(td));
+    }
+    return this._mountedCache;
+  }
+
+// Returns the point the anchor should advance toward this tick: the next
+  // waypoint of the (lazily computed) path, or `target` itself when the way
+  // is open or the path is on its final leg.
+_steerTarget(target, terrain, deltaSeconds) {
+    return UnitMarch.steerTarget(this, target, terrain, deltaSeconds);
+  }
+
+_computePath(target, terrain) {
+    UnitMarch.computePath(this, target, terrain);
+  }
+
+// Distance the anchor still has to travel, along the path when there is
+  // one. Used for breakoff release so soldiers are not released just because
+  // a wall puts them 5 units from the target as the crow flies.
+_remainingMarchDist(target) {
+    return UnitMarch.remainingDist(this, target);
+  }
+
+// Moves formationMarchOrigin a bounded step toward `target`. Elastic, not
   // rigid: the anchor advances at a fixed rate regardless of whether every
   // soldier has caught up to their current slot yet (soldiers who lag are
   // still pulled toward wherever the slot currently is by MovementSystem).
@@ -609,19 +868,8 @@ update(deltaSeconds, unitsById) {
   // faster than `anchorSpeed`, which update() caps at the slowest
   // slot-following soldier's actual walk speed. That cap is what stops the
   // formation slots from visibly racing ahead of the soldiers chasing them.
-  _advanceMarchAnchor(target, deltaSeconds, anchorSpeed) {
-    const dx = target.x - this.formationMarchOrigin.x;
-    const dz = target.z - this.formationMarchOrigin.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist <= 0.001) {
-      this.formationMarchOrigin.x = target.x;
-      this.formationMarchOrigin.z = target.z;
-      return;
-    }
-
-    const step = Math.min(dist, anchorSpeed * deltaSeconds);
-    this.formationMarchOrigin.x += (dx / dist) * step;
-    this.formationMarchOrigin.z += (dz / dist) * step;
+_advanceMarchAnchor(target, deltaSeconds, anchorSpeed) {
+    UnitMarch.advanceAnchor(this, target, deltaSeconds, anchorSpeed);
   }
 
   // Standoff distance (world units) the formation anchor halts at when
@@ -631,46 +879,8 @@ update(deltaSeconds, unitsById) {
   // stops in front of the enemy and shoots from there instead of walking
   // into melee. See the focus-target branch of update() for how the value
   // is used.
-  _focusTargetStandoff(focusUnit) {
-    const typeDef = this.soldiers[0]?.unitTypeDef;
-    if (!typeDef) return 0;
-    if (!isRanged(typeDef)) return 0;
-
-    const maxRange = getRangedRange(typeDef);
-    if (maxRange <= 0) return 0;
-
-    // update()'s standoff gate measures anchor-to-enemy-CENTER distance,
-    // but the firing gate (RangedCombatSystem) and target-acquisition
-    // gate (TargetingSystem) both measure soldier-to-SOLDIER distance.
-    // The relationship between the two depends on BOTH formations' depth:
-    //
-    //   anchor ---- ourDepth ----> our front rank
-    //          ... frontToFront ...
-    //   enemy front rank <--- enemyDepth ---- enemy center
-    //
-    //   anchorToCenter = ourDepth + frontToFront + enemyDepth
-    //
-    // Setting frontToFront = maxRange - buffer and solving for
-    // anchorToCenter gives the standoff below. The previous version
-    // subtracted ourDepth and a fixed buffer from maxRange and ignored
-    // enemy depth entirely, which placed the front rank several units
-    // short of its own max range — a player right-clicking a deep enemy
-    // formation saw the archers halt well inside their envelope and had
-    // to close manually to get shots off.
-    //
-    // Both depths are re-derived per call from the current alive count
-    // and persisted column count, so casualties that have already been
-    // reflowed into a shorter formation are reflected without any extra
-    // bookkeeping.
-    const ourDepth = this._formationDepth();
-    const enemyDepth = focusUnit ? focusUnit._formationDepth() : 0;
-
-    const standoff =
-      maxRange + ourDepth + enemyDepth - FOCUS_TARGET_STANDOFF_BUFFER;
-    // Never return 0 or negative: update() treats a standoff of 0 as
-    // "melee, march all the way to the enemy center", which is the exact
-    // behaviour this method exists to prevent.
-    return Math.max(1.0, standoff);
+_focusTargetStandoff(focusUnit) {
+    return UnitMarch.focusTargetStandoff(this, focusUnit);
   }
 
   // Depth (world units) from the formation anchor to the front rank along
@@ -680,6 +890,10 @@ update(deltaSeconds, unitsById) {
   // alive count so a reflowed (casualty-thinned) formation reports its
   // real depth rather than the deployed one.
   _formationDepth() {
+    if (this.soldiers[0]?.unitTypeDef.crew) {
+      const cells = Math.max(1, CrewFormation.cellCount(this.getAliveSoldiers()));
+      return CrewFormation.depth(cells, this.formationCols, this.getFormationSpacing());
+    }
     const alive = Math.max(1, this.getAliveSoldiers().length);
     const cols = Math.max(1, Math.min(this.formationCols || 1, alive));
     const rows = Math.ceil(alive / cols);
@@ -703,7 +917,11 @@ update(deltaSeconds, unitsById) {
   // directly.
   _constrainFormationCols(desiredCols) {
     const typeDef = this.soldiers[0]?.unitTypeDef;
-    const count = Math.max(1, this.getAliveSoldiers().length);
+    const aliveForCols = this.getAliveSoldiers();
+    // Crew units size their grid in cells (pairs), not soldiers.
+    const count = Math.max(1, (typeDef && typeDef.crew)
+      ? CrewFormation.cellCount(aliveForCols)
+      : aliveForCols.length);
     return FormationGrid.constrainColsForDiscipline(
       desiredCols, count, typeDef, CombatConfig
     );
@@ -721,20 +939,22 @@ update(deltaSeconds, unitsById) {
   // still marches at the intended block pace instead of being dragged by
   // its slowest member. If no soldier qualifies (all released, all
   // routers), the anchor falls back to the plain constant.
-  _computeAnchorSpeed(aliveSoldiers) {
-    let minSpeed = Infinity;
-    let counted = 0;
-    for (const s of aliveSoldiers) {
-      if (s.state === 'routing' || s.state === 'shattered') continue;
-      if (this._marchReleased.has(s.id)) continue;
-      if (!(s.effectiveMoveSpeed > 0)) continue;
-      if (s.effectiveMoveSpeed < minSpeed) minSpeed = s.effectiveMoveSpeed;
-      counted++;
-    }
-    if (counted === 0 || !isFinite(minSpeed)) return MARCH_ANCHOR_SPEED;
+_computeAnchorSpeed(aliveSoldiers) {
+    const base = UnitMarch.computeAnchorSpeed(this, aliveSoldiers);
 
-    const scale = (CombatConfig.movement && CombatConfig.movement.globalSpeedScale) || 1;
-    return Math.min(MARCH_ANCHOR_SPEED, minSpeed * scale);
+    // The anchor must follow the slowest follower's REAL pace, which now
+    // depends on the gait. While running the old ceiling would cap the run,
+    // so it is lifted; while walking the old value still caps it.
+    const followers = this._slotFollowers(aliveSoldiers);
+    let slowest = Infinity;
+    for (let i = 0; i < followers.length; i++) {
+      const v = followers[i].actualMoveSpeed;
+      if (v < slowest) slowest = v;
+    }
+    if (!isFinite(slowest)) return base;
+    const paced = slowest * CombatConfig.movement.globalSpeedScale;
+    if (!(paced > 0)) return base;
+    return this.gaitRunning ? paced : Math.min(base, paced);
   }
 
   // Soldiers who are expected to be ACTIVELY walking to their formation
@@ -745,31 +965,16 @@ update(deltaSeconds, unitsById) {
   // routing/shattered flee, impetuous chases a target — and must NOT count
   // toward the falling-behind measurement, or the anchor would freeze
   // every time archers stopped to volley or the front rank made contact.
-  _slotFollowers(aliveSoldiers) {
-    const followers = [];
-    for (const s of aliveSoldiers) {
-      if (this._marchReleased.has(s.id)) continue;
-      if (s.state !== 'idle' && s.state !== 'marching') continue;
-      followers.push(s);
-    }
-    return followers;
+_slotFollowers(aliveSoldiers) {
+    return UnitMarch.slotFollowers(this, aliveSoldiers);
   }
 
   // Average soldier-to-slot distance across this unit's slot-followers.
   // Null when nobody is following (all released, all fighting, all
   // routing) — callers treat null as "no signal", never as "falling
   // behind".
-  _avgFollowerSlotDist(aliveSoldiers) {
-    const followers = this._slotFollowers(aliveSoldiers);
-    if (followers.length === 0) return null;
-
-    let sum = 0;
-    for (const s of followers) {
-      const dx = s.formationSlot.x - s.pos.x;
-      const dz = s.formationSlot.z - s.pos.z;
-      sum += Math.sqrt(dx * dx + dz * dz);
-    }
-    return sum / followers.length;
+_avgFollowerSlotDist(aliveSoldiers) {
+    return UnitMarch.avgFollowerSlotDist(this, aliveSoldiers);
   }
 
   // True when the unit's slot-followers were, on average, FARTHER from
@@ -777,13 +982,8 @@ update(deltaSeconds, unitsById) {
   // block is losing ground to its own anchor. The epsilon absorbs
   // float/measurement noise so a holding unit with settled soldiers does
   // not flap the gate on rounding dust.
-  _followersFallingBehind(aliveSoldiers) {
-    if (this._followerSlotDist === null || this._followerSlotDist === undefined) {
-      return false;
-    }
-    const current = this._avgFollowerSlotDist(aliveSoldiers);
-    if (current === null) return false;
-    return current > this._followerSlotDist + 0.005;
+_followersFallingBehind(aliveSoldiers) {
+    return UnitMarch.followersFallingBehind(this, aliveSoldiers);
   }
 
   // A soldier releases from block-following once the LIVE anchor-to-target
@@ -791,18 +991,8 @@ update(deltaSeconds, unitsById) {
   // distance to target (not each soldier's individual distance) means the
   // whole block breaks off together as it nears the destination/enemy,
   // rather than only the soldiers on the near side peeling off first.
-  _releaseSoldiersInBreakoffRange(aliveSoldiers, target) {
-    const dx = target.x - this.formationMarchOrigin.x;
-    const dz = target.z - this.formationMarchOrigin.z;
-    const anchorDist = Math.sqrt(dx * dx + dz * dz);
-
-    for (const s of aliveSoldiers) {
-      if (this._marchReleased.has(s.id)) continue;
-      const range = s.unitTypeDef.breakoffRange ?? 6.0;
-      if (anchorDist <= range) {
-        this._marchReleased.add(s.id);
-      }
-    }
+_releaseSoldiersInBreakoffRange(aliveSoldiers, target) {
+    UnitMarch.releaseInBreakoffRange(this, aliveSoldiers, target);
   }
 
   // Is this specific soldier still following the block, or has it broken
@@ -901,7 +1091,15 @@ _recomputeShapeForWidth(widthUnits) {
   // around the anchor, forcing every soldier to walk in step with that
   // swing even on a rotate-in-place order.
   _shapeCenterLocalOffset() {
-    const count = this.getAliveSoldiers().length;
+    const aliveList = this.getAliveSoldiers();
+    const count = aliveList.length;
+    if (count > 0 && aliveList[0].unitTypeDef.crew) {
+      const cells = CrewFormation.cellCount(aliveList);
+      return {
+        x: 0,
+        z: CrewFormation.depth(cells, this.formationCols, this.getFormationSpacing()) / 2
+      };
+    }
     if (count === 0) return { x: 0, z: 0 };
     const spacing = this.getFormationSpacing();
     const cols = Math.max(1, Math.min(this.formationCols || 1, count));
@@ -915,6 +1113,14 @@ _recomputeShapeForWidth(widthUnits) {
     const count = alive.length;
     if (count === 0) return;
 
+    if (alive[0].unitTypeDef.crew) {
+      const cells = CrewFormation.cellCount(alive);
+      const crewCols = Math.max(1, Math.min(this.formationCols, cells));
+      CrewFormation.layout(this, alive, crewCols, spacing, 'world');
+      this.currentWidthUnits = crewCols * spacing;
+      this._laidOutCount = count;
+      return;
+    }
     const cols = Math.max(1, Math.min(this.formationCols, count));
     const slots = FormationGrid.computeSlots(count, cols, spacing);
 
@@ -995,42 +1201,8 @@ _recomputeShapeForWidth(widthUnits) {
     this._applyExistingShape();
   }
 
-  _applyFormationAt(originX, originZ, facing) {
-    const cos = Math.cos(facing);
-    const sin = Math.sin(facing);
-    // Lateral formation spread. 1.0 = normal spacing; above 1.0 = the
-    // formation has widened its ranks to open a corridor for a friendly
-    // different-unit soldier passing through (see
-    // MovementSystem._updateUnitSpread). Only the local x-component is
-    // scaled, so the formation's depth and front-line position are
-    // unaffected — the unit opens a corridor without advancing or
-    // recoiling.
-    const spread = this._spreadFactor ?? 1.0;
-    const disorderCtx = this._disorderContext();
-
-    for (const s of this.getAliveSoldiers()) {
-      const off = s.formationOffset;
-      // Low-discipline soldiers stand off their slot by a persistent
-      // per-soldier jitter (see Soldier.disciplineJitter). The jitter is
-      // in the formation's LOCAL space, so the wobble rotates with the
-      // formation — a goblin line turned 90° has the same irregular
-      // silhouette, not a different one. High-discipline soldiers get a
-      // zero jitter and keep a clean grid.
-      //
-      // Spread is applied on top of the jitter, so the corridor opens
-      // from where soldiers already are regardless of how loosely the
-      // formation was arranged.
-      const jit = FormationDisorder.forSoldier(s, disorderCtx);
-      const localX = (off.x + jit.x) * spread;
-      const localZ = off.z + jit.z;
-      const rotatedX = localX * cos + localZ * sin;
-      const rotatedZ = -localX * sin + localZ * cos;
-
-      s.formationSlot = {
-        x: originX + rotatedX,
-        z: originZ + rotatedZ
-      };
-    }
+_applyFormationAt(originX, originZ, facing, terrain = null, alive = null, deltaSeconds = 0) {
+    FormationSlots.apply(this, originX, originZ, facing, terrain, alive, deltaSeconds);
   }
 
   // Move order shape/facing rule:
@@ -1259,6 +1431,7 @@ issueMoveOrder(x, z, facing, options = {}) {
     this.focusTargetUnitId = null;
     this._marchDestination = { x, z };
     this._marchReleased = new Set();
+    this._invalidatePath();
     // Fresh measurement baseline for the falling-behind gate — a new order
     // re-anchored the block at the soldiers, so last order's distances are
     // meaningless for the gate.
@@ -1296,6 +1469,7 @@ issueMoveOrder(x, z, facing, options = {}) {
     // assembling around a slowly advancing anchor. Default behaviour is
     // untouched — the anchor keeps advancing over subsequent ticks.
     if (directMarch) {
+      this._directMarch = true;
       this.formationMarchOrigin = { x, z };
     }
 
@@ -1349,6 +1523,10 @@ issueMoveOrder(x, z, facing, options = {}) {
   issueAttackOrder(enemyUnit) {
     const newTargetId = enemyUnit ? enemyUnit.id : null;
 
+    // An attack order sends the leashed hounds; afterwards only the
+    // handlers follow orders.
+    if (enemyUnit && this.companions.length > 0 && this.companionKind !== 'chargob') this.unleashHounds(enemyUnit.id);
+
     // Same-target short-circuit. Re-issuing an attack order on a target
     // that is already focused is redundant — the anchor is already
     // tracking that unit's live center each tick via update(), and
@@ -1366,6 +1544,7 @@ issueMoveOrder(x, z, facing, options = {}) {
     this.orderTarget = null;
     this._marchDestination = null;
     this._marchReleased = new Set();
+    this._invalidatePath();
     // Fresh measurement baseline for the falling-behind gate (see
     // issueMoveOrder).
     this._followerSlotDist = null;
@@ -1395,7 +1574,7 @@ issueMoveOrder(x, z, facing, options = {}) {
   // what makes the order take effect at all. The march anchor is snapped
   // straight to the destination too, so a subsequent live battle tick
   // doesn't try to animate a "march" from the old deployment spot.
-  issueInstantMoveOrder(x, z, facing) {
+issueInstantMoveOrder(x, z, facing) {
     this.issueMoveOrder(x, z, facing);
     this.formationMarchOrigin = { x, z };
     this._marchDestination = null;
@@ -1403,7 +1582,7 @@ issueMoveOrder(x, z, facing, options = {}) {
     this.orderTarget = null;
 
     const resolvedFacing = this.formationFacing;
-    this._applyFormationAt(x, z, resolvedFacing);
+    this._applyFormationAt(x, z, resolvedFacing, this.placementTerrain, null, 0);
     for (const s of this.getAliveSoldiers()) {
       s.pos.x = s.formationSlot.x;
       s.pos.z = s.formationSlot.z;
@@ -1413,6 +1592,13 @@ issueMoveOrder(x, z, facing, options = {}) {
       s.currentSpeed = 0;
       s.movedThisTick = false;
     }
+
+    // Nothing is cleared for deploying units, so a drop on a lake or a
+    // tree is moved to the nearest free ground.
+    if (this.placementTerrain) TerrainPlacement.settleUnit(this, this.placementTerrain);
+    // Hounds follow a deployment move onto their leash line.
+    HoundPack.snap(this);
+    ChargobPack.snap(this);
   }
 
   // Deployment-time version of issueFormationOrder: recomputes the formation
@@ -1453,6 +1639,10 @@ previewFormationSlots(x, z, facing, widthUnits) {
     // `count` is what the live layout will be built for after the order
     // commits, so ghost and result agree.
     const disorderCtx = this._disorderContext(count);
+    // Crew units show their pairs in the ghost, not loose soldiers.
+    if (alive[0].unitTypeDef.crew) {
+      return CrewFormation.previewSlots(alive, cols, spacing, disorderCtx, x, z, facing);
+    }
 
     const slots = FormationGrid.computeSlots(count, cols, spacing);
     return slots.map((s, i) => {
@@ -1551,6 +1741,7 @@ previewFormationSlots(x, z, facing, widthUnits) {
     this._marchDestination = null;
     this.focusTargetUnitId = null;
     this._marchReleased = new Set();
+    this._invalidatePath();
 
     // Reset the anchor to the best-fit position that reproduces the
     // soldiers' CURRENT positions when slots are recomputed from it.
@@ -1622,12 +1813,27 @@ previewFormationSlots(x, z, facing, widthUnits) {
 // Imported lazily via module-level constant to avoid a circular import between
 // Unit and CombatConfig at load time (Unit is foundational, config is data-only).
 import { CombatConfig, WeaponMatchup } from '../config/CombatConfig.js';
-import { isRanged, getRangedRange } from '../config/UnitClasses.js';
+import { isRanged, getRangedRange, isMounted } from '../config/UnitClasses.js';
 import { AIDebugLog } from '../ai/AIDebugLog.js';
 import { FormationDisorder } from './FormationDisorder.js';
 import { UnitPower } from './UnitPower.js';
 import { FormationGrid } from './FormationGrid.js';
 import { FormationReflow } from './FormationReflow.js';
+import { UnitDirectMarch } from './UnitDirectMarch.js';
+import { SpearWall } from './SpearWall.js';
+import { UnitMarch } from './UnitMarch.js';
+import { TerrainPlacement } from './TerrainPlacement.js';
+import { FormationSqueeze } from './FormationSqueeze.js';
+import { FormationSlots } from './FormationSlots.js';
+import { RunConfig } from '../config/RunConfig.js';
+import { CrewPairing } from './CrewPairing.js';
+import { BattleWithdrawal } from './BattleWithdrawal.js';
+import { HoundPack } from './HoundPack.js';
+import { CrewFormation } from './CrewFormation.js';
+import { ChargobPack } from './ChargobPack.js';
+import { ChargobPoke } from './ChargobPoke.js';
+import { ChargobAbandon } from './ChargobAbandon.js';
+import { ChargobPanic } from './ChargobPanic.js';
 const DISENGAGE_GRACE_TICKS = CombatConfig.disengage.graceTicks;
 
 // Debug watch list. Add unit ids (e.g. 'red-archer-1') from the browser
@@ -1639,3 +1845,18 @@ const DISENGAGE_GRACE_TICKS = CombatConfig.disengage.graceTicks;
 //   import { Unit } from './src/sim/Unit.js';
 //   Unit.DEBUG_WATCH_UNIT_IDS.add('red-archer-1');
 Unit.DEBUG_WATCH_UNIT_IDS = new Set();
+
+// Query cache for the AI pass. While on, getCenter() and getAliveSoldiers()
+// are computed once per unit per epoch. BattleAI.tick wraps the AI pass in
+// begin/end: nothing moves or dies during it, so the values stay exact.
+// Outside the AI pass the cache is off and both methods behave as before.
+// Cached centres are shared objects: treat them as read-only.
+Unit._queryCache = false;
+Unit._queryEpoch = 0;
+Unit.beginQueryCache = function () {
+  Unit._queryEpoch++;
+  Unit._queryCache = true;
+};
+Unit.endQueryCache = function () {
+  Unit._queryCache = false;
+};

@@ -3,6 +3,10 @@ import { Unit } from './Unit.js';
 import { raceOf } from '../config/RaceConfig.js';
 import { CombatConfig } from '../config/CombatConfig.js';
 import { FormationGrid } from './FormationGrid.js';
+import { CrewPairing } from './CrewPairing.js';
+import { HoundPack } from './HoundPack.js';
+import { CrewFormation } from './CrewFormation.js';
+import { ChargobPack } from './ChargobPack.js';
 
 // Builds a Unit with soldiers arranged in a grid formation. isUndead is set
 // once on the Unit and passed down to every soldier — whole-unit trait, not
@@ -41,6 +45,11 @@ static createGridUnit({ id, teamId, unitTypeDef, originX, originZ, facing, rows,
     // no post-deploy reformation.
     const sizeMult = raceOf(unitTypeDef).unitSizeMultiplier;
     const totalSoldiers = Math.max(1, Math.round(rows * cols * sizeMult));
+    if (unitTypeDef.crew) {
+      return FormationFactory._createCrewUnit(unit, {
+        id, teamId, unitTypeDef, originX, originZ, facing, count: totalSoldiers, spacing, isUndead
+      });
+    }
     const baseCols = Math.max(1, Math.ceil(totalSoldiers / rows));
 
     const effectiveCols = FormationGrid.constrainColsForDiscipline(
@@ -71,6 +80,9 @@ static createGridUnit({ id, teamId, unitTypeDef, originX, originZ, facing, rows,
 
     unit.formationOrigin = { x: originX, z: originZ };
     unit.finalizeFormationOffsets(effectiveCols);
+    ChargobPack.attach(unit);
+    CrewPairing.assignInitialRoles(unit);
+    HoundPack.attach(unit);
 
     return unit;
   }
@@ -91,6 +103,12 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
     if (count <= 0) {
       unit.formationOrigin = { x: originX, z: originZ };
       return unit;
+    }
+
+    if (unitTypeDef.crew) {
+      return FormationFactory._createCrewUnit(unit, {
+        id, teamId, unitTypeDef, originX, originZ, facing, count, spacing, isUndead
+      });
     }
 
     // Column count (preferredRows / square-ish default, then the
@@ -131,6 +149,40 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
     // rather than setting the fields manually keeps every caller on the
     // same code path.
     unit.finalizeFormationOffsets(cols);
+    CrewPairing.assignInitialRoles(unit);
+    HoundPack.attach(unit);
+    ChargobPack.attach(unit);
+    return unit;
+  }
+
+  // Crew-served units (goblin megabowman): soldiers are laid out as cells,
+  // one shooter + one carrier per cell (see CrewFormation). `unit` is the
+  // empty Unit the caller already created.
+  static _createCrewUnit(unit, { id, teamId, unitTypeDef, originX, originZ, facing, count, spacing, isUndead }) {
+    unit.formationOrigin = { x: originX, z: originZ };
+    if (count <= 0) return unit;
+
+    for (let i = 0; i < count; i++) {
+      unit.addSoldier(new Soldier({
+        unitId: id, teamId, unitTypeDef, x: originX, z: originZ, facing, isUndead
+      }));
+    }
+
+    const cols = FormationFactory.columnsForCount(count, unitTypeDef);
+    unit.finalizeFormationOffsets(cols);
+    CrewPairing.assignInitialRoles(unit);
+
+    const cos = Math.cos(facing);
+    const sin = Math.sin(facing);
+    for (const s of unit.soldiers) {
+      const lx = s.formationOffset.x;
+      const lz = s.formationOffset.z;
+      s.pos.x = originX + lx * cos + lz * sin;
+      s.pos.z = originZ + (-lx * sin + lz * cos);
+      s.terrainSafeX = s.pos.x;
+      s.terrainSafeZ = s.pos.z;
+      s.formationSlot = { x: s.pos.x, z: s.pos.z };
+    }
     return unit;
   }
 
@@ -149,6 +201,7 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
   // floor. Same rule as the deployment path and the reshape path, so
   // scenario and campaign units deploy identically.
   static columnsForCount(count, unitTypeDef) {
+    if (unitTypeDef.crew) return CrewFormation.columnsForCount(count, unitTypeDef);
     let baseCols;
     if (unitTypeDef.preferredRows && unitTypeDef.preferredRows > 0) {
       baseCols = Math.max(1, Math.ceil(count / unitTypeDef.preferredRows));
@@ -167,6 +220,7 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
     if (count <= 1) return 0;
     const spacing = unitTypeDef.formationSpacing ?? requestedSpacing;
     const cols = FormationFactory.columnsForCount(count, unitTypeDef);
+    if (unitTypeDef.crew) return CrewFormation.depth(Math.ceil(count / 2), cols, spacing);
     const rows = Math.ceil(count / cols);
     return (rows - 1) * spacing;
   }
@@ -179,6 +233,7 @@ static createUnitWithCount({ id, teamId, unitTypeDef, originX, originZ, facing, 
     if (count <= 1) return 0;
     const spacing = unitTypeDef.formationSpacing ?? requestedSpacing;
     const cols = FormationFactory.columnsForCount(count, unitTypeDef);
-    return (Math.min(cols, count) - 1) * spacing;
+    const wide = unitTypeDef.crew ? Math.ceil(count / 2) : count;
+    return (Math.min(cols, wide) - 1) * spacing;
   }
 }
